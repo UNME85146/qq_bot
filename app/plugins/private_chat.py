@@ -150,7 +150,7 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
                 await send_reply_bubbles(
                     bot,
                     event,
-                    "还没存到合适的表情包",
+                    "没有",
                     scope_type="private",
                     reply_config=_config.reply,
                     on_send_error=lambda exc, index, bubble: _record_send_error(

@@ -175,12 +175,17 @@ def is_sticker_request(text: str) -> bool:
     compact = "".join(text.split()).lower()
     if is_sticker_save_request(text):
         return False
+    if "表情" in compact and any(marker in compact for marker in ("有吗", "有没有", "有没", "有表情")):
+        return True
     return any(
         marker in compact
         for marker in (
             "表情包",
             "发个表情",
             "来个表情",
+            "要个表情",
+            "整个表情",
+            "随机表情",
             "发张图",
             "来张图",
             "复读这个表情",

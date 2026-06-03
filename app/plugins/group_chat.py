@@ -256,6 +256,8 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
 
     if is_sticker_request(normalized.text):
         sent = await _send_context_sticker(bot, normalized)
+        if not sent:
+            sent = await _send_context_sticker_missing_text(bot, event, normalized)
         await _conversation_service.record_reply_audit(
             normalized,
             action="reply" if sent else "silence",
@@ -688,6 +690,36 @@ async def _send_context_sticker(bot: Bot, message: NormalizedMessage) -> bool:
         )
         return False
     return True
+
+
+async def _send_context_sticker_missing_text(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+) -> bool:
+    failed = False
+
+    async def on_send_error(exc, index, bubble) -> None:
+        nonlocal failed
+        failed = True
+        await _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_group_reply_failed",
+        )
+
+    await send_reply_bubbles(
+        bot,
+        event,
+        "没有",
+        scope_type="group",
+        reply_config=_config.reply,
+        group_reply_to_message_id=message.message_id,
+        group_at_user_id=message.user_id,
+        on_send_error=on_send_error,
+    )
+    return not failed
 
 
 async def _try_probabilistic_repeat(bot: Bot, message: NormalizedMessage) -> bool:
