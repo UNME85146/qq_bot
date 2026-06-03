@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import random
 
 from pathlib import Path
@@ -76,9 +77,8 @@ async def send_group_image_direct(
     group_id: str,
     file_path: str,
 ) -> Any:
-    normalized_path = Path(file_path).resolve().as_posix()
     message = Message()
-    message += MessageSegment.image(f"file://{normalized_path}")
+    message += MessageSegment.image(_image_segment_file(file_path))
     return await bot.send_group_msg(group_id=int(group_id), message=message)
 
 
@@ -88,10 +88,15 @@ async def send_private_image_direct(
     user_id: str,
     file_path: str,
 ) -> Any:
-    normalized_path = Path(file_path).resolve().as_posix()
     message = Message()
-    message += MessageSegment.image(f"file://{normalized_path}")
+    message += MessageSegment.image(_image_segment_file(file_path))
     return await bot.send_private_msg(user_id=int(user_id), message=message)
+
+
+def _image_segment_file(file_path: str) -> str:
+    data = Path(file_path).read_bytes()
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"base64://{encoded}"
 
 
 def build_group_reply_message(
