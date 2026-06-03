@@ -15,6 +15,8 @@ This public repository is a sanitized code/template export. It intentionally exc
 - Model failure retry, classification, and breaker behavior.
 - Optional image understanding via the configured OpenAI-compatible model.
 - Global sticker asset pool and probability-based repeat behavior.
+- Allowlisted group media is saved to the global sticker pool even while a group is muted.
+- The sticker pool is content-hash deduplicated and capped at 3500 unique assets.
 - SQLite audit/runtime inspection, backup, export, and vacuum tools.
 
 ## Quick Start

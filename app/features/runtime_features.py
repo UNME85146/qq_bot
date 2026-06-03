@@ -11,9 +11,6 @@ from app.features.reminder_service import ReminderService
 from app.features.repeat_service import RepeatService
 from app.features.sticker_service import StickerService
 from app.features.presence_service import BotPresenceService
-from app.model.resilience import ModelResilienceService
-from app.model.llm_client import create_model_client
-from app.model.vision_service import ImageUnderstandingService
 from app.models import AppConfig, NormalizedMessage, ScheduledTask
 from app.safety.safety_service import SafetyService
 from app.storage.repositories import (
@@ -76,26 +73,6 @@ def create_runtime_feature_hub(config: AppConfig) -> RuntimeFeatureHub:
     audit = AuditRepository(config.storage.database_path)
     presence = BotPresenceService(config.presence)
     data_dir = Path(config.storage.database_path).parent
-    model_client = create_model_client(config.model)
-    vision_service = ImageUnderstandingService(
-        model_resilience_service=ModelResilienceService(
-            model_client=model_client,
-            limits=config.limits,
-        )
-    )
-
-    async def classify_image(image_url: str, scope_type: str) -> str:
-        try:
-            result = await vision_service._classify_image(image_url, scope_type=scope_type)  # noqa: SLF001
-        except Exception as exc:
-            await audit.save_system_event(
-                level="ERROR",
-                event="sticker_image_classify_failed",
-                detail=f"{type(exc).__name__}: {str(exc)[:120]}",
-            )
-            return "unknown"
-        return result.category
-
     return RuntimeFeatureHub(
         config=config,
         reminder_service=ReminderService(
@@ -107,7 +84,6 @@ def create_runtime_feature_hub(config: AppConfig) -> RuntimeFeatureHub:
             qq_config=config.qq,
             root_dir=data_dir / "stickers",
             safety_service=safety_service,
-            image_classifier=classify_image,
         ),
         repeat_service=RepeatService(
             message_index_repository=message_index,
@@ -171,6 +147,12 @@ async def _send_due_reminder(bot: Bot, hub: RuntimeFeatureHub, task: ScheduledTa
 async def maybe_save_sticker(hub: RuntimeFeatureHub, message: NormalizedMessage) -> str | None:
     result = await hub.stickers.save_from_message(message)
     if result.asset is not None:
+        await hub.record_system_event(
+            level="INFO",
+            event="sticker_saved",
+            detail=f"asset_id={result.asset.asset_id[:12]}; scope={message.scope_type}/{message.scope_id}",
+            trace_id=message.trace_id,
+        )
         return result.asset.asset_id
     if result.reason not in {"no_media", "no_image_url"}:
         await hub.record_system_event(

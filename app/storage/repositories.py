@@ -898,6 +898,12 @@ class StickerAssetRepository:
             return None
         return await self._get_one("asset_id = ?", (asset_id,))
 
+    async def count(self) -> int:
+        async with aiosqlite.connect(self._database_path) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM sticker_assets")
+            row = await cursor.fetchone()
+        return int(row[0]) if row is not None else 0
+
     async def find_matching(
         self,
         *,

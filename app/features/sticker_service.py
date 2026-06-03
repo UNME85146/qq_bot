@@ -15,6 +15,7 @@ from app.storage.repositories import StickerAssetRepository
 
 
 MAX_STICKER_BYTES = 8 * 1024 * 1024
+MAX_STICKER_ASSETS = 3500
 
 
 @dataclass(frozen=True)
@@ -34,14 +35,18 @@ class StickerService:
         random_fn=None,
         downloader=None,
         image_classifier=None,
+        max_assets: int = MAX_STICKER_ASSETS,
     ) -> None:
         self._repository = repository
         self._permission_service = PermissionService(qq_config)
         self._root_dir = Path(root_dir)
+        self._root_dir.mkdir(parents=True, exist_ok=True)
+        (self._root_dir / "global").mkdir(parents=True, exist_ok=True)
         self._safety_service = safety_service
         self._random = random_fn or random.random
         self._downloader = downloader or _download_bytes
         self._image_classifier = image_classifier
+        self._max_assets = max_assets
 
     async def save_from_message(self, message: NormalizedMessage) -> StickerSaveResult:
         if not self._is_allowed(message):
@@ -50,21 +55,44 @@ class StickerService:
             return StickerSaveResult(None, "no_media")
         if not self._safety_service.can_store_long_term_memory(message.text):
             return StickerSaveResult(None, "sensitive_text")
+        input_safety = self._safety_service.check_input(
+            message.text,
+            scope_type=message.scope_type,
+        )
+        if input_safety.action == "block":
+            return StickerSaveResult(None, f"text_{input_safety.reason}")
 
         image = _first_image_with_url(message.media_items)
         if image is None:
             return StickerSaveResult(None, "no_image_url")
         if self._image_classifier is not None:
-            classification = await self._image_classifier(image.url or "", message.scope_type)
-            if classification != "safe":
+            try:
+                classification = await self._image_classifier(image.url or "", message.scope_type)
+            except Exception:
+                classification = "unknown"
+            if classification in {"adult", "illegal", "violence", "privacy"}:
                 return StickerSaveResult(None, f"image_{classification}")
-        data = await self._downloader(image.url or "")
+        try:
+            data = await self._downloader(image.url or "")
+        except Exception:
+            return StickerSaveResult(None, "download_failed")
         if not data:
             return StickerSaveResult(None, "download_failed")
         if len(data) > MAX_STICKER_BYTES:
             return StickerSaveResult(None, "too_large")
 
         digest = hashlib.sha256(data).hexdigest()
+        url_hash = _hash_text(image.url or image.file or digest)
+        existing_asset = await self._repository.get_by_asset_id(digest)
+        if existing_asset is None:
+            existing_asset = await self._repository.get_by_url_hash(url_hash)
+        if (
+            existing_asset is None
+            and self._max_assets >= 0
+            and await self._repository.count() >= self._max_assets
+        ):
+            return StickerSaveResult(None, "library_full")
+
         suffix = _file_suffix(image.file, image.url)
         sticker_dir = self._root_dir / "global"
         sticker_dir.mkdir(parents=True, exist_ok=True)
@@ -80,7 +108,7 @@ class StickerService:
             source_user_id=message.user_id,
             source_message_id=message.message_id,
             file_path=str(file_path),
-            url_hash=_hash_text(image.url or image.file or digest),
+            url_hash=url_hash,
             media_type=image.sub_type or image.type,
             source_file=image.file,
             tags=tags,
@@ -90,7 +118,8 @@ class StickerService:
 
     async def choose_for_text(self, text: str) -> StickerAsset | None:
         tags = list(extract_query_tags(text))
-        assets = await self._repository.find_matching(query_tags=tags, limit=30)
+        assets = await self._repository.find_matching(query_tags=tags, limit=100)
+        assets = [asset for asset in assets if Path(asset.file_path).exists()]
         if not assets:
             return None
         index = int(self._random() * len(assets))
@@ -144,6 +173,8 @@ def extract_query_tags(text: str) -> set[str]:
 
 def is_sticker_request(text: str) -> bool:
     compact = "".join(text.split()).lower()
+    if is_sticker_save_request(text):
+        return False
     return any(
         marker in compact
         for marker in (
@@ -154,6 +185,24 @@ def is_sticker_request(text: str) -> bool:
             "来张图",
             "复读这个表情",
             "复读这个图",
+        )
+    )
+
+
+def is_sticker_save_request(text: str) -> bool:
+    compact = "".join(text.split()).lower()
+    if not any(marker in compact for marker in ("表情", "图")):
+        return False
+    return any(
+        marker in compact
+        for marker in (
+            "存",
+            "保存",
+            "存下来",
+            "收下",
+            "收起来",
+            "记下",
+            "留着",
         )
     )
 

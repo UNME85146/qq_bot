@@ -265,8 +265,21 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
 
-    if normalized.media_items:
-        await _try_probabilistic_repeat(bot, normalized)
+    if _should_try_probabilistic_repeat(
+        normalized,
+        trigger_reason=trigger_reason,
+        pending_question=pending_question,
+    ):
+        repeated = await _try_probabilistic_repeat(bot, normalized)
+        if repeated:
+            await _conversation_service.record_reply_audit(
+                normalized,
+                action="reply",
+                reason="probabilistic_repeat_sent",
+                model_called=False,
+                safety_blocked=False,
+            )
+            return
 
     if trigger_reason == "nickname_probability_skipped":
         await _conversation_service.handle_group_message(normalized)
@@ -553,6 +566,19 @@ def _is_backfill_request(text: str) -> bool:
     return any(marker in compact for marker in BACKFILL_MARKERS)
 
 
+def _should_try_probabilistic_repeat(
+    normalized: NormalizedMessage,
+    *,
+    trigger_reason: str | None,
+    pending_question,
+) -> bool:
+    if trigger_reason is not None:
+        return False
+    if pending_question is not None:
+        return False
+    return bool(normalized.media_items or normalized.text.strip())
+
+
 def _thread_key(normalized) -> str:
     return normalized.reply_to_message_id or normalized.message_id
 
@@ -672,6 +698,12 @@ async def _try_probabilistic_repeat(bot: Bot, message: NormalizedMessage) -> boo
         message_id=message.message_id,
     )
     if indexed is None:
+        await _conversation_service.record_system_event(
+            level="INFO",
+            event="probabilistic_repeat_skipped",
+            detail=f"group_id={message.group_id}; message_id={message.message_id}; reason=no_candidate",
+            trace_id=message.trace_id,
+        )
         return False
     marked = await _feature_hub.repeats.maybe_mark_repeated(
         trigger_message=message,
@@ -679,6 +711,12 @@ async def _try_probabilistic_repeat(bot: Bot, message: NormalizedMessage) -> boo
         plus_one=False,
     )
     if not marked:
+        await _conversation_service.record_system_event(
+            level="INFO",
+            event="probabilistic_repeat_skipped",
+            detail=f"group_id={message.group_id}; message_id={message.message_id}; kind={indexed.repeat_kind}; reason=presence_or_duplicate",
+            trace_id=message.trace_id,
+        )
         return False
     return await _send_repeat_candidate(bot, indexed, trace_id=message.trace_id)
 

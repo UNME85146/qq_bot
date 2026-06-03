@@ -19,7 +19,7 @@ from app.features.reminder_service import (
     parse_reminder_cancel_id,
 )
 from app.features.runtime_features import create_runtime_feature_hub, maybe_save_sticker
-from app.features.sticker_service import is_sticker_request
+from app.features.sticker_service import is_sticker_request, is_sticker_save_request
 from app.models import GeneratedReply
 from app.plugins.send_helper import send_private_image_direct, send_reply_bubbles
 from app.routing.permission_service import PermissionService
@@ -37,6 +37,7 @@ _rate_limiter = RateLimiter(
     max_group_messages_per_minute=_config.limits.max_group_messages_per_minute,
 )
 _reply_formatter = ReplyFormatter(_config.reply.max_reply_length)
+_recent_private_sticker_assets: dict[str, str] = {}
 
 private_chat = on_message(priority=10, block=False)
 
@@ -53,7 +54,29 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
     if normalized is None:
         return
     if _permission_service.is_private_user_allowed(normalized.user_id):
-        await maybe_save_sticker(_feature_hub, normalized)
+        saved_sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
+        if saved_sticker_asset_id is not None:
+            _recent_private_sticker_assets[normalized.user_id] = saved_sticker_asset_id
+        if is_sticker_save_request(normalized.text):
+            await send_reply_bubbles(
+                bot,
+                event,
+                _sticker_save_reply_text(
+                    saved_sticker_asset_id=saved_sticker_asset_id,
+                    recent_sticker_asset_id=_recent_private_sticker_assets.get(normalized.user_id),
+                ),
+                scope_type="private",
+                reply_config=_config.reply,
+                on_send_error=lambda exc, index, bubble: _record_send_error(
+                    normalized.trace_id,
+                    exc,
+                    index,
+                    "send_private_reply_failed",
+                ),
+            )
+            return
+        if saved_sticker_asset_id is not None and _is_plain_media_message(normalized.text):
+            return
         if is_reminder_command(normalized.text):
             reply_text = await _handle_user_reminder_command(
                 normalized.user_id,
@@ -248,3 +271,19 @@ async def _record_send_error(
         trace_id=trace_id,
     )
     logger.exception("Failed to send private reply bubble: trace_id={}, index={}", trace_id, index)
+
+
+def _is_plain_media_message(text: str) -> bool:
+    return text.strip() in {"[media]", "[image]", "[face]"}
+
+
+def _sticker_save_reply_text(
+    *,
+    saved_sticker_asset_id: str | None,
+    recent_sticker_asset_id: str | None,
+) -> str:
+    if saved_sticker_asset_id is not None:
+        return "存好了"
+    if recent_sticker_asset_id is not None:
+        return "刚才那张已经自动存好了"
+    return "发出来我会自动存，之后说发个表情包就能用了。"

@@ -1,4 +1,4 @@
-\.venv/
+.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -11,7 +11,15 @@ config/config.json
 config/persona_profile.local.json
 config/*.local.json
 
-data/
+data/*.db
+data/*.png
+data/backups/
 logs/
-runtime_artifacts/
+
 AGENTS.md
+runtime_artifacts/
+
+# Local planning, design, runbook, and acceptance documents.
+docs/
+操作手册.md
+QQ真人感虚拟角色Bot_总设计方案.md
