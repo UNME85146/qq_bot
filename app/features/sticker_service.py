@@ -117,8 +117,9 @@ class StickerService:
         return StickerSaveResult(asset, "saved")
 
     async def choose_for_text(self, text: str) -> StickerAsset | None:
-        tags = list(extract_query_tags(text))
-        assets = await self._repository.find_matching(query_tags=tags, limit=100)
+        del text
+        limit = self._max_assets if self._max_assets > 0 else MAX_STICKER_ASSETS
+        assets = await self._repository.find_matching(query_tags=[], limit=limit)
         assets = [asset for asset in assets if Path(asset.file_path).exists()]
         if not assets:
             return None
