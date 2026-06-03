@@ -1,0 +1,61 @@
+{
+  "qq": {
+    "selfId": "BOT_QQ",
+    "rootUserIds": ["ROOT_QQ"],
+    "ownerUserIds": ["ROOT_QQ"],
+    "allowedPrivateUserIds": ["ROOT_QQ"],
+    "allowedGroupIds": ["ALLOWED_GROUP_ID"],
+    "groupMuteControllerUserIds": ["ROOT_QQ"],
+    "memoryAllowedUserIds": ["ROOT_QQ"],
+    "nicknames": ["测试号", "机器人"]
+  },
+  "onebot": {
+    "mode": "ws_reverse",
+    "accessTokenEnv": "QQ_BOT_ONEBOT_TOKEN",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "apiRoot": "http://127.0.0.1:3000"
+  },
+  "model": {
+    "provider": "openai-compatible",
+    "apiKeyEnv": "QQ_BOT_MODEL_API_KEY",
+    "baseUrl": "https://api.example.com/v1",
+    "name": "your-model-name",
+    "timeoutSeconds": 20,
+    "temperature": 0.8,
+    "maxTokens": 300
+  },
+  "persona": {
+    "mode": "fixed_style_profile",
+    "profilePath": "config/persona_profile.local.json",
+    "fallbackProfilePath": "config/persona_profile.example.json"
+  },
+  "reply": {
+    "privateAlwaysReply": true,
+    "groupMentionReply": true,
+    "nicknameReplyProbability": 0.45,
+    "activeWindowSeconds": 120,
+    "minDelayMs": 800,
+    "maxDelayMs": 4000,
+    "maxReplyLength": 300
+  },
+  "limits": {
+    "privateCooldownSeconds": 1.5,
+    "groupCooldownSeconds": 5,
+    "maxUserMessagesPerMinute": 12,
+    "maxGroupMessagesPerMinute": 20,
+    "modelFailureBreakCount": 3,
+    "modelFailureBreakSeconds": 60
+  },
+  "storage": {
+    "databasePath": "data/bot.db",
+    "backupDir": "data/backups",
+    "saveRawModelText": false,
+    "saveRawUserMessage": true
+  },
+  "logging": {
+    "level": "INFO",
+    "logDir": "logs",
+    "sanitizeMessageContent": true
+  }
+}

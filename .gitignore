@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+*.egg-info/
+.deploy/
+
+.env
+config/config.json
+config/persona_profile.local.json
+config/*.local.json
+
+data/*.db
+data/*.png
+data/backups/
+logs/
