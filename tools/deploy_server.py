@@ -16,7 +16,7 @@ def main() -> int:
     parser.add_argument("--host", default="your-server-ip")
     parser.add_argument("--user", default="your-server-user")
     parser.add_argument("--port", type=int, default=22)
-    parser.add_argument("--root", default="/opt/qq_bot")
+    parser.add_argument("--root", default="/home/your-server-user/qq_bot")
     parser.add_argument("--service", default="qq-bot.service")
     parser.add_argument("--napcat-container", default="napcat")
     parser.add_argument("--password-env", default="", help="Optional env var containing the SSH password.")

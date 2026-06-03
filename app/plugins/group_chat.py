@@ -2,20 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from dataclasses import replace
 
 from loguru import logger
-from nonebot import on_message
+from nonebot import get_driver, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 
 from app.adapters.onebot_event_adapter import normalize_group_message_event
 from app.bootstrap import create_conversation_service
 from app.config import load_config
+from app.features.reminder_service import (
+    is_explicit_reminder_request,
+    is_reminder_command,
+)
+from app.features.repeat_service import is_plus_one_text
+from app.features.runtime_features import (
+    create_runtime_feature_hub,
+    maybe_save_sticker,
+    reminder_worker,
+)
+from app.features.sticker_service import is_sticker_request
 from app.models import MediaItem, NormalizedMessage
-from app.plugins.send_helper import send_reply_bubbles
+from app.plugins.send_helper import send_group_image_direct, send_reply_bubbles
 from app.routing.group_mute import (
     is_group_mute_enable_command,
     should_group_mute_wake_for_message,
@@ -33,6 +45,7 @@ from app.storage.repositories import (
 
 _config = load_config(os.getenv("QQ_BOT_CONFIG_PATH", "config/config.json"))
 _conversation_service = create_conversation_service(_config)
+_feature_hub = create_runtime_feature_hub(_config)
 _permission_service = PermissionService(_config.qq)
 _group_mute_repository = GroupMuteStateRepository(_config.storage.database_path)
 _bot_sent_repository = BotSentMessageRepository(_config.storage.database_path)
@@ -79,6 +92,7 @@ BACKFILL_MARKERS = (
     "把上面的问题答一下",
     "上面的问题",
 )
+_reminder_worker_started = False
 
 
 @dataclass(frozen=True)
@@ -92,6 +106,20 @@ class GroupReplyTask:
     include_pending_backfill: bool = False
 
 group_chat = on_message(priority=10, block=False)
+
+
+async def _start_reminder_worker(bot: Bot) -> None:
+    global _reminder_worker_started
+    if _reminder_worker_started:
+        return
+    _reminder_worker_started = True
+    asyncio.create_task(reminder_worker(bot, _feature_hub))
+
+
+try:
+    get_driver().on_bot_connect(_start_reminder_worker)
+except ValueError:
+    pass
 
 
 @group_chat.handle()
@@ -123,6 +151,11 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
 
     _remember_message_media(normalized)
     normalized = _with_referenced_media(normalized)
+    sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
+    await _feature_hub.repeats.index_group_message(
+        normalized,
+        sticker_asset_id=sticker_asset_id,
+    )
 
     pending_question = await _pending_question_service.maybe_enqueue(normalized)
     if pending_question is not None and trigger_reason is None:
@@ -189,6 +222,51 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
                 normalized.user_id,
             )
             return
+
+    if is_reminder_command(normalized.text):
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="silence",
+            reason="group_reminder_disabled",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return
+
+    if is_explicit_reminder_request(normalized.text):
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="silence",
+            reason="group_reminder_disabled",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return
+
+    if is_plus_one_text(normalized.text):
+        repeated = await _try_repeat_from_plus_one_text(bot, normalized)
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="reply" if repeated else "silence",
+            reason="plus_one_repeat_sent" if repeated else "plus_one_repeat_skipped",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return
+
+    if is_sticker_request(normalized.text):
+        sent = await _send_context_sticker(bot, normalized)
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="reply" if sent else "silence",
+            reason="context_sticker_sent" if sent else "context_sticker_missing",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return
+
+    if normalized.media_items:
+        await _try_probabilistic_repeat(bot, normalized)
 
     if trigger_reason == "nickname_probability_skipped":
         await _conversation_service.handle_group_message(normalized)
@@ -409,6 +487,7 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
         )
         if message.group_id is not None:
             _group_last_sent_at[message.group_id] = time.monotonic()
+            _feature_hub.focus_group(message.group_id)
         await _pending_question_service.mark_answered(target)
         if target is not targets[-1] and message.group_id is not None:
             await _wait_group_interval(message.group_id)
@@ -544,6 +623,97 @@ def _single_message_target(normalized):
         pending_id=None,
         is_current=True,
     )
+
+
+async def _try_repeat_from_plus_one_text(bot: Bot, message: NormalizedMessage) -> bool:
+    candidate = await _feature_hub.repeats.candidate_from_plus_one_text(message)
+    if candidate is None:
+        return False
+    marked = await _feature_hub.repeats.maybe_mark_repeated(
+        trigger_message=message,
+        candidate=candidate,
+        plus_one=True,
+    )
+    if not marked:
+        return False
+    return await _send_repeat_candidate(bot, candidate, trace_id=message.trace_id)
+
+
+async def _send_context_sticker(bot: Bot, message: NormalizedMessage) -> bool:
+    if message.group_id is None:
+        return False
+    asset = await _feature_hub.stickers.choose_for_text(message.text)
+    if asset is None:
+        return False
+    try:
+        await asyncio.sleep(_repeat_delay_seconds())
+        await send_group_image_direct(
+            bot,
+            group_id=message.group_id,
+            file_path=asset.file_path,
+        )
+        await _feature_hub.stickers.mark_used(asset.asset_id)
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="send_context_sticker_failed",
+            detail=f"{type(exc).__name__}: {str(exc)[:120]}",
+            trace_id=message.trace_id,
+        )
+        return False
+    return True
+
+
+async def _try_probabilistic_repeat(bot: Bot, message: NormalizedMessage) -> bool:
+    if message.group_id is None:
+        return False
+    indexed = await _feature_hub.repeats.candidate_from_notice(
+        group_id=message.group_id,
+        message_id=message.message_id,
+    )
+    if indexed is None:
+        return False
+    marked = await _feature_hub.repeats.maybe_mark_repeated(
+        trigger_message=message,
+        candidate=indexed,
+        plus_one=False,
+    )
+    if not marked:
+        return False
+    return await _send_repeat_candidate(bot, indexed, trace_id=message.trace_id)
+
+
+async def _send_repeat_candidate(bot: Bot, candidate, *, trace_id: str) -> bool:
+    try:
+        await asyncio.sleep(_repeat_delay_seconds())
+        if candidate.sticker_asset is not None:
+            await send_group_image_direct(
+                bot,
+                group_id=candidate.group_id,
+                file_path=candidate.sticker_asset.file_path,
+            )
+            await _feature_hub.stickers.mark_used(candidate.sticker_asset.asset_id)
+        else:
+            await bot.send_group_msg(group_id=int(candidate.group_id), message=candidate.text)
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="probabilistic_repeat_failed",
+            detail=f"{type(exc).__name__}: {str(exc)[:120]}",
+            trace_id=trace_id,
+        )
+        return False
+    await _conversation_service.record_system_event(
+        level="INFO",
+        event="probabilistic_repeat_sent",
+        detail=f"group_id={candidate.group_id}; message_id={candidate.message_id}; kind={candidate.repeat_kind}",
+        trace_id=trace_id,
+    )
+    return True
+
+
+def _repeat_delay_seconds() -> float:
+    return random.uniform(0.3, 1.2)
 
 
 async def _record_send_error(trace_id: str, exc: Exception, index: int) -> None:

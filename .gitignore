@@ -1,4 +1,4 @@
-.venv/
+\.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -11,7 +11,7 @@ config/config.json
 config/persona_profile.local.json
 config/*.local.json
 
-data/*.db
-data/*.png
-data/backups/
+data/
 logs/
+runtime_artifacts/
+AGENTS.md

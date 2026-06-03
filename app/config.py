@@ -14,6 +14,7 @@ from app.models import (
     ModelConfig,
     OneBotConfig,
     PersonaConfig,
+    PresenceConfig,
     QQConfig,
     ReplyConfig,
     StorageConfig,
@@ -35,6 +36,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     model = raw["model"]
     persona = raw["persona"]
     reply = raw["reply"]
+    presence = raw.get("presence", {})
     limits = raw["limits"]
     storage = raw["storage"]
     logging = raw["logging"]
@@ -84,6 +86,23 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             min_delay_ms=int(reply["minDelayMs"]),
             max_delay_ms=int(reply["maxDelayMs"]),
             max_reply_length=int(reply["maxReplyLength"]),
+        ),
+        presence=PresenceConfig(
+            focus_window_seconds=int(presence.get("focusWindowSeconds", 180)),
+            base_online_probability=float(presence.get("baseOnlineProbability", 0.08)),
+            focused_repeat_probability=float(
+                presence.get("focusedRepeatProbability", 0.35)
+            ),
+            unfocused_repeat_probability=float(
+                presence.get("unfocusedRepeatProbability", 0.05)
+            ),
+            plus_one_repeat_probability=float(
+                presence.get("plusOneRepeatProbability", 0.45)
+            ),
+            sticker_repeat_probability=float(
+                presence.get("stickerRepeatProbability", 0.25)
+            ),
+            text_repeat_probability=float(presence.get("textRepeatProbability", 0.08)),
         ),
         limits=LimitsConfig(
             private_cooldown_seconds=float(limits["privateCooldownSeconds"]),

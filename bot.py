@@ -22,6 +22,7 @@ driver = nonebot.get_driver()
 driver.register_adapter(OneBotV11Adapter)
 nonebot.load_plugin("app.plugins.private_chat")
 nonebot.load_plugin("app.plugins.group_chat")
+nonebot.load_plugin("app.plugins.group_reactions")
 nonebot.load_plugin("app.plugins.owner_commands")
 
 

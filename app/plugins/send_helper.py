@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 
+from pathlib import Path
 from typing import Any
 
 from nonebot.adapters.onebot.v11 import Bot, Event, Message, MessageSegment
@@ -67,6 +68,30 @@ async def send_reply_bubbles(
                 await on_sent(index, bubble, _extract_sent_message_id(result))
         except Exception as exc:
             await on_send_error(exc, index, bubble)
+
+
+async def send_group_image_direct(
+    bot: Bot,
+    *,
+    group_id: str,
+    file_path: str,
+) -> Any:
+    normalized_path = Path(file_path).resolve().as_posix()
+    message = Message()
+    message += MessageSegment.image(f"file://{normalized_path}")
+    return await bot.send_group_msg(group_id=int(group_id), message=message)
+
+
+async def send_private_image_direct(
+    bot: Bot,
+    *,
+    user_id: str,
+    file_path: str,
+) -> Any:
+    normalized_path = Path(file_path).resolve().as_posix()
+    message = Message()
+    message += MessageSegment.image(f"file://{normalized_path}")
+    return await bot.send_private_msg(user_id=int(user_id), message=message)
 
 
 def build_group_reply_message(

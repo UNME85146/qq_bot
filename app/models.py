@@ -116,6 +116,52 @@ class GroupPendingQuestion:
 
 
 @dataclass(frozen=True)
+class ScheduledTask:
+    id: int
+    task_type: str
+    scope_type: str
+    scope_id: str
+    user_id: str
+    user_name: str | None
+    message: str
+    due_at: str
+    status: str
+    created_at: str | None
+    completed_at: str | None
+
+
+@dataclass(frozen=True)
+class StickerAsset:
+    asset_id: str
+    source_scope_type: str
+    source_scope_id: str
+    source_user_id: str
+    source_message_id: str | None
+    file_path: str
+    url_hash: str
+    media_type: str
+    source_file: str | None
+    tags: str
+    risk_level: str
+    usage_count: int
+    created_at: str | None
+    last_used_at: str | None
+
+
+@dataclass(frozen=True)
+class GroupMessageIndex:
+    group_id: str
+    message_id: str
+    user_id: str
+    user_name: str | None
+    text: str
+    media_type: str
+    sticker_asset_id: str | None
+    is_bot: bool
+    created_at: str | None
+
+
+@dataclass(frozen=True)
 class MediaItem:
     type: str
     url: str | None = None
@@ -141,6 +187,17 @@ class ReplyConfig:
     min_delay_ms: int
     max_delay_ms: int
     max_reply_length: int
+
+
+@dataclass(frozen=True)
+class PresenceConfig:
+    focus_window_seconds: int = 180
+    base_online_probability: float = 0.08
+    focused_repeat_probability: float = 0.35
+    unfocused_repeat_probability: float = 0.05
+    plus_one_repeat_probability: float = 0.45
+    sticker_repeat_probability: float = 0.25
+    text_repeat_probability: float = 0.08
 
 
 @dataclass(frozen=True)
@@ -175,6 +232,7 @@ class AppConfig:
     model: ModelConfig
     persona: PersonaConfig
     reply: ReplyConfig
+    presence: PresenceConfig
     limits: LimitsConfig
     storage: StorageConfig
     logging: LoggingConfig

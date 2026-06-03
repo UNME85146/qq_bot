@@ -8,10 +8,13 @@ import aiosqlite
 
 from app.models import (
     GroupContext,
+    GroupMessageIndex,
     GroupMuteState,
     GroupPendingQuestion,
     MemoryProfile,
     PersonaState,
+    ScheduledTask,
+    StickerAsset,
 )
 
 
@@ -624,6 +627,546 @@ class GroupPendingQuestionRepository:
             created_at=row["created_at"],
             answered_at=row["answered_at"],
         )
+
+
+class ScheduledTaskRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def create(
+        self,
+        *,
+        task_type: str,
+        scope_type: str,
+        scope_id: str,
+        user_id: str,
+        user_name: str | None,
+        message: str,
+        due_at: str,
+    ) -> ScheduledTask:
+        async with aiosqlite.connect(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO scheduled_tasks (
+                  task_type,
+                  scope_type,
+                  scope_id,
+                  user_id,
+                  user_name,
+                  message,
+                  due_at,
+                  status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                """,
+                (task_type, scope_type, scope_id, user_id, user_name, message, due_at),
+            )
+            await db.commit()
+            task_id = int(cursor.lastrowid)
+        task = await self.get_by_id(task_id)
+        if task is None:
+            raise RuntimeError("scheduled task insert did not create a row")
+        return task
+
+    async def get_by_id(self, task_id: int) -> ScheduledTask | None:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  id,
+                  task_type,
+                  scope_type,
+                  scope_id,
+                  user_id,
+                  user_name,
+                  message,
+                  due_at,
+                  status,
+                  created_at,
+                  completed_at
+                FROM scheduled_tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._to_scheduled_task(row)
+
+    async def list_pending_due(self, *, now_iso: str, limit: int = 20) -> list[ScheduledTask]:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  id,
+                  task_type,
+                  scope_type,
+                  scope_id,
+                  user_id,
+                  user_name,
+                  message,
+                  due_at,
+                  status,
+                  created_at,
+                  completed_at
+                FROM scheduled_tasks
+                WHERE status = 'pending' AND due_at <= ?
+                ORDER BY due_at ASC, id ASC
+                LIMIT ?
+                """,
+                (now_iso, limit),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_scheduled_task(row) for row in rows]
+
+    async def list_for_user(
+        self,
+        *,
+        user_id: str,
+        include_all: bool = False,
+        limit: int = 10,
+    ) -> list[ScheduledTask]:
+        where = "status = 'pending'"
+        params: list[object] = []
+        if not include_all:
+            where += " AND user_id = ?"
+            params.append(user_id)
+        params.append(limit)
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT
+                  id,
+                  task_type,
+                  scope_type,
+                  scope_id,
+                  user_id,
+                  user_name,
+                  message,
+                  due_at,
+                  status,
+                  created_at,
+                  completed_at
+                FROM scheduled_tasks
+                WHERE {where}
+                ORDER BY due_at ASC, id ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_scheduled_task(row) for row in rows]
+
+    async def cancel(self, *, task_id: int, user_id: str, include_all: bool = False) -> bool:
+        where = "id = ? AND status = 'pending'"
+        params: list[object] = [task_id]
+        if not include_all:
+            where += " AND user_id = ?"
+            params.append(user_id)
+        async with aiosqlite.connect(self._database_path) as db:
+            cursor = await db.execute(
+                f"""
+                UPDATE scheduled_tasks
+                SET status = 'cancelled',
+                    completed_at = datetime('now')
+                WHERE {where}
+                """,
+                tuple(params),
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0) > 0
+
+    async def mark_completed(self, task_id: int) -> None:
+        await self._mark(task_id, "completed")
+
+    async def mark_failed(self, task_id: int) -> None:
+        await self._mark(task_id, "failed")
+
+    async def mark_cancelled(self, task_id: int) -> None:
+        await self._mark(task_id, "cancelled")
+
+    async def _mark(self, task_id: int, status: str) -> None:
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                UPDATE scheduled_tasks
+                SET status = ?,
+                    completed_at = datetime('now')
+                WHERE id = ?
+                """,
+                (status, task_id),
+            )
+            await db.commit()
+
+    def _to_scheduled_task(self, row: aiosqlite.Row) -> ScheduledTask:
+        return ScheduledTask(
+            id=int(row["id"]),
+            task_type=str(row["task_type"]),
+            scope_type=str(row["scope_type"]),
+            scope_id=str(row["scope_id"]),
+            user_id=str(row["user_id"]),
+            user_name=row["user_name"],
+            message=str(row["message"]),
+            due_at=str(row["due_at"]),
+            status=str(row["status"]),
+            created_at=row["created_at"],
+            completed_at=row["completed_at"],
+        )
+
+
+class StickerAssetRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def upsert(
+        self,
+        *,
+        asset_id: str,
+        source_scope_type: str,
+        source_scope_id: str,
+        source_user_id: str,
+        source_message_id: str | None,
+        file_path: str,
+        url_hash: str,
+        media_type: str,
+        source_file: str | None,
+        tags: str,
+        risk_level: str = "safe",
+    ) -> StickerAsset:
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO sticker_assets (
+                  asset_id,
+                  source_scope_type,
+                  source_scope_id,
+                  source_user_id,
+                  source_message_id,
+                  file_path,
+                  url_hash,
+                  media_type,
+                  source_file,
+                  tags,
+                  risk_level
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                  url_hash = excluded.url_hash,
+                  tags = CASE
+                    WHEN excluded.tags != '' THEN excluded.tags
+                    ELSE sticker_assets.tags
+                  END,
+                  risk_level = excluded.risk_level
+                ON CONFLICT(url_hash) DO UPDATE SET
+                  asset_id = excluded.asset_id,
+                  file_path = excluded.file_path,
+                  tags = CASE
+                    WHEN excluded.tags != '' THEN excluded.tags
+                    ELSE sticker_assets.tags
+                  END,
+                  risk_level = excluded.risk_level
+                """,
+                (
+                    asset_id,
+                    source_scope_type,
+                    source_scope_id,
+                    source_user_id,
+                    source_message_id,
+                    file_path,
+                    url_hash,
+                    media_type,
+                    source_file,
+                    tags,
+                    risk_level,
+                ),
+            )
+            await db.commit()
+        asset = await self.get_by_asset_id(asset_id)
+        if asset is None:
+            asset = await self.get_by_url_hash(url_hash)
+        if asset is None:
+            raise RuntimeError("sticker asset upsert did not create a row")
+        return asset
+
+    async def get_by_url_hash(self, url_hash: str) -> StickerAsset | None:
+        return await self._get_one("url_hash = ?", (url_hash,))
+
+    async def get_by_asset_id(self, asset_id: str | None) -> StickerAsset | None:
+        if not asset_id:
+            return None
+        return await self._get_one("asset_id = ?", (asset_id,))
+
+    async def find_matching(
+        self,
+        *,
+        query_tags: list[str],
+        limit: int = 20,
+    ) -> list[StickerAsset]:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  asset_id,
+                  source_scope_type,
+                  source_scope_id,
+                  source_user_id,
+                  source_message_id,
+                  file_path,
+                  url_hash,
+                  media_type,
+                  source_file,
+                  tags,
+                  risk_level,
+                  usage_count,
+                  created_at,
+                  last_used_at
+                FROM sticker_assets
+                WHERE risk_level = 'safe'
+                ORDER BY usage_count ASC, created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        assets = [self._to_sticker_asset(row) for row in rows]
+        if not query_tags:
+            return assets
+        lowered = [tag.lower() for tag in query_tags]
+        matched = [
+            asset
+            for asset in assets
+            if any(tag in asset.tags.lower() for tag in lowered)
+        ]
+        return matched or assets
+
+    async def mark_used(self, asset_id: str) -> None:
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                UPDATE sticker_assets
+                SET usage_count = usage_count + 1,
+                    last_used_at = datetime('now')
+                WHERE asset_id = ?
+                """,
+                (asset_id,),
+            )
+            await db.commit()
+
+    async def _get_one(
+        self,
+        where: str,
+        params: tuple[object, ...],
+    ) -> StickerAsset | None:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT
+                  asset_id,
+                  source_scope_type,
+                  source_scope_id,
+                  source_user_id,
+                  source_message_id,
+                  file_path,
+                  url_hash,
+                  media_type,
+                  source_file,
+                  tags,
+                  risk_level,
+                  usage_count,
+                  created_at,
+                  last_used_at
+                FROM sticker_assets
+                WHERE {where}
+                LIMIT 1
+                """,
+                params,
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._to_sticker_asset(row)
+
+    def _to_sticker_asset(self, row: aiosqlite.Row) -> StickerAsset:
+        return StickerAsset(
+            asset_id=str(row["asset_id"]),
+            source_scope_type=str(row["source_scope_type"]),
+            source_scope_id=str(row["source_scope_id"]),
+            source_user_id=str(row["source_user_id"]),
+            source_message_id=row["source_message_id"],
+            file_path=str(row["file_path"]),
+            url_hash=str(row["url_hash"]),
+            media_type=str(row["media_type"]),
+            source_file=row["source_file"],
+            tags=str(row["tags"]),
+            risk_level=str(row["risk_level"]),
+            usage_count=int(row["usage_count"]),
+            created_at=row["created_at"],
+            last_used_at=row["last_used_at"],
+        )
+
+
+class GroupMessageIndexRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def upsert(
+        self,
+        *,
+        group_id: str,
+        message_id: str,
+        user_id: str,
+        user_name: str | None,
+        text: str,
+        media_type: str = "",
+        sticker_asset_id: str | None = None,
+        is_bot: bool = False,
+    ) -> None:
+        if not group_id or not message_id:
+            return
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO group_message_index (
+                  group_id,
+                  message_id,
+                  user_id,
+                  user_name,
+                  text,
+                  media_type,
+                  sticker_asset_id,
+                  is_bot,
+                  created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(group_id, message_id) DO UPDATE SET
+                  user_name = excluded.user_name,
+                  text = excluded.text,
+                  media_type = CASE
+                    WHEN excluded.media_type != '' THEN excluded.media_type
+                    ELSE group_message_index.media_type
+                  END,
+                  sticker_asset_id = COALESCE(
+                    excluded.sticker_asset_id,
+                    group_message_index.sticker_asset_id
+                  ),
+                  is_bot = excluded.is_bot
+                """
+                ,
+                (
+                    group_id,
+                    message_id,
+                    user_id,
+                    user_name,
+                    text,
+                    media_type,
+                    sticker_asset_id,
+                    int(is_bot),
+                ),
+            )
+            await db.commit()
+
+    async def get(self, group_id: str, message_id: str | None) -> GroupMessageIndex | None:
+        if not message_id:
+            return None
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  message_id,
+                  user_id,
+                  user_name,
+                  text,
+                  media_type,
+                  sticker_asset_id,
+                  is_bot,
+                  created_at
+                FROM group_message_index
+                WHERE group_id = ? AND message_id = ?
+                LIMIT 1
+                """,
+                (group_id, message_id),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._to_group_message_index(row)
+
+    async def recent_repeatable(self, group_id: str) -> GroupMessageIndex | None:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  message_id,
+                  user_id,
+                  user_name,
+                  text,
+                  media_type,
+                  sticker_asset_id,
+                  is_bot,
+                  created_at
+                FROM group_message_index
+                WHERE group_id = ?
+                  AND is_bot = 0
+                  AND (text != '' OR sticker_asset_id IS NOT NULL)
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (group_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._to_group_message_index(row)
+
+    def _to_group_message_index(self, row: aiosqlite.Row) -> GroupMessageIndex:
+        return GroupMessageIndex(
+            group_id=str(row["group_id"]),
+            message_id=str(row["message_id"]),
+            user_id=str(row["user_id"]),
+            user_name=row["user_name"],
+            text=str(row["text"]),
+            media_type=str(row["media_type"]),
+            sticker_asset_id=row["sticker_asset_id"],
+            is_bot=bool(row["is_bot"]),
+            created_at=row["created_at"],
+        )
+
+
+class MessageRepeatStateRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def try_mark_repeated(
+        self,
+        *,
+        group_id: str,
+        source_message_id: str,
+        repeat_kind: str,
+        repeated_by: str,
+        trigger_user_id: str,
+    ) -> bool:
+        async with aiosqlite.connect(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO message_repeat_states (
+                  group_id,
+                  source_message_id,
+                  repeat_kind,
+                  repeated_by,
+                  trigger_user_id
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (group_id, source_message_id, repeat_kind, repeated_by, trigger_user_id),
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0) > 0
 
 
 class AuditRepository:

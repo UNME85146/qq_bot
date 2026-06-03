@@ -722,7 +722,10 @@ class ConversationService:
         )
 
     async def _save_user_message(self, message: NormalizedMessage) -> None:
-        user_content = message.text if self._storage_config.save_raw_user_message else "[hidden]"
+        if self._storage_config.save_raw_user_message:
+            user_content = message.raw_message if message.media_items else message.text
+        else:
+            user_content = "[hidden]"
         await self._conversation_repository.save_conversation(
             trace_id=message.trace_id,
             scope_type=message.scope_type,

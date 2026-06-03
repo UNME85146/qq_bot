@@ -110,6 +110,91 @@ async def init_database(database_path: str | Path) -> None:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_type TEXT NOT NULL DEFAULT 'reminder',
+              scope_type TEXT NOT NULL,
+              scope_id TEXT NOT NULL,
+              user_id TEXT NOT NULL,
+              user_name TEXT,
+              message TEXT NOT NULL,
+              due_at TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              completed_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due
+            ON scheduled_tasks(status, due_at)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sticker_assets (
+              asset_id TEXT PRIMARY KEY,
+              source_scope_type TEXT NOT NULL,
+              source_scope_id TEXT NOT NULL,
+              source_user_id TEXT NOT NULL,
+              source_message_id TEXT,
+              file_path TEXT NOT NULL,
+              url_hash TEXT NOT NULL,
+              media_type TEXT NOT NULL,
+              source_file TEXT,
+              tags TEXT NOT NULL DEFAULT '',
+              risk_level TEXT NOT NULL DEFAULT 'safe',
+              usage_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              last_used_at TEXT,
+              UNIQUE(url_hash)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sticker_assets_usage
+            ON sticker_assets(risk_level, usage_count, last_used_at)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_message_index (
+              group_id TEXT NOT NULL,
+              message_id TEXT NOT NULL,
+              user_id TEXT NOT NULL,
+              user_name TEXT,
+              text TEXT NOT NULL DEFAULT '',
+              media_type TEXT NOT NULL DEFAULT '',
+              sticker_asset_id TEXT,
+              is_bot INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(group_id, message_id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_message_index_recent
+            ON group_message_index(group_id, created_at)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_repeat_states (
+              group_id TEXT NOT NULL,
+              source_message_id TEXT NOT NULL,
+              repeat_kind TEXT NOT NULL,
+              repeated_by TEXT NOT NULL,
+              trigger_user_id TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(group_id, source_message_id, repeat_kind)
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS reply_audits (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               trace_id TEXT NOT NULL,

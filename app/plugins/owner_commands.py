@@ -10,6 +10,13 @@ from app.adapters.onebot_event_adapter import normalize_private_message_event
 from app.bootstrap import create_conversation_service
 from app.config import load_config
 from app.conversation.reply_formatter import ReplyFormatter
+from app.features.reminder_service import (
+    format_reminder_tasks,
+    is_reminder_cancel_command,
+    is_reminder_list_command,
+    parse_reminder_cancel_id,
+)
+from app.features.runtime_features import create_runtime_feature_hub
 from app.model.llm_client import create_model_client
 from app.ops.config_editor import handle_allow_config_command, handle_owner_config_command
 from app.ops.runtime_status import build_owner_status_text
@@ -25,6 +32,7 @@ from app.storage.repositories import (
 _config_path = os.getenv("QQ_BOT_CONFIG_PATH", "config/config.json")
 _config = load_config(_config_path)
 _conversation_service = create_conversation_service(_config)
+_feature_hub = create_runtime_feature_hub(_config)
 _audit_repository = AuditRepository(_config.storage.database_path)
 _group_mute_repository = GroupMuteStateRepository(_config.storage.database_path)
 _memory_repository = MemoryProfileRepository(_config.storage.database_path)
@@ -39,15 +47,19 @@ OWNER_COMMAND_PREFIXES = (
     "/allow",
     "/mute",
     "/owner",
+    "/remind",
 )
 
 
 async def _is_owner_command(event: PrivateMessageEvent) -> bool:
     normalized = normalize_private_message_event(event)
-    return (
-        normalized is not None
-        and _is_known_owner_command(normalized.text)
-    )
+    if normalized is None or not _is_known_owner_command(normalized.text):
+        return False
+    if normalized.text.strip().startswith("/remind"):
+        return _is_reminder_owner_command(normalized.text) and _is_effective_owner(
+            normalized.user_id
+        )
+    return True
 
 
 owner_commands = on_message(rule=_is_owner_command, priority=1, block=True)
@@ -92,6 +104,17 @@ async def _handle_owner_command(bot: Bot, event: PrivateMessageEvent) -> None:
             updated_by=normalized.user_id,
             group_id=group_id,
         )
+    elif is_reminder_list_command(text):
+        reply = await _remind_list_text(
+            user_id=normalized.user_id,
+            include_all=is_root,
+        )
+    elif is_reminder_cancel_command(text):
+        reply = await _remind_cancel_text(
+            text,
+            user_id=normalized.user_id,
+            include_all=is_root,
+        )
     elif text == "/reload profile":
         reply = "这个版本暂时需要重启服务后重新加载画像。"
     elif text == "/ping model":
@@ -120,6 +143,10 @@ def _is_known_owner_command(text: str) -> bool:
         stripped == prefix or stripped.startswith(prefix + " ")
         for prefix in OWNER_COMMAND_PREFIXES
     )
+
+
+def _is_reminder_owner_command(text: str) -> bool:
+    return is_reminder_list_command(text) or is_reminder_cancel_command(text)
 
 
 def _is_root(user_id: str) -> bool:
@@ -179,6 +206,15 @@ def _help_text(*, is_root: bool) -> str:
         "/mute clear - 清空全部群静默状态。用法：/mute clear",
         "/mute clear <group_id> - 清除指定群静默状态。例：/mute clear 123456",
     ]
+    lines.extend(
+        [
+            "",
+            "定时提醒命令：",
+            "/remind <提醒内容> - 创建私聊定时提醒。例：/remind 十分钟后提醒我喝水",
+            "/remind list - 查看待触发提醒。用法：/remind list",
+            "/remind cancel <id> - 取消指定提醒。例：/remind cancel 3",
+        ]
+    )
     if is_root:
         lines.extend(
             [
@@ -261,6 +297,7 @@ async def _owner_text(text: str) -> str:
 def _reload_runtime_config() -> None:
     global _config
     global _conversation_service
+    global _feature_hub
     global _audit_repository
     global _group_mute_repository
     global _memory_repository
@@ -268,12 +305,14 @@ def _reload_runtime_config() -> None:
     new_config = load_config(_config_path)
     _config = new_config
     _conversation_service = create_conversation_service(new_config)
+    _feature_hub = create_runtime_feature_hub(new_config)
     _audit_repository = AuditRepository(new_config.storage.database_path)
     _group_mute_repository = GroupMuteStateRepository(new_config.storage.database_path)
     _memory_repository = MemoryProfileRepository(new_config.storage.database_path)
 
     _reload_private_chat(new_config)
     _reload_group_chat(new_config)
+    _reload_group_reactions(new_config)
 
 
 def _reload_private_chat(new_config) -> None:
@@ -284,6 +323,8 @@ def _reload_private_chat(new_config) -> None:
 
     private_chat._config = new_config  # noqa: SLF001
     private_chat._conversation_service = create_conversation_service(new_config)  # noqa: SLF001
+    if hasattr(private_chat, "_feature_hub"):
+        private_chat._feature_hub = create_runtime_feature_hub(new_config)  # noqa: SLF001
     private_chat._permission_service = PermissionService(new_config.qq)  # noqa: SLF001
     private_chat._rate_limiter = RateLimiter(  # noqa: SLF001
         new_config.limits.group_cooldown_seconds,
@@ -303,6 +344,8 @@ def _reload_group_chat(new_config) -> None:
 
     group_chat._config = new_config  # noqa: SLF001
     group_chat._conversation_service = create_conversation_service(new_config)  # noqa: SLF001
+    if hasattr(group_chat, "_feature_hub"):
+        group_chat._feature_hub = create_runtime_feature_hub(new_config)  # noqa: SLF001
     group_chat._permission_service = PermissionService(new_config.qq)  # noqa: SLF001
     group_chat._group_mute_repository = GroupMuteStateRepository(  # noqa: SLF001
         new_config.storage.database_path
@@ -337,6 +380,21 @@ def _reload_group_chat(new_config) -> None:
         max_user_messages_per_minute=new_config.limits.max_user_messages_per_minute,
         max_group_messages_per_minute=new_config.limits.max_group_messages_per_minute,
     )
+
+
+def _reload_group_reactions(new_config) -> None:
+    try:
+        import app.plugins.group_reactions as group_reactions
+    except Exception:
+        return
+
+    group_reactions._config = new_config  # noqa: SLF001
+    if hasattr(group_reactions, "_feature_hub"):
+        group_reactions._feature_hub = create_runtime_feature_hub(new_config)  # noqa: SLF001
+    if hasattr(group_reactions, "_group_mute_repository"):
+        group_reactions._group_mute_repository = GroupMuteStateRepository(  # noqa: SLF001
+            new_config.storage.database_path
+        )
 
 
 def _memory_text(profile) -> str:
@@ -402,6 +460,27 @@ async def _mute_clear_text(*, updated_by: str, group_id: str | None) -> str:
     )
     target = group_id or "all"
     return f"muted_groups_cleared={cleared} target={target}"
+
+
+async def _remind_list_text(*, user_id: str, include_all: bool) -> str:
+    tasks = await _feature_hub.reminders.list_for_user(
+        user_id=user_id,
+        include_all=include_all,
+        limit=10,
+    )
+    return format_reminder_tasks(tasks)
+
+
+async def _remind_cancel_text(text: str, *, user_id: str, include_all: bool) -> str:
+    task_id = parse_reminder_cancel_id(text)
+    if task_id is None:
+        return "invalid reminder id"
+    cancelled = await _feature_hub.reminders.cancel(
+        task_id=task_id,
+        user_id=user_id,
+        include_all=include_all,
+    )
+    return f"reminder_cancelled={1 if cancelled else 0} id={task_id}"
 
 
 async def _ping_model() -> str:
