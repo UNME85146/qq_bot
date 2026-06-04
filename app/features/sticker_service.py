@@ -208,7 +208,11 @@ def is_sticker_request(text: str) -> bool:
     return any(
         marker in compact
         for marker in (
-            "表情包",
+            "发个表情包",
+            "来个表情包",
+            "要个表情包",
+            "整个表情包",
+            "随机表情包",
             "发个表情",
             "来个表情",
             "要个表情",

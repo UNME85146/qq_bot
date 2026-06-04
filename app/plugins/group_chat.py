@@ -254,7 +254,7 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
 
-    if is_sticker_request(normalized.text):
+    if _is_explicit_group_sticker_request(normalized):
         sent = await _send_context_sticker(bot, normalized)
         if not sent:
             sent = await _send_context_sticker_missing_text(bot, event, normalized)
@@ -377,6 +377,10 @@ def _group_trigger_reason(normalized) -> str | None:
             return "nickname_trigger"
         return "nickname_probability_skipped"
     return None
+
+
+def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:
+    return message.is_at_self and is_sticker_request(message.text)
 
 
 def _apply_reply_thread_trigger(
@@ -504,7 +508,7 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
         if message.group_id is not None:
             _group_last_sent_at[message.group_id] = time.monotonic()
             _feature_hub.focus_group(message.group_id)
-        if reply.send_sticker:
+        if reply.send_sticker and _is_explicit_group_sticker_request(target_message):
             await _send_reply_sticker_if_requested(
                 task.bot,
                 message,
