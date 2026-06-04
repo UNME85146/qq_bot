@@ -1,22 +1,23 @@
-# QQ Bot
+﻿# QQ Bot
 
 A QQ chat bot built with NoneBot2, OneBot V11, SQLite, and an OpenAI-compatible chat model API.
 
-This public repository is a sanitized code/template export. It intentionally excludes private runtime configuration, databases, logs, QR codes, QQ login state, local design documents, and acceptance records.
+This repository is a sanitized public export. It intentionally excludes private runtime configuration, databases, logs, QR codes, QQ login state, local design documents, acceptance records, and any real credentials or account IDs.
 
 ## Features
 
 - Private chat and allowlisted group chat.
-- Root/owner management commands and dynamic allowlist commands.
+- Root/owner permission model with dynamic allowlist commands.
+- Owner private commands including `/help`, `/status`, `/memory`, `/audit last`, `/ping model`, `/allow ...`, `/owner ...`, and `/mute ...`.
 - Private-only scheduled reminders with `/remind`.
-- Group threaded replies using reply + @ mention.
-- Per-group reply queue with serialized group responses.
-- Group mute switch, pending question tracking, and low-risk group context.
+- Group threaded replies using `reply + @ + text` on the first bubble.
+- Per-group outbound queue with at least 1.5 seconds between same-group reply tasks.
+- Group mute switch, pending question tracking, and low-risk group context summaries.
 - Model failure retry, classification, and breaker behavior.
-- Optional image understanding via the configured OpenAI-compatible model.
-- Global sticker asset pool and probability-based repeat behavior.
-- Allowlisted group media is saved to the global sticker pool even while a group is muted.
-- The sticker pool is content-hash deduplicated and capped at 3500 unique assets.
+- Shared model-context enhancement before model calls: long-term memory, group context, quoted message, semantic terms, sticker/image analysis, and reply-mode hints.
+- Optional image understanding via the configured OpenAI-compatible model, with safe fallback when unsupported.
+- Global sticker asset pool with content-hash deduplication, semantic analysis, matching, probability repeat behavior, and a 3500 asset cap.
+- Text repeat only after the same low-risk short text appears consecutively in the same group.
 - SQLite audit/runtime inspection, backup, export, and vacuum tools.
 
 ## Quick Start
@@ -31,7 +32,7 @@ Copy-Item config\config.example.json config\config.json
 Copy-Item config\persona_profile.example.json config\persona_profile.local.json
 ```
 
-Fill `.env`:
+Fill `.env` with private values:
 
 ```env
 QQ_BOT_MODEL_API_KEY=
@@ -79,7 +80,7 @@ Owner/root private commands:
 /audit last
 /reload profile
 /ping model
-/remind <????>
+/remind <natural-language reminder>
 /remind list
 /remind cancel <id>
 /allow private add <qq>

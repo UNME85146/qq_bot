@@ -11,7 +11,7 @@ import httpx
 from app.models import MediaItem, NormalizedMessage, QQConfig, StickerAsset
 from app.routing.permission_service import PermissionService
 from app.safety.safety_service import SafetyService
-from app.storage.repositories import StickerAssetRepository
+from app.storage.repositories import StickerAssetAnalysisRepository, StickerAssetRepository
 
 
 MAX_STICKER_BYTES = 8 * 1024 * 1024
@@ -35,6 +35,7 @@ class StickerService:
         random_fn=None,
         downloader=None,
         image_classifier=None,
+        analysis_repository: StickerAssetAnalysisRepository | None = None,
         max_assets: int = MAX_STICKER_ASSETS,
     ) -> None:
         self._repository = repository
@@ -46,6 +47,7 @@ class StickerService:
         self._random = random_fn or random.random
         self._downloader = downloader or _download_bytes
         self._image_classifier = image_classifier
+        self._analysis_repository = analysis_repository
         self._max_assets = max_assets
 
     async def save_from_message(self, message: NormalizedMessage) -> StickerSaveResult:
@@ -116,12 +118,16 @@ class StickerService:
             tags=tags,
             risk_level="safe",
         )
+        if self._analysis_repository is not None:
+            await self._analysis_repository.ensure_pending(asset.asset_id)
         return StickerSaveResult(asset, "saved")
 
     async def choose_for_text(self, text: str) -> StickerAsset | None:
-        del text
+        query_tags = sorted(extract_query_tags(text))
         limit = self._max_assets if self._max_assets > 0 else MAX_STICKER_ASSETS
-        assets = await self._repository.find_matching(query_tags=[], limit=limit)
+        assets = await self._matching_assets_by_analysis(query_tags, limit=limit)
+        if not assets:
+            assets = await self._repository.find_matching(query_tags=query_tags, limit=limit)
         assets = [asset for asset in assets if Path(asset.file_path).exists()]
         if not assets:
             return None
@@ -138,6 +144,25 @@ class StickerService:
         if message.scope_type == "group" and message.group_id is not None:
             return self._permission_service.is_group_allowed(message.group_id)
         return False
+
+    async def _matching_assets_by_analysis(
+        self,
+        query_tags: list[str],
+        *,
+        limit: int,
+    ) -> list[StickerAsset]:
+        if self._analysis_repository is None:
+            return []
+        asset_ids = await self._analysis_repository.find_matching_asset_ids(
+            query_tags=query_tags,
+            limit=limit,
+        )
+        assets: list[StickerAsset] = []
+        for asset_id in asset_ids:
+            asset = await self._repository.get_by_asset_id(asset_id)
+            if asset is not None and asset.risk_level == "safe":
+                assets.append(asset)
+        return assets
 
 
 def extract_sticker_tags(text: str, media: MediaItem | None = None) -> set[str]:

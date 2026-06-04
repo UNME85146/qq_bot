@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.conversation.conversation_service import ConversationService
+from app.conversation.model_context_service import ModelContextService
 from app.conversation.prompt_builder import PromptBuilder
 from app.conversation.reply_formatter import ReplyFormatter
 from app.memory.group_context_service import GroupContextService
@@ -15,9 +16,12 @@ from app.safety.safety_service import SafetyService
 from app.storage.repositories import (
     AuditRepository,
     ConversationRepository,
+    GroupMessageIndexRepository,
     GroupContextRepository,
+    GroupSemanticTermRepository,
     MemoryProfileRepository,
     PersonaStateRepository,
+    StickerAssetAnalysisRepository,
 )
 
 
@@ -32,11 +36,38 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         model_client=model_client,
         limits=config.limits,
     )
+    conversation_repository = ConversationRepository(config.storage.database_path)
+    memory_service = MemoryService(
+        repository=MemoryProfileRepository(config.storage.database_path),
+        qq_config=config.qq,
+        safety_service=safety_service,
+        audit_repository=audit_repository,
+    )
+    group_context_service = GroupContextService(
+        repository=GroupContextRepository(config.storage.database_path),
+        qq_config=config.qq,
+        safety_service=safety_service,
+    )
+    model_context_service = ModelContextService(
+        conversation_repository=conversation_repository,
+        safety_service=safety_service,
+        memory_service=memory_service,
+        group_context_service=group_context_service,
+        group_semantic_term_repository=GroupSemanticTermRepository(
+            config.storage.database_path
+        ),
+        group_message_index_repository=GroupMessageIndexRepository(
+            config.storage.database_path
+        ),
+        sticker_analysis_repository=StickerAssetAnalysisRepository(
+            config.storage.database_path
+        ),
+    )
     return ConversationService(
         permission_service=PermissionService(config.qq),
         prompt_builder=PromptBuilder(config.persona),
         model_client=model_client,
-        conversation_repository=ConversationRepository(config.storage.database_path),
+        conversation_repository=conversation_repository,
         persona_state_service=PersonaStateService(
             PersonaStateRepository(config.storage.database_path)
         ),
@@ -44,19 +75,11 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         storage_config=config.storage,
         safety_service=safety_service,
         audit_repository=audit_repository,
-        memory_service=MemoryService(
-            repository=MemoryProfileRepository(config.storage.database_path),
-            qq_config=config.qq,
-            safety_service=safety_service,
-            audit_repository=audit_repository,
-        ),
-        group_context_service=GroupContextService(
-            repository=GroupContextRepository(config.storage.database_path),
-            qq_config=config.qq,
-            safety_service=safety_service,
-        ),
+        memory_service=memory_service,
+        group_context_service=group_context_service,
         model_resilience_service=model_resilience_service,
         image_understanding_service=ImageUnderstandingService(
             model_resilience_service=model_resilience_service,
         ),
+        model_context_service=model_context_service,
     )

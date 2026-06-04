@@ -116,6 +116,12 @@ def _db_health(db_path: Path, recent_event_limit: int) -> dict[str, Any]:
                 "group_mute_states",
                 "bot_sent_messages",
                 "group_pending_questions",
+                "scheduled_tasks",
+                "sticker_assets",
+                "sticker_asset_analysis",
+                "group_message_index",
+                "message_repeat_states",
+                "group_semantic_terms",
             ):
                 data["counts"][table] = _safe_count(conn, table)
             data["lastConversationAt"] = _max_created_at(conn, "conversations")

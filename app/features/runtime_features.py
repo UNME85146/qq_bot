@@ -9,7 +9,10 @@ from nonebot.adapters.onebot.v11 import Bot
 
 from app.features.reminder_service import ReminderService
 from app.features.repeat_service import RepeatService
+from app.features.sticker_analysis_service import StickerAnalysisService
 from app.features.sticker_service import StickerService
+from app.model.llm_client import create_model_client
+from app.model.resilience import ModelResilienceService
 from app.features.presence_service import BotPresenceService
 from app.models import AppConfig, NormalizedMessage, ScheduledTask
 from app.safety.safety_service import SafetyService
@@ -19,6 +22,7 @@ from app.storage.repositories import (
     MessageRepeatStateRepository,
     ScheduledTaskRepository,
     StickerAssetRepository,
+    StickerAssetAnalysisRepository,
 )
 
 
@@ -30,6 +34,7 @@ class RuntimeFeatureHub:
         reminder_service: ReminderService,
         sticker_service: StickerService,
         repeat_service: RepeatService,
+        sticker_analysis_service: StickerAnalysisService | None,
         presence_service: BotPresenceService,
         scheduled_task_repository: ScheduledTaskRepository,
         audit_repository: AuditRepository,
@@ -38,6 +43,7 @@ class RuntimeFeatureHub:
         self.reminders = reminder_service
         self.stickers = sticker_service
         self.repeats = repeat_service
+        self.sticker_analysis = sticker_analysis_service
         self.presence = presence_service
         self.scheduled_tasks = scheduled_task_repository
         self.audit_repository = audit_repository
@@ -68,11 +74,17 @@ def create_runtime_feature_hub(config: AppConfig) -> RuntimeFeatureHub:
     )
     scheduled_tasks = ScheduledTaskRepository(config.storage.database_path)
     stickers = StickerAssetRepository(config.storage.database_path)
+    sticker_analysis_repository = StickerAssetAnalysisRepository(config.storage.database_path)
     message_index = GroupMessageIndexRepository(config.storage.database_path)
     repeat_states = MessageRepeatStateRepository(config.storage.database_path)
     audit = AuditRepository(config.storage.database_path)
     presence = BotPresenceService(config.presence)
     data_dir = Path(config.storage.database_path).parent
+    model_client = create_model_client(config.model)
+    model_resilience = ModelResilienceService(
+        model_client=model_client,
+        limits=config.limits,
+    )
     return RuntimeFeatureHub(
         config=config,
         reminder_service=ReminderService(
@@ -84,6 +96,7 @@ def create_runtime_feature_hub(config: AppConfig) -> RuntimeFeatureHub:
             qq_config=config.qq,
             root_dir=data_dir / "stickers",
             safety_service=safety_service,
+            analysis_repository=sticker_analysis_repository,
         ),
         repeat_service=RepeatService(
             message_index_repository=message_index,
@@ -92,6 +105,10 @@ def create_runtime_feature_hub(config: AppConfig) -> RuntimeFeatureHub:
             presence_service=presence,
             safety_service=safety_service,
             qq_config=config.qq,
+        ),
+        sticker_analysis_service=StickerAnalysisService(
+            repository=sticker_analysis_repository,
+            model_resilience_service=model_resilience,
         ),
         presence_service=presence,
         scheduled_task_repository=scheduled_tasks,
@@ -153,6 +170,8 @@ async def maybe_save_sticker(hub: RuntimeFeatureHub, message: NormalizedMessage)
             detail=f"asset_id={result.asset.asset_id[:12]}; scope={message.scope_type}/{message.scope_id}",
             trace_id=message.trace_id,
         )
+        if hub.sticker_analysis is not None:
+            asyncio.create_task(_analyze_sticker_asset(hub, result.asset, message.trace_id))
         return result.asset.asset_id
     if result.reason not in {"no_media", "no_image_url"}:
         await hub.record_system_event(
@@ -162,3 +181,29 @@ async def maybe_save_sticker(hub: RuntimeFeatureHub, message: NormalizedMessage)
             trace_id=message.trace_id,
         )
     return None
+
+
+async def _analyze_sticker_asset(hub: RuntimeFeatureHub, asset, trace_id: str | None) -> None:
+    try:
+        analysis = await hub.sticker_analysis.ensure_analyzed(asset) if hub.sticker_analysis else None
+    except Exception as exc:
+        await hub.record_system_event(
+            level="ERROR",
+            event="sticker_analysis_failed",
+            detail=f"asset_id={asset.asset_id[:12]}; {type(exc).__name__}: {str(exc)[:120]}",
+            trace_id=trace_id,
+        )
+        return
+    if analysis is None:
+        return
+    event = (
+        "sticker_analysis_completed"
+        if analysis.analysis_status == "completed"
+        else "sticker_analysis_failed"
+    )
+    await hub.record_system_event(
+        level="INFO" if analysis.analysis_status == "completed" else "ERROR",
+        event=event,
+        detail=f"asset_id={asset.asset_id[:12]}; safety={analysis.safety_category}",
+        trace_id=trace_id,
+    )

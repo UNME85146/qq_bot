@@ -130,7 +130,7 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
             )
             return
         if is_sticker_request(normalized.text):
-            asset = await _feature_hub.stickers.choose_for_text(normalized.text)
+            asset = await _choose_safe_sticker(normalized.text)
             if asset is not None:
                 try:
                     await send_private_image_direct(
@@ -212,6 +212,7 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
         reply.text,
         scope_type="private",
         reply_config=_config.reply,
+        reply_mode=reply.reply_mode,
         on_send_error=lambda exc, index, bubble: _record_send_error(
             normalized.trace_id,
             exc,
@@ -219,6 +220,13 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
             "send_private_reply_failed",
         ),
     )
+    if reply.send_sticker:
+        await _send_reply_sticker_if_requested(
+            bot,
+            normalized.user_id,
+            reply.sticker_intent or normalized.text,
+            trace_id=normalized.trace_id,
+        )
 
 
 _REMINDER_CREATE_HELP_TEXT = "要提醒什么？比如：十分钟后提醒我喝水"
@@ -287,3 +295,40 @@ def _sticker_save_reply_text(
     if recent_sticker_asset_id is not None:
         return "刚才那张已经自动存好了"
     return "发出来我会自动存，之后说发个表情包就能用了。"
+
+
+async def _send_reply_sticker_if_requested(
+    bot: Bot,
+    user_id: str,
+    intent_text: str,
+    *,
+    trace_id: str,
+) -> bool:
+    asset = await _choose_safe_sticker(intent_text)
+    if asset is None:
+        return False
+    try:
+        await send_private_image_direct(
+            bot,
+            user_id=user_id,
+            file_path=asset.file_path,
+        )
+        await _feature_hub.stickers.mark_used(asset.asset_id)
+    except Exception as exc:
+        await _record_send_error(trace_id, exc, 0, "send_private_sticker_failed")
+        return False
+    return True
+
+
+async def _choose_safe_sticker(intent_text: str):
+    asset = await _feature_hub.stickers.choose_for_text(intent_text)
+    if asset is None:
+        return None
+    if _feature_hub.sticker_analysis is not None:
+        analysis = await _feature_hub.sticker_analysis.ensure_analyzed(asset)
+        if (
+            analysis is not None
+            and analysis.safety_category in {"adult", "illegal", "violence", "privacy"}
+        ):
+            return None
+    return asset

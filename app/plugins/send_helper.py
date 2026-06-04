@@ -16,18 +16,27 @@ from app.models import ReplyConfig
 GROUP_BUBBLE_INTERVAL_SECONDS = 1.5
 
 
-def build_reply_bubbles(text: str, *, scope_type: str, max_length: int) -> list[str]:
+def build_reply_bubbles(
+    text: str,
+    *,
+    scope_type: str,
+    max_length: int,
+    reply_mode: str = "short",
+) -> list[str]:
     if scope_type == "private":
-        return split_reply_messages(text)
+        return split_reply_messages(text, reply_mode=reply_mode)
 
-    limit = 3
-    text = truncate_naturally(text, max_length)
-    bubbles = split_reply_messages(text)
+    limit = 3 if reply_mode == "short" else 6
+    effective_max_length = max_length
+    if reply_mode in {"long_text", "code_block"}:
+        effective_max_length = max(max_length * 4, 1200)
+    text = truncate_naturally(text, effective_max_length, reply_mode=reply_mode)
+    bubbles = split_reply_messages(text, reply_mode=reply_mode)
     selected: list[str] = []
     total = 0
     for bubble in bubbles:
         extra = len(bubble) + (1 if selected else 0)
-        if total + extra > max_length:
+        if total + extra > effective_max_length:
             break
         selected.append(bubble)
         total += extra
@@ -47,11 +56,13 @@ async def send_reply_bubbles(
     group_reply_to_message_id: str | None = None,
     group_at_user_id: str | None = None,
     on_sent=None,
+    reply_mode: str = "short",
 ) -> None:
     bubbles = build_reply_bubbles(
         text,
         scope_type=scope_type,
         max_length=reply_config.max_reply_length,
+        reply_mode=reply_mode,
     )
     for index, bubble in enumerate(bubbles):
         if index > 0:

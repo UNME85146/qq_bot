@@ -63,8 +63,10 @@ def main() -> int:
             "group_pending_questions",
             "scheduled_tasks",
             "sticker_assets",
+            "sticker_asset_analysis",
             "group_message_index",
             "message_repeat_states",
+            "group_semantic_terms",
         ):
             try:
                 data["counts"][table] = table_count(db_path, table)

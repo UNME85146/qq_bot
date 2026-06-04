@@ -44,8 +44,10 @@ def build_owner_status_text(config) -> str:
                 "group_pending_questions",
                 "scheduled_tasks",
                 "sticker_assets",
+                "sticker_asset_analysis",
                 "group_message_index",
                 "message_repeat_states",
+                "group_semantic_terms",
             )
         }
         lines.append(

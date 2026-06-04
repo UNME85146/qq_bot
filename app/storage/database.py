@@ -154,8 +154,50 @@ async def init_database(database_path: str | Path) -> None:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS sticker_asset_analysis (
+              asset_id TEXT PRIMARY KEY,
+              intent_summary TEXT NOT NULL DEFAULT '',
+              emotion_tags TEXT NOT NULL DEFAULT '',
+              scene_tags TEXT NOT NULL DEFAULT '',
+              text_tags TEXT NOT NULL DEFAULT '',
+              reply_usage_hint TEXT NOT NULL DEFAULT '',
+              safety_category TEXT NOT NULL DEFAULT 'unknown',
+              analysis_status TEXT NOT NULL DEFAULT 'pending',
+              analyzed_at TEXT,
+              updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY(asset_id) REFERENCES sticker_assets(asset_id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sticker_asset_analysis_status
+            ON sticker_asset_analysis(analysis_status, safety_category)
+            """
+        )
+        await db.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_sticker_assets_usage
             ON sticker_assets(risk_level, usage_count, last_used_at)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_semantic_terms (
+              group_id TEXT NOT NULL,
+              term TEXT NOT NULL,
+              description TEXT NOT NULL,
+              source TEXT NOT NULL DEFAULT 'rule',
+              confidence REAL NOT NULL DEFAULT 0.5,
+              updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(group_id, term)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_semantic_terms_group
+            ON group_semantic_terms(group_id, updated_at)
             """
         )
         await db.execute(

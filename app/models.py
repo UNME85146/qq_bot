@@ -149,6 +149,30 @@ class StickerAsset:
 
 
 @dataclass(frozen=True)
+class StickerAssetAnalysis:
+    asset_id: str
+    intent_summary: str
+    emotion_tags: str
+    scene_tags: str
+    text_tags: str
+    reply_usage_hint: str
+    safety_category: str
+    analysis_status: str
+    analyzed_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class GroupSemanticTerm:
+    group_id: str
+    term: str
+    description: str
+    source: str
+    confidence: float
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
 class GroupMessageIndex:
     group_id: str
     message_id: str
@@ -278,3 +302,6 @@ class GeneratedReply:
     safety_level: str = "pass"
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    reply_mode: str = "short"
+    send_sticker: bool = False
+    sticker_intent: str = ""

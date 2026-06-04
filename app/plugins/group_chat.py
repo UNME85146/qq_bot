@@ -486,6 +486,7 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             reply_config=_config.reply,
             group_reply_to_message_id=target.message_id,
             group_at_user_id=target.user_id,
+            reply_mode=reply.reply_mode,
             on_send_error=lambda exc, index, bubble: _record_send_error(
                 message.trace_id,
                 exc,
@@ -503,6 +504,12 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
         if message.group_id is not None:
             _group_last_sent_at[message.group_id] = time.monotonic()
             _feature_hub.focus_group(message.group_id)
+        if reply.send_sticker:
+            await _send_reply_sticker_if_requested(
+                task.bot,
+                message,
+                reply.sticker_intent or target.question_text,
+            )
         await _pending_question_service.mark_answered(target)
         if target is not targets[-1] and message.group_id is not None:
             await _wait_group_interval(message.group_id)
@@ -670,7 +677,7 @@ async def _try_repeat_from_plus_one_text(bot: Bot, message: NormalizedMessage) -
 async def _send_context_sticker(bot: Bot, message: NormalizedMessage) -> bool:
     if message.group_id is None:
         return False
-    asset = await _feature_hub.stickers.choose_for_text(message.text)
+    asset = await _choose_safe_sticker(message.text)
     if asset is None:
         return False
     try:
@@ -690,6 +697,50 @@ async def _send_context_sticker(bot: Bot, message: NormalizedMessage) -> bool:
         )
         return False
     return True
+
+
+async def _send_reply_sticker_if_requested(
+    bot: Bot,
+    message: NormalizedMessage,
+    intent_text: str,
+) -> bool:
+    if message.group_id is None:
+        return False
+    asset = await _choose_safe_sticker(intent_text)
+    if asset is None:
+        return False
+    try:
+        await _wait_group_interval(message.group_id)
+        await send_group_image_direct(
+            bot,
+            group_id=message.group_id,
+            file_path=asset.file_path,
+        )
+        await _feature_hub.stickers.mark_used(asset.asset_id)
+        _group_last_sent_at[message.group_id] = time.monotonic()
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="send_reply_sticker_failed",
+            detail=f"{type(exc).__name__}: {str(exc)[:120]}",
+            trace_id=message.trace_id,
+        )
+        return False
+    return True
+
+
+async def _choose_safe_sticker(intent_text: str):
+    asset = await _feature_hub.stickers.choose_for_text(intent_text)
+    if asset is None:
+        return None
+    if _feature_hub.sticker_analysis is not None:
+        analysis = await _feature_hub.sticker_analysis.ensure_analyzed(asset)
+        if (
+            analysis is not None
+            and analysis.safety_category in {"adult", "illegal", "violence", "privacy"}
+        ):
+            return None
+    return asset
 
 
 async def _send_context_sticker_missing_text(

@@ -11,10 +11,12 @@ from app.models import (
     GroupMessageIndex,
     GroupMuteState,
     GroupPendingQuestion,
+    GroupSemanticTerm,
     MemoryProfile,
     PersonaState,
     ScheduledTask,
     StickerAsset,
+    StickerAssetAnalysis,
 )
 
 
@@ -1012,6 +1014,350 @@ class StickerAssetRepository:
             usage_count=int(row["usage_count"]),
             created_at=row["created_at"],
             last_used_at=row["last_used_at"],
+        )
+
+
+class StickerAssetAnalysisRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def get(self, asset_id: str | None) -> StickerAssetAnalysis | None:
+        if not asset_id:
+            return None
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  asset_id,
+                  intent_summary,
+                  emotion_tags,
+                  scene_tags,
+                  text_tags,
+                  reply_usage_hint,
+                  safety_category,
+                  analysis_status,
+                  analyzed_at,
+                  updated_at
+                FROM sticker_asset_analysis
+                WHERE asset_id = ?
+                LIMIT 1
+                """,
+                (asset_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._to_analysis(row)
+
+    async def ensure_pending(self, asset_id: str) -> StickerAssetAnalysis:
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO sticker_asset_analysis (
+                  asset_id,
+                  analysis_status,
+                  updated_at
+                ) VALUES (?, 'pending', datetime('now'))
+                """,
+                (asset_id,),
+            )
+            await db.commit()
+        analysis = await self.get(asset_id)
+        if analysis is None:
+            raise RuntimeError("sticker analysis pending row was not created")
+        return analysis
+
+    async def upsert_completed(
+        self,
+        *,
+        asset_id: str,
+        intent_summary: str,
+        emotion_tags: str,
+        scene_tags: str,
+        text_tags: str,
+        reply_usage_hint: str,
+        safety_category: str,
+    ) -> StickerAssetAnalysis:
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO sticker_asset_analysis (
+                  asset_id,
+                  intent_summary,
+                  emotion_tags,
+                  scene_tags,
+                  text_tags,
+                  reply_usage_hint,
+                  safety_category,
+                  analysis_status,
+                  analyzed_at,
+                  updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', datetime('now'), datetime('now'))
+                ON CONFLICT(asset_id) DO UPDATE SET
+                  intent_summary = excluded.intent_summary,
+                  emotion_tags = excluded.emotion_tags,
+                  scene_tags = excluded.scene_tags,
+                  text_tags = excluded.text_tags,
+                  reply_usage_hint = excluded.reply_usage_hint,
+                  safety_category = excluded.safety_category,
+                  analysis_status = 'completed',
+                  analyzed_at = datetime('now'),
+                  updated_at = datetime('now')
+                """,
+                (
+                    asset_id,
+                    intent_summary,
+                    emotion_tags,
+                    scene_tags,
+                    text_tags,
+                    reply_usage_hint,
+                    safety_category,
+                ),
+            )
+            await db.commit()
+        analysis = await self.get(asset_id)
+        if analysis is None:
+            raise RuntimeError("sticker analysis upsert did not create a row")
+        return analysis
+
+    async def mark_failed(
+        self,
+        *,
+        asset_id: str,
+        safety_category: str = "unknown",
+    ) -> StickerAssetAnalysis:
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO sticker_asset_analysis (
+                  asset_id,
+                  safety_category,
+                  analysis_status,
+                  updated_at
+                ) VALUES (?, ?, 'failed', datetime('now'))
+                ON CONFLICT(asset_id) DO UPDATE SET
+                  safety_category = excluded.safety_category,
+                  analysis_status = 'failed',
+                  updated_at = datetime('now')
+                """,
+                (asset_id, safety_category),
+            )
+            await db.commit()
+        analysis = await self.get(asset_id)
+        if analysis is None:
+            raise RuntimeError("sticker analysis failure row was not created")
+        return analysis
+
+    async def find_matching_asset_ids(
+        self,
+        *,
+        query_tags: list[str],
+        limit: int = 50,
+    ) -> list[str]:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  asset_id,
+                  intent_summary,
+                  emotion_tags,
+                  scene_tags,
+                  text_tags,
+                  reply_usage_hint,
+                  safety_category,
+                  analysis_status
+                FROM sticker_asset_analysis
+                WHERE analysis_status = 'completed'
+                  AND safety_category NOT IN ('adult', 'illegal', 'violence', 'privacy')
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        if not rows:
+            return []
+        if not query_tags:
+            return [str(row["asset_id"]) for row in rows]
+        lowered_tags = [tag.lower() for tag in query_tags if tag.strip()]
+        scored: list[tuple[int, str]] = []
+        for row in rows:
+            haystack = " ".join(
+                str(row[key] or "")
+                for key in (
+                    "intent_summary",
+                    "emotion_tags",
+                    "scene_tags",
+                    "text_tags",
+                    "reply_usage_hint",
+                )
+            ).lower()
+            score = sum(1 for tag in lowered_tags if tag in haystack)
+            if score > 0:
+                scored.append((score, str(row["asset_id"])))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [asset_id for _, asset_id in scored]
+
+    def _to_analysis(self, row: aiosqlite.Row) -> StickerAssetAnalysis:
+        return StickerAssetAnalysis(
+            asset_id=str(row["asset_id"]),
+            intent_summary=str(row["intent_summary"]),
+            emotion_tags=str(row["emotion_tags"]),
+            scene_tags=str(row["scene_tags"]),
+            text_tags=str(row["text_tags"]),
+            reply_usage_hint=str(row["reply_usage_hint"]),
+            safety_category=str(row["safety_category"]),
+            analysis_status=str(row["analysis_status"]),
+            analyzed_at=row["analyzed_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+class GroupSemanticTermRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def upsert(
+        self,
+        *,
+        group_id: str,
+        term: str,
+        description: str,
+        source: str = "rule",
+        confidence: float = 0.5,
+    ) -> GroupSemanticTerm:
+        term = term.strip()
+        description = description.strip()
+        if not group_id or not term or not description:
+            raise ValueError("group_id, term and description are required")
+        async with aiosqlite.connect(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO group_semantic_terms (
+                  group_id,
+                  term,
+                  description,
+                  source,
+                  confidence,
+                  updated_at
+                ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(group_id, term) DO UPDATE SET
+                  description = CASE
+                    WHEN excluded.confidence >= group_semantic_terms.confidence
+                    THEN excluded.description
+                    ELSE group_semantic_terms.description
+                  END,
+                  source = CASE
+                    WHEN excluded.confidence >= group_semantic_terms.confidence
+                    THEN excluded.source
+                    ELSE group_semantic_terms.source
+                  END,
+                  confidence = CASE
+                    WHEN excluded.confidence >= group_semantic_terms.confidence
+                    THEN excluded.confidence
+                    ELSE group_semantic_terms.confidence
+                  END,
+                  updated_at = datetime('now')
+                """,
+                (group_id, term, description, source, confidence),
+            )
+            await db.commit()
+        term_row = await self.get(group_id, term)
+        if term_row is None:
+            raise RuntimeError("group semantic term upsert did not create a row")
+        return term_row
+
+    async def get(self, group_id: str, term: str) -> GroupSemanticTerm | None:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  term,
+                  description,
+                  source,
+                  confidence,
+                  updated_at
+                FROM group_semantic_terms
+                WHERE group_id = ? AND term = ?
+                LIMIT 1
+                """,
+                (group_id, term),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._to_term(row)
+
+    async def find_relevant(
+        self,
+        *,
+        group_id: str,
+        text: str,
+        limit: int = 8,
+    ) -> list[GroupSemanticTerm]:
+        if not group_id or not text.strip():
+            return []
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  term,
+                  description,
+                  source,
+                  confidence,
+                  updated_at
+                FROM group_semantic_terms
+                WHERE group_id = ?
+                ORDER BY confidence DESC, updated_at DESC
+                LIMIT 100
+                """,
+                (group_id,),
+            )
+            rows = await cursor.fetchall()
+        lowered = text.lower()
+        matched = [
+            self._to_term(row)
+            for row in rows
+            if str(row["term"]).lower() in lowered
+        ]
+        return matched[:limit]
+
+    async def list_recent(self, group_id: str, *, limit: int = 20) -> list[GroupSemanticTerm]:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  term,
+                  description,
+                  source,
+                  confidence,
+                  updated_at
+                FROM group_semantic_terms
+                WHERE group_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (group_id, limit),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_term(row) for row in rows]
+
+    def _to_term(self, row: aiosqlite.Row) -> GroupSemanticTerm:
+        return GroupSemanticTerm(
+            group_id=str(row["group_id"]),
+            term=str(row["term"]),
+            description=str(row["description"]),
+            source=str(row["source"]),
+            confidence=float(row["confidence"]),
+            updated_at=row["updated_at"],
         )
 
 

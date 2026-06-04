@@ -16,6 +16,7 @@ class PromptBuilder:
         recent_context: list[dict[str, Any]],
         persona_state: PersonaState,
         long_term_memory: str = "",
+        model_context: str = "",
     ) -> list[dict[str, Any]]:
         profile = self._persona.style_profile
         system_parts = [
@@ -35,6 +36,8 @@ class PromptBuilder:
             _format_section("少量风格示例，只学节奏和语气，不要复述原句", profile.few_shot_examples),
             "回复要像 QQ 好友即时聊天，大多数回复 1-2 句，短一点，自然一点。",
             "不要主动列表化回答，除非用户明确要求。",
+            "如需代码块，保持完整 Markdown 代码块；不要输出孤立的 ```。",
+            "如果用 JSON 包装回复，只使用 reply_text/text/content、reply_mode、send_sticker、sticker_intent 这些字段。",
             "当前角色状态："
             f"mood={persona_state.mood}, "
             f"energy={persona_state.energy}, "
@@ -43,6 +46,8 @@ class PromptBuilder:
         ]
         if long_term_memory.strip():
             system_parts.append(f"可用的受控长期记忆：\n{long_term_memory.strip()}")
+        if model_context.strip():
+            system_parts.append(model_context.strip())
         system_message = "\n".join(system_parts)
 
         messages = [{"role": "system", "content": system_message}]
@@ -70,6 +75,7 @@ class PromptBuilder:
         persona_state: PersonaState,
         long_term_memory: str = "",
         group_context: str = "",
+        model_context: str = "",
     ) -> list[dict[str, Any]]:
         messages = self.build_private_prompt(
             user_name=user_name,
@@ -77,6 +83,7 @@ class PromptBuilder:
             recent_context=recent_context,
             persona_state=persona_state,
             long_term_memory=long_term_memory,
+            model_context=model_context,
         )
         messages[0]["content"] += (
             "\n当前场景：群聊。你是在被 @ 后回复，回复要短，不要抢话，"
@@ -105,6 +112,7 @@ class PromptBuilder:
         persona_state: PersonaState,
         long_term_memory: str = "",
         group_context: str = "",
+        model_context: str = "",
     ) -> str:
         return self.build_group_prompt(
             user_name=user_name,
@@ -113,6 +121,7 @@ class PromptBuilder:
             persona_state=persona_state,
             long_term_memory=long_term_memory,
             group_context=group_context,
+            model_context=model_context,
         )[0]["content"]
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from app.conversation.prompt_builder import PromptBuilder
-from app.conversation.reply_formatter import ReplyFormatter
+from app.conversation.reply_formatter import ReplyFormatter, parse_model_reply
 from app.memory.group_context_service import NullGroupContextService
 from app.memory.memory_service import NullMemoryService
 from app.model.llm_client import LlmClient
@@ -38,6 +38,7 @@ class ConversationService:
         group_context_service: object | None = None,
         model_resilience_service: ModelResilienceService | None = None,
         image_understanding_service: ImageUnderstandingService | None = None,
+        model_context_service: object | None = None,
     ) -> None:
         self._permission_service = permission_service
         self._prompt_builder = prompt_builder
@@ -52,6 +53,7 @@ class ConversationService:
         self._group_context_service = group_context_service or NullGroupContextService()
         self._model_resilience_service = model_resilience_service
         self._image_understanding_service = image_understanding_service
+        self._model_context_service = model_context_service
 
     @property
     def model_client(self) -> LlmClient:
@@ -97,42 +99,21 @@ class ConversationService:
         if has_media(message.media_items):
             return await self.handle_private_image_message(message, started_at=started_at)
 
-        recent_context = await self._conversation_repository.get_recent_conversations(
-            message.scope_type,
-            message.scope_id,
-            limit=20,
-        )
-        persona_state = await self._persona_state_service.get_or_create(
-            message.scope_type,
-            message.scope_id,
-        )
-        long_term_memory = await self._memory_service.get_prompt_memory(message.user_id)
+        recent_context, persona_state, model_context = await self._prepare_model_context(message)
         prompt = self._prompt_builder.build_private_prompt(
             user_name=message.user_name,
             user_text=message.text,
             recent_context=recent_context,
             persona_state=persona_state,
-            long_term_memory=long_term_memory,
+            long_term_memory=model_context.long_term_memory,
+            model_context=model_context.prompt_block,
         )
 
         await self._save_user_message(message)
         model_result = await self._generate_reply(prompt, message)
         reply = model_result.reply
 
-        output_safety = self._safety_service.check_output(reply.text, scope_type=message.scope_type)
-        reply_text = output_safety.replacement_text if output_safety.replacement_text else reply.text
-        formatted_text = self._reply_formatter.format_unlimited(reply_text)
-        reply = GeneratedReply(
-            text=formatted_text,
-            raw_model_text=reply.raw_model_text,
-            model_name=reply.model_name,
-            finish_reason=reply.finish_reason,
-            safety_level=output_safety.safety_level
-            if output_safety.action != "allow"
-            else reply.safety_level,
-            prompt_tokens=reply.prompt_tokens,
-            completion_tokens=reply.completion_tokens,
-        )
+        reply, output_safety = self._parse_and_format_reply(reply, message, unlimited=True)
         await self._save_assistant_message(message, reply)
         await self._persona_state_service.record_successful_reply(
             message.scope_type,
@@ -188,6 +169,7 @@ class ConversationService:
             message_id=message.message_id,
             text=message.text,
         )
+        await self._remember_group_terms(message)
         if not message.is_at_self and message.trigger_reason not in {
             "nickname_trigger",
             "active_window",
@@ -236,44 +218,22 @@ class ConversationService:
             )
             return reply
 
-        recent_context = await self._conversation_repository.get_recent_conversations(
-            message.scope_type,
-            message.scope_id,
-            limit=20,
-        )
-        persona_state = await self._persona_state_service.get_or_create(
-            message.scope_type,
-            message.scope_id,
-        )
-        long_term_memory = await self._memory_service.get_prompt_memory(message.user_id)
-        group_context = await self._group_context_service.get_prompt_context(message.group_id)
+        recent_context, persona_state, model_context = await self._prepare_model_context(message)
         prompt = self._prompt_builder.build_group_prompt(
             user_name=message.user_name,
             user_text=message.text,
             recent_context=recent_context,
             persona_state=persona_state,
-            long_term_memory=long_term_memory,
-            group_context=group_context,
+            long_term_memory=model_context.long_term_memory,
+            group_context=model_context.group_context,
+            model_context=model_context.prompt_block,
         )
 
         await self._save_user_message(message)
         model_result = await self._generate_reply(prompt, message)
         reply = model_result.reply
 
-        output_safety = self._safety_service.check_output(reply.text, scope_type=message.scope_type)
-        reply_text = output_safety.replacement_text if output_safety.replacement_text else reply.text
-        formatted_text = self._reply_formatter.format(reply_text)
-        reply = GeneratedReply(
-            text=formatted_text,
-            raw_model_text=reply.raw_model_text,
-            model_name=reply.model_name,
-            finish_reason=reply.finish_reason,
-            safety_level=output_safety.safety_level
-            if output_safety.action != "allow"
-            else reply.safety_level,
-            prompt_tokens=reply.prompt_tokens,
-            completion_tokens=reply.completion_tokens,
-        )
+        reply, output_safety = self._parse_and_format_reply(reply, message, unlimited=False)
         await self._save_assistant_message(message, reply)
         await self._persona_state_service.record_successful_reply(
             message.scope_type,
@@ -317,22 +277,14 @@ class ConversationService:
             )
             return None
 
-        recent_context = await self._conversation_repository.get_recent_conversations(
-            message.scope_type,
-            message.scope_id,
-            limit=20,
-        )
-        persona_state = await self._persona_state_service.get_or_create(
-            message.scope_type,
-            message.scope_id,
-        )
-        long_term_memory = await self._memory_service.get_prompt_memory(message.user_id)
+        recent_context, persona_state, model_context = await self._prepare_model_context(message)
         style_system_prompt = self._prompt_builder.build_private_prompt(
             user_name=message.user_name,
             user_text=message.text,
             recent_context=recent_context,
             persona_state=persona_state,
-            long_term_memory=long_term_memory,
+            long_term_memory=model_context.long_term_memory,
+            model_context=model_context.prompt_block,
         )[0]["content"]
 
         await self._save_user_message(message)
@@ -401,24 +353,15 @@ class ConversationService:
                 started_at=started_at,
             )
             return None
-        recent_context = await self._conversation_repository.get_recent_conversations(
-            message.scope_type,
-            message.scope_id,
-            limit=20,
-        )
-        persona_state = await self._persona_state_service.get_or_create(
-            message.scope_type,
-            message.scope_id,
-        )
-        long_term_memory = await self._memory_service.get_prompt_memory(message.user_id)
-        group_context = await self._group_context_service.get_prompt_context(message.group_id)
+        recent_context, persona_state, model_context = await self._prepare_model_context(message)
         style_system_prompt = self._prompt_builder.build_group_system_message(
             user_name=message.user_name,
             user_text=message.text,
             recent_context=recent_context,
             persona_state=persona_state,
-            long_term_memory=long_term_memory,
-            group_context=group_context,
+            long_term_memory=model_context.long_term_memory,
+            group_context=model_context.group_context,
+            model_context=model_context.prompt_block,
         )
         await self._save_user_message(message)
         analysis = await self._analyze_image_message(
@@ -527,23 +470,10 @@ class ConversationService:
             model_name="vision",
             finish_reason=analysis.failure_reason or analysis.category,
         )
-        output_safety = self._safety_service.check_output(reply.text, scope_type=message.scope_type)
-        reply_text = output_safety.replacement_text if output_safety.replacement_text else reply.text
-        formatted_text = (
-            self._reply_formatter.format_unlimited(reply_text)
-            if unlimited
-            else self._reply_formatter.format(reply_text)
-        )
-        reply = GeneratedReply(
-            text=formatted_text,
-            raw_model_text=reply.raw_model_text,
-            model_name=reply.model_name,
-            finish_reason=reply.finish_reason,
-            safety_level=output_safety.safety_level
-            if output_safety.action != "allow"
-            else reply.safety_level,
-            prompt_tokens=reply.prompt_tokens,
-            completion_tokens=reply.completion_tokens,
+        reply, output_safety = self._parse_and_format_reply(
+            reply,
+            message,
+            unlimited=unlimited,
         )
         await self._save_assistant_message(message, reply)
         await self._persona_state_service.record_successful_reply(
@@ -631,6 +561,7 @@ class ConversationService:
             message_id=message.message_id,
             text=message.text,
         )
+        await self._remember_group_terms(message)
         await self._audit(
             message,
             action="silence",
@@ -638,6 +569,95 @@ class ConversationService:
             model_called=False,
             safety_blocked=safety_blocked,
             started_at=started_at,
+        )
+
+    async def _prepare_model_context(self, message: NormalizedMessage):
+        recent_context = await self._conversation_repository.get_recent_conversations(
+            message.scope_type,
+            message.scope_id,
+            limit=20,
+        )
+        persona_state = await self._persona_state_service.get_or_create(
+            message.scope_type,
+            message.scope_id,
+        )
+        if self._model_context_service is not None:
+            try:
+                model_context = await self._model_context_service.build(
+                    message,
+                    recent_context=recent_context,
+                )
+                return recent_context, persona_state, model_context
+            except Exception as exc:
+                await self._system_event(
+                    "ERROR",
+                    "model_context_build_failed",
+                    f"{type(exc).__name__}: {str(exc)[:120]}",
+                    message.trace_id,
+                )
+        long_term_memory = await self._memory_service.get_prompt_memory(message.user_id)
+        group_context = (
+            await self._group_context_service.get_prompt_context(message.group_id)
+            if message.group_id
+            else ""
+        )
+        from app.conversation.model_context_service import ModelContext
+
+        return (
+            recent_context,
+            persona_state,
+            ModelContext(long_term_memory=long_term_memory, group_context=group_context),
+        )
+
+    async def _remember_group_terms(self, message: NormalizedMessage) -> None:
+        if self._model_context_service is None:
+            return
+        try:
+            await self._model_context_service.remember_group_terms(message)
+        except Exception as exc:
+            await self._system_event(
+                "ERROR",
+                "group_semantic_terms_update_failed",
+                f"{type(exc).__name__}: {str(exc)[:120]}",
+                message.trace_id,
+            )
+
+    def _parse_and_format_reply(
+        self,
+        reply: GeneratedReply,
+        message: NormalizedMessage,
+        *,
+        unlimited: bool,
+    ) -> tuple[GeneratedReply, object]:
+        parsed = parse_model_reply(reply.text)
+        output_safety = self._safety_service.check_output(
+            parsed.text,
+            scope_type=message.scope_type,
+        )
+        reply_text = output_safety.replacement_text if output_safety.replacement_text else parsed.text
+        formatted_text = (
+            self._reply_formatter.format_unlimited(reply_text)
+            if unlimited
+            else self._reply_formatter.format(reply_text)
+        )
+        if parsed.reply_mode in {"long_text", "code_block"} and not unlimited:
+            formatted_text = self._reply_formatter.format_unlimited(reply_text)
+        return (
+            GeneratedReply(
+                text=formatted_text,
+                raw_model_text=reply.raw_model_text,
+                model_name=reply.model_name,
+                finish_reason=reply.finish_reason,
+                safety_level=output_safety.safety_level
+                if output_safety.action != "allow"
+                else reply.safety_level,
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                reply_mode=parsed.reply_mode,
+                send_sticker=parsed.send_sticker,
+                sticker_intent=parsed.sticker_intent,
+            ),
+            output_safety,
         )
 
     async def _generate_reply(
