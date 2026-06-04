@@ -149,8 +149,8 @@ def _extract_media_items(message: Message, raw_message: str) -> tuple[MediaItem,
                     type="image",
                     url=url or (file if _looks_like_url(file) else None),
                     file=file,
-                    summary=_str_or_none(segment.data.get("summary")),
-                    sub_type=_str_or_none(segment.data.get("sub_type")),
+                    summary=_media_summary(segment.data),
+                    sub_type=_media_sub_type(segment.data),
                 )
             )
         elif segment.type == "face":
@@ -170,8 +170,8 @@ def _extract_media_items(message: Message, raw_message: str) -> tuple[MediaItem,
                 type="image",
                 url=data.get("url"),
                 file=data.get("file"),
-                summary=data.get("summary"),
-                sub_type=data.get("sub_type"),
+                summary=_media_summary(data),
+                sub_type=_media_sub_type(data),
             )
         )
     for match in re.finditer(r"\[CQ:face,([^\]]+)\]", raw_message):
@@ -210,6 +210,23 @@ def _str_or_none(value) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _media_summary(data: dict) -> str | None:
+    values = []
+    for key in ("summary", "raw", "name", "type", "image_type", "biz_type"):
+        value = _str_or_none(data.get(key))
+        if value:
+            values.append(value)
+    return " ".join(dict.fromkeys(values)) or None
+
+
+def _media_sub_type(data: dict) -> str | None:
+    for key in ("sub_type", "image_type", "biz_type", "type"):
+        value = _str_or_none(data.get(key))
+        if value:
+            return value
+    return None
 
 
 def _looks_like_url(value: str | None) -> bool:

@@ -15,6 +15,8 @@ from app.storage.repositories import (
 
 
 PLUS_ONE_TEXTS = {"+1", "＋1", "加一"}
+TEXT_REPEAT_CONSECUTIVE_THRESHOLD = 2
+TEXT_REPEAT_RECENT_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class RepeatCandidate:
     text: str
     sticker_asset: StickerAsset | None
     repeat_kind: str
+    segment_message_ids: tuple[str, ...] = ()
 
 
 class RepeatService:
@@ -91,6 +94,31 @@ class RepeatService:
         indexed = await self._message_index_repository.get(group_id, message_id)
         return await self._candidate_from_index(indexed)
 
+    async def candidate_from_probabilistic_message(
+        self,
+        message: NormalizedMessage,
+    ) -> RepeatCandidate | None:
+        if message.group_id is None:
+            return None
+        indexed = await self._message_index_repository.get(
+            message.group_id,
+            message.message_id,
+        )
+        if indexed is None or indexed.is_bot:
+            return None
+        sticker = await self._sticker_repository.get_by_asset_id(indexed.sticker_asset_id)
+        if sticker is not None:
+            return RepeatCandidate(
+                group_id=indexed.group_id,
+                message_id=indexed.message_id,
+                user_id=indexed.user_id,
+                text="",
+                sticker_asset=sticker,
+                repeat_kind="sticker",
+                segment_message_ids=(indexed.message_id,),
+            )
+        return await self._candidate_from_consecutive_text(indexed)
+
     async def maybe_mark_repeated(
         self,
         *,
@@ -106,6 +134,16 @@ class RepeatService:
             trigger_message,
             repeat_kind=candidate.repeat_kind,
             plus_one=plus_one,
+        ):
+            return False
+        if (
+            candidate.repeat_kind == "text"
+            and candidate.segment_message_ids
+            and await self._repeat_state_repository.any_repeated(
+                group_id=candidate.group_id,
+                source_message_ids=list(candidate.segment_message_ids),
+                repeat_kind="text",
+            )
         ):
             return False
         return await self._repeat_state_repository.try_mark_repeated(
@@ -131,6 +169,7 @@ class RepeatService:
                 text="",
                 sticker_asset=sticker,
                 repeat_kind="sticker",
+                segment_message_ids=(indexed.message_id,),
             )
         if not is_repeatable_text(indexed.text, self._safety_service):
             return None
@@ -138,9 +177,45 @@ class RepeatService:
             group_id=indexed.group_id,
             message_id=indexed.message_id,
             user_id=indexed.user_id,
-            text=indexed.text,
+            text=normalize_repeat_text(indexed.text),
             sticker_asset=None,
             repeat_kind="text",
+            segment_message_ids=(indexed.message_id,),
+        )
+
+    async def _candidate_from_consecutive_text(
+        self,
+        indexed: GroupMessageIndex,
+    ) -> RepeatCandidate | None:
+        normalized = normalize_repeat_text(indexed.text)
+        if not normalized or not is_repeatable_text(normalized, self._safety_service):
+            return None
+        recent = await self._message_index_repository.recent_messages(
+            indexed.group_id,
+            limit=TEXT_REPEAT_RECENT_LIMIT,
+        )
+        segment_ids: list[str] = []
+        for item in recent:
+            if item.is_bot:
+                continue
+            text = normalize_repeat_text(item.text)
+            if (
+                not text
+                or text != normalized
+                or not is_repeatable_text(text, self._safety_service)
+            ):
+                break
+            segment_ids.append(item.message_id)
+        if len(segment_ids) < TEXT_REPEAT_CONSECUTIVE_THRESHOLD:
+            return None
+        return RepeatCandidate(
+            group_id=indexed.group_id,
+            message_id=indexed.message_id,
+            user_id=indexed.user_id,
+            text=normalized,
+            sticker_asset=None,
+            repeat_kind="text",
+            segment_message_ids=tuple(segment_ids),
         )
 
 
@@ -150,7 +225,7 @@ def is_plus_one_text(text: str) -> bool:
 
 
 def is_repeatable_text(text: str, safety_service: SafetyService) -> bool:
-    cleaned = text.strip()
+    cleaned = normalize_repeat_text(text)
     if not cleaned or len(cleaned) > 60:
         return False
     if cleaned.startswith("/"):
@@ -163,6 +238,10 @@ def is_repeatable_text(text: str, safety_service: SafetyService) -> bool:
         return False
     check = safety_service.check_input(cleaned, scope_type="group")
     return check.action == "allow"
+
+
+def normalize_repeat_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
 
 
 def _media_type(message: NormalizedMessage) -> str:

@@ -725,10 +725,7 @@ async def _send_context_sticker_missing_text(
 async def _try_probabilistic_repeat(bot: Bot, message: NormalizedMessage) -> bool:
     if message.group_id is None:
         return False
-    indexed = await _feature_hub.repeats.candidate_from_notice(
-        group_id=message.group_id,
-        message_id=message.message_id,
-    )
+    indexed = await _feature_hub.repeats.candidate_from_probabilistic_message(message)
     if indexed is None:
         await _conversation_service.record_system_event(
             level="INFO",

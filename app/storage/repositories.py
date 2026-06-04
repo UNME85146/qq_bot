@@ -1131,6 +1131,31 @@ class GroupMessageIndexRepository:
             return None
         return self._to_group_message_index(row)
 
+    async def recent_messages(self, group_id: str, *, limit: int = 10) -> list[GroupMessageIndex]:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  message_id,
+                  user_id,
+                  user_name,
+                  text,
+                  media_type,
+                  sticker_asset_id,
+                  is_bot,
+                  created_at
+                FROM group_message_index
+                WHERE group_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (group_id, limit),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_group_message_index(row) for row in rows]
+
     def _to_group_message_index(self, row: aiosqlite.Row) -> GroupMessageIndex:
         return GroupMessageIndex(
             group_id=str(row["group_id"]),
@@ -1173,6 +1198,31 @@ class MessageRepeatStateRepository:
             )
             await db.commit()
             return int(cursor.rowcount or 0) > 0
+
+    async def any_repeated(
+        self,
+        *,
+        group_id: str,
+        source_message_ids: list[str],
+        repeat_kind: str,
+    ) -> bool:
+        if not source_message_ids:
+            return False
+        placeholders = ",".join("?" for _ in source_message_ids)
+        async with aiosqlite.connect(self._database_path) as db:
+            cursor = await db.execute(
+                f"""
+                SELECT 1
+                FROM message_repeat_states
+                WHERE group_id = ?
+                  AND repeat_kind = ?
+                  AND source_message_id IN ({placeholders})
+                LIMIT 1
+                """,
+                (group_id, repeat_kind, *source_message_ids),
+            )
+            row = await cursor.fetchone()
+        return row is not None
 
 
 class AuditRepository:

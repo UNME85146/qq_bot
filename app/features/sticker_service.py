@@ -62,8 +62,10 @@ class StickerService:
         if input_safety.action == "block":
             return StickerSaveResult(None, f"text_{input_safety.reason}")
 
-        image = _first_image_with_url(message.media_items)
+        image = _first_sticker_image_with_url(message.media_items)
         if image is None:
+            if any(item.type == "image" and item.url for item in message.media_items):
+                return StickerSaveResult(None, "not_sticker_media")
             return StickerSaveResult(None, "no_image_url")
         if self._image_classifier is not None:
             try:
@@ -213,9 +215,28 @@ def is_sticker_save_request(text: str) -> bool:
     )
 
 
-def _first_image_with_url(media_items: tuple[MediaItem, ...]) -> MediaItem | None:
+def is_sticker_media(item: MediaItem) -> bool:
+    marker_text = " ".join(
+        value
+        for value in (item.sub_type, item.summary, item.file)
+        if value
+    ).lower()
+    markers = (
+        "sticker",
+        "emoji",
+        "face",
+        "marketface",
+        "mface",
+        "表情",
+        "动画表情",
+        "贴纸",
+    )
+    return any(marker in marker_text for marker in markers)
+
+
+def _first_sticker_image_with_url(media_items: tuple[MediaItem, ...]) -> MediaItem | None:
     for item in media_items:
-        if item.type == "image" and item.url:
+        if item.type == "image" and item.url and is_sticker_media(item):
             return item
     return None
 
