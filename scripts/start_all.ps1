@@ -6,7 +6,7 @@ $ConfigPath = Join-Path $Root "config\config.json"
 $Config = Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json
 $BotQq = if ($env:QQ_BOT_SELF_ID) { $env:QQ_BOT_SELF_ID } else { [string]$Config.qq.selfId }
 if (-not $env:NAPCAT_ROOT) {
-  throw "NAPCAT_ROOT is required, for example: `$env:NAPCAT_ROOT='F:\path\to\NapCat.Shell.Windows.Node'"
+  throw "NAPCAT_ROOT is required, for example: `$env:NAPCAT_ROOT='C:\path\to\NapCat.Shell.Windows.Node'"
 }
 $NapCatRoot = $env:NAPCAT_ROOT
 $NapCatLog = Join-Path $Root ("logs\napcat-start-all-{0}.out.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))

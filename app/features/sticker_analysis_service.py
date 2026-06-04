@@ -32,6 +32,12 @@ class StickerAnalysisService:
             await self._repository.ensure_pending(asset.asset_id)
         return await self.analyze_asset(asset)
 
+    async def get_completed_analysis(self, asset_id: str | None) -> StickerAssetAnalysis | None:
+        existing = await self._repository.get(asset_id)
+        if existing is None or existing.analysis_status != "completed":
+            return None
+        return existing
+
     async def analyze_asset(self, asset: StickerAsset) -> StickerAssetAnalysis | None:
         image_url = _file_to_data_url(asset.file_path)
         if image_url is None:

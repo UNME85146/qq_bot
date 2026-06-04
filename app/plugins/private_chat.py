@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 
 from loguru import logger
@@ -20,10 +21,23 @@ from app.features.reminder_service import (
 )
 from app.features.runtime_features import create_runtime_feature_hub, maybe_save_sticker
 from app.features.sticker_service import is_sticker_request, is_sticker_save_request
+from app.features.tts_service import (
+    DEFAULT_VOICE_REPLY_DECIDER,
+    TTSService,
+    extract_explicit_voice_read_text,
+    record_explicit_voice_selected,
+    record_tts_fallback_text_sent,
+    tts_enabled_for_scope,
+)
 from app.models import GeneratedReply
-from app.plugins.send_helper import send_private_image_direct, send_reply_bubbles
+from app.plugins.send_helper import (
+    send_private_image_direct,
+    send_private_record_direct,
+    send_reply_bubbles,
+)
 from app.routing.permission_service import PermissionService
 from app.routing.rate_limiter import RateLimiter
+from app.safety.safety_service import SafetyService
 from app.storage.database import init_database
 
 _config = load_config(os.getenv("QQ_BOT_CONFIG_PATH", "config/config.json"))
@@ -36,8 +50,19 @@ _rate_limiter = RateLimiter(
     max_user_messages_per_minute=_config.limits.max_user_messages_per_minute,
     max_group_messages_per_minute=_config.limits.max_group_messages_per_minute,
 )
+_tts_service = TTSService(
+    _config.tts,
+    record_system_event=_conversation_service.record_system_event,
+)
+_voice_safety_service = SafetyService(
+    identity_disclosure=_config.persona.style_profile.identity_disclosure,
+    source_user_id=_config.persona.style_profile.source_user_id,
+)
+_voice_reply_decider = DEFAULT_VOICE_REPLY_DECIDER
 _reply_formatter = ReplyFormatter(_config.reply.max_reply_length)
 _recent_private_sticker_assets: dict[str, str] = {}
+_private_user_locks: dict[str, asyncio.Lock] = {}
+_pending_private_greetings: set[str] = set()
 
 private_chat = on_message(priority=10, block=False)
 
@@ -53,6 +78,26 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
     normalized = normalize_private_message_event(event)
     if normalized is None:
         return
+    if _is_duplicate_pending_greeting(normalized.user_id, normalized.text):
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="silence",
+            reason="private_superseded_duplicate",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return
+    if _is_simple_greeting(normalized.text):
+        _pending_private_greetings.add(normalized.user_id)
+    try:
+        async with _private_lock_for(normalized.user_id):
+            await _handle_private_message_locked(bot, event, normalized)
+    finally:
+        _pending_private_greetings.discard(normalized.user_id)
+
+
+async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, normalized) -> None:
+    saved_sticker_asset_id: str | None = None
     if _permission_service.is_private_user_allowed(normalized.user_id):
         saved_sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
         if saved_sticker_asset_id is not None:
@@ -74,8 +119,6 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
                     "send_private_reply_failed",
                 ),
             )
-            return
-        if saved_sticker_asset_id is not None and _is_plain_media_message(normalized.text):
             return
         if is_reminder_command(normalized.text):
             reply_text = await _handle_user_reminder_command(
@@ -205,6 +248,9 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
     if reply is None:
         logger.info("Private message ignored by whitelist: user_id={}", event.user_id)
         return
+    voice_sent = await _maybe_send_private_voice_reply(bot, normalized, reply)
+    if voice_sent:
+        return
 
     await send_reply_bubbles(
         bot,
@@ -227,9 +273,89 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
             reply.sticker_intent or normalized.text,
             trace_id=normalized.trace_id,
         )
+    elif normalized.media_items and _can_pair_sticker_with_media_reply(reply):
+        await _send_reply_sticker_if_requested(
+            bot,
+            normalized.user_id,
+            reply.text,
+            trace_id=normalized.trace_id,
+            exclude_asset_id=saved_sticker_asset_id,
+        )
 
 
 _REMINDER_CREATE_HELP_TEXT = "要提醒什么？比如：十分钟后提醒我喝水"
+
+
+async def _maybe_send_private_voice_reply(
+    bot: Bot,
+    normalized,
+    reply: GeneratedReply,
+) -> bool:
+    if not tts_enabled_for_scope(_config.tts, normalized.scope_type):
+        return False
+    explicit_text = extract_explicit_voice_read_text(normalized)
+    if explicit_text is not None:
+        safety = _voice_safety_service.check_input(explicit_text, scope_type=normalized.scope_type)
+        if safety.action != "allow":
+            return False
+        if len(explicit_text) > _config.tts.max_chars:
+            return False
+        await record_explicit_voice_selected(
+            normalized,
+            config=_config.tts,
+            chars=len(explicit_text),
+            record_system_event=_conversation_service.record_system_event,
+        )
+        sent = await _maybe_send_private_tts_text(bot, normalized, explicit_text)
+        if not sent:
+            await record_tts_fallback_text_sent(
+                normalized,
+                reason="explicit_tts_failed",
+                record_system_event=_conversation_service.record_system_event,
+            )
+        return sent
+
+    decision = await _voice_reply_decider.decide_random(
+        normalized,
+        reply,
+        config=_config.tts,
+        record_system_event=_conversation_service.record_system_event,
+    )
+    if not decision.selected:
+        return False
+    sent = await _maybe_send_private_tts_text(bot, normalized, decision.speech_text)
+    if not sent:
+        await record_tts_fallback_text_sent(
+            normalized,
+            reason="random_tts_failed",
+            record_system_event=_conversation_service.record_system_event,
+        )
+    return sent
+
+
+async def _maybe_send_private_tts(bot: Bot, normalized, reply: GeneratedReply) -> bool:
+    return await _maybe_send_private_tts_text(bot, normalized, reply.text)
+
+
+async def _maybe_send_private_tts_text(bot: Bot, normalized, text: str) -> bool:
+    result = await _tts_service.generate_for_text(normalized, text)
+    if result is None:
+        return False
+    try:
+        await send_private_record_direct(
+            bot,
+            user_id=normalized.user_id,
+            file_path=result.audio_path,
+        )
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="tts_send_failed",
+            detail=f"scope=private; profile={result.voice_profile_id}; reason={type(exc).__name__}; detail={str(exc)[:120]}",
+            trace_id=normalized.trace_id,
+        )
+        return False
+    return True
 
 
 async def _handle_user_reminder_command(
@@ -303,8 +429,9 @@ async def _send_reply_sticker_if_requested(
     intent_text: str,
     *,
     trace_id: str,
+    exclude_asset_id: str | None = None,
 ) -> bool:
-    asset = await _choose_safe_sticker(intent_text)
+    asset = await _choose_safe_sticker(intent_text, exclude_asset_id=exclude_asset_id)
     if asset is None:
         return False
     try:
@@ -320,15 +447,56 @@ async def _send_reply_sticker_if_requested(
     return True
 
 
-async def _choose_safe_sticker(intent_text: str):
-    asset = await _feature_hub.stickers.choose_for_text(intent_text)
-    if asset is None:
-        return None
-    if _feature_hub.sticker_analysis is not None:
-        analysis = await _feature_hub.sticker_analysis.ensure_analyzed(asset)
-        if (
-            analysis is not None
-            and analysis.safety_category in {"adult", "illegal", "violence", "privacy"}
-        ):
+async def _choose_safe_sticker(intent_text: str, *, exclude_asset_id: str | None = None):
+    for _ in range(3):
+        asset = await _feature_hub.stickers.choose_for_text(intent_text)
+        if asset is None:
             return None
-    return asset
+        if exclude_asset_id is not None and asset.asset_id == exclude_asset_id:
+            continue
+        if await _is_sticker_asset_sendable(asset):
+            return asset
+    return None
+
+
+def _private_lock_for(user_id: str) -> asyncio.Lock:
+    lock = _private_user_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _private_user_locks[user_id] = lock
+    return lock
+
+
+def _is_duplicate_pending_greeting(user_id: str, text: str) -> bool:
+    return user_id in _pending_private_greetings and _is_simple_greeting(text)
+
+
+def _is_simple_greeting(text: str) -> bool:
+    compact = "".join(str(text or "").strip().lower().split()).strip("，。！？!?~～")
+    return compact in {"你好", "hi", "hello", "在吗"}
+
+
+async def _is_sticker_asset_sendable(asset) -> bool:
+    if _feature_hub.sticker_analysis is None:
+        return True
+    analysis = await _feature_hub.sticker_analysis.get_completed_analysis(asset.asset_id)
+    return not (
+        analysis is not None
+        and analysis.safety_category in {"adult", "illegal", "violence", "privacy"}
+    )
+
+
+def _can_pair_sticker_with_media_reply(reply: GeneratedReply) -> bool:
+    if reply.finish_reason in {
+        "adult",
+        "illegal",
+        "violence",
+        "privacy",
+        "vision_unavailable",
+        "image_url_missing",
+    }:
+        return False
+    text = reply.text.strip()
+    if not text:
+        return False
+    return "看不了" not in text and "不太适合" not in text

@@ -23,6 +23,14 @@ def build_owner_status_text(config) -> str:
         f"bot={'on' if bot_listening else 'off'} napcat={'on' if napcat_webui else 'off'} ws={'on' if napcat_ws else 'off'}",
         f"model={config.model.provider}/{config.model.name}",
         f"persona={config.persona.mode}/{config.persona.style_profile.source_user_id}",
+        (
+            f"tts={'on' if config.tts.enabled else 'off'} "
+            f"private={'on' if config.tts.private_enabled else 'off'} "
+            f"group={'on' if config.tts.group_enabled else 'off'} "
+            f"provider={config.tts.provider}/{config.tts.backend}/"
+            f"{config.tts.execution_provider} "
+            f"profile={config.tts.default_voice_profile_id}"
+        ),
         f"private={_short_join(config.qq.allowed_private_user_ids)}",
         f"groups={_short_join(config.qq.allowed_group_ids)}",
     ]

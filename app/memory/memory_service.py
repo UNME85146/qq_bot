@@ -26,12 +26,12 @@ class MemoryService:
         if profile is None:
             return ""
         parts = [
-            ("长期摘要", profile.summary),
-            ("偏好称呼", profile.preferred_name),
-            ("喜欢", profile.likes),
-            ("不喜欢", profile.dislikes),
-            ("重要事件", profile.important_events),
-            ("安全备注", profile.safety_notes),
+            ("长期摘要", _clean_prompt_memory_field(profile.summary)),
+            ("偏好称呼", _clean_preferred_name(profile.preferred_name)),
+            ("喜欢", _clean_prompt_memory_field(profile.likes)),
+            ("不喜欢", _clean_prompt_memory_field(profile.dislikes)),
+            ("重要事件", _clean_prompt_memory_field(profile.important_events)),
+            ("安全备注", _clean_prompt_memory_field(profile.safety_notes)),
         ]
         return "\n".join(f"{label}：{value}" for label, value in parts if value.strip())
 
@@ -68,18 +68,29 @@ class MemoryService:
                 f"user_id={user_id}; fields={','.join(update.changed_fields())}",
             )
             return None
-        summary = _merge_field(existing.summary if existing else "", update.summary)
-        likes = _merge_field(existing.likes if existing else "", update.likes)
-        dislikes = _merge_field(existing.dislikes if existing else "", update.dislikes)
+        summary = _merge_field(
+            _clean_prompt_memory_field(existing.summary if existing else ""),
+            update.summary,
+        )
+        likes = _merge_field(
+            _clean_prompt_memory_field(existing.likes if existing else ""),
+            update.likes,
+        )
+        dislikes = _merge_field(
+            _clean_prompt_memory_field(existing.dislikes if existing else ""),
+            update.dislikes,
+        )
         likes = _remove_field_item(likes, update.remove_likes)
         dislikes = _remove_field_item(dislikes, update.remove_dislikes)
         if update.remove_text:
             summary = _remove_field_item(summary, update.remove_text)
             likes = _remove_field_item(likes, update.remove_text)
             dislikes = _remove_field_item(dislikes, update.remove_text)
-        preferred_name = update.preferred_name or (existing.preferred_name if existing else "")
+        preferred_name = update.preferred_name or _clean_preferred_name(
+            existing.preferred_name if existing else ""
+        )
         important_events = _merge_field(
-            existing.important_events if existing else "",
+            _clean_prompt_memory_field(existing.important_events if existing else ""),
             update.important_events,
         )
         if update.remove_text:
@@ -94,7 +105,7 @@ class MemoryService:
             likes=likes,
             dislikes=dislikes,
             important_events=important_events,
-            safety_notes=existing.safety_notes if existing else "",
+            safety_notes=_clean_prompt_memory_field(existing.safety_notes if existing else ""),
         )
         await self._record_event(
             "memory_updated",
@@ -201,7 +212,7 @@ class _MemoryUpdate:
 
 
 def _memory_update_from_text(text: str) -> _MemoryUpdate:
-    cleaned = " ".join(text.strip().split())
+    cleaned = _clean_prompt_memory_field(" ".join(text.strip().split()))
     if any(marker in cleaned for marker in ("清空记忆", "忘掉刚才说的")):
         return _MemoryUpdate(clear=True)
     if "别记这个" in cleaned:
@@ -240,12 +251,14 @@ def _memory_update_from_text(text: str) -> _MemoryUpdate:
         return _MemoryUpdate(remove_text=_clean_memory_value(remove_text))
     if re.search(r"(?:别|不要)叫我", cleaned):
         return _MemoryUpdate(clear_preferred_name=True)
-    preferred_name = _extract_first(cleaned, (r"(?:以后)?叫我(.{1,20})",))
+    preferred_name = _extract_first(cleaned, (r"^(?:以后)?叫我(.{1,20})$",))
+    if _looks_like_reminder_text(cleaned):
+        preferred_name = ""
     likes = _extract_first(cleaned, (r"记住我喜欢(.{1,60})", r"我喜欢(.{1,60})"))
     dislikes = _extract_first(cleaned, (r"我不喜欢(.{1,60})", r"我讨厌(.{1,60})"))
     summary = "" if likes or dislikes or preferred_name else _summarize_user_message(cleaned)
     return _MemoryUpdate(
-        preferred_name=_clean_memory_value(preferred_name),
+        preferred_name=_clean_preferred_name(preferred_name),
         likes=_clean_memory_value(likes),
         dislikes=_clean_memory_value(dislikes),
         summary=summary,
@@ -253,7 +266,9 @@ def _memory_update_from_text(text: str) -> _MemoryUpdate:
 
 
 def _summarize_user_message(text: str) -> str:
-    cleaned = " ".join(text.strip().split())
+    cleaned = _clean_prompt_memory_field(" ".join(text.strip().split()))
+    if not cleaned:
+        return ""
     if len(cleaned) > 160:
         cleaned = cleaned[:157] + "..."
     return f"用户曾提到：{cleaned}"
@@ -268,11 +283,58 @@ def _extract_first(text: str, patterns: tuple[str, ...]) -> str:
 
 
 def _clean_memory_value(value: str) -> str:
-    return value.strip(" ：:，,。. ")
+    return _clean_prompt_memory_field(value).strip(" ：:，,。. ")
+
+
+def _clean_preferred_name(value: str) -> str:
+    cleaned = _clean_memory_value(value)
+    if not cleaned:
+        return ""
+    compact = "".join(cleaned.split())
+    if compact in _BAD_PREFERRED_NAMES:
+        return ""
+    if any(marker in compact for marker in _BAD_PREFERRED_NAME_MARKERS):
+        return ""
+    if re.search(r"\d|https?://|\[CQ:", compact, re.IGNORECASE):
+        return ""
+    if len(compact) < 2 or len(compact) > 12:
+        return ""
+    return cleaned
+
+
+def _clean_prompt_memory_field(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"\[CQ:[^\]]+\]", " ", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"multimedia\.nt\.qq\.com\S*", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(appid|fileid|rkey|spec|file_size|sub_type|summary|raw)=[^,;\s]+", " ", text)
+    text = re.sub(r"&#91;.*?&#93;", " ", text)
+    text = re.sub(r"(?<!\d)\d{7,}(?!\d)", " ", text)
+    text = re.sub(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+\S+)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" ：:，,。.；; ")
+    return text
+
+
+def _looks_like_reminder_text(text: str) -> bool:
+    compact = "".join(text.split())
+    time_markers = (
+        "分钟后",
+        "小时后",
+        "明天",
+        "今晚",
+        "下午",
+        "上午",
+        "后天",
+        "点",
+    )
+    reminder_markers = ("提醒", "叫我", "喊我", "通知")
+    return any(marker in compact for marker in time_markers) and any(
+        marker in compact for marker in reminder_markers
+    )
 
 
 def _merge_field(existing: str, addition: str, *, max_length: int = 300) -> str:
-    addition = addition.strip()
+    addition = _clean_prompt_memory_field(addition)
     if not addition:
         return existing
     if addition in existing:
@@ -282,9 +344,36 @@ def _merge_field(existing: str, addition: str, *, max_length: int = 300) -> str:
 
 
 def _remove_field_item(existing: str, target: str) -> str:
-    target = target.strip()
+    target = _clean_prompt_memory_field(target)
     if not target:
         return existing
     items = [item.strip() for item in existing.split("；") if item.strip()]
     kept = [item for item in items if target not in item and item not in target]
     return "；".join(kept)
+
+
+_BAD_PREFERRED_NAMES = {
+    "一下",
+    "一声",
+    "一会",
+    "一下子",
+    "喝水",
+    "吃饭",
+    "睡觉",
+    "提醒我",
+    "通知我",
+    "叫我一下",
+}
+
+_BAD_PREFERRED_NAME_MARKERS = (
+    "提醒",
+    "通知",
+    "喝水",
+    "吃饭",
+    "睡觉",
+    "分钟",
+    "小时",
+    "明天",
+    "今晚",
+    "点",
+)

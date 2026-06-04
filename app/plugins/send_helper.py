@@ -104,7 +104,33 @@ async def send_private_image_direct(
     return await bot.send_private_msg(user_id=int(user_id), message=message)
 
 
+async def send_group_record_direct(
+    bot: Bot,
+    *,
+    group_id: str,
+    file_path: str,
+) -> Any:
+    message = Message()
+    message += MessageSegment.record(_file_segment_base64(file_path))
+    return await bot.send_group_msg(group_id=int(group_id), message=message)
+
+
+async def send_private_record_direct(
+    bot: Bot,
+    *,
+    user_id: str,
+    file_path: str,
+) -> Any:
+    message = Message()
+    message += MessageSegment.record(_file_segment_base64(file_path))
+    return await bot.send_private_msg(user_id=int(user_id), message=message)
+
+
 def _image_segment_file(file_path: str) -> str:
+    return _file_segment_base64(file_path)
+
+
+def _file_segment_base64(file_path: str) -> str:
     data = Path(file_path).read_bytes()
     encoded = base64.b64encode(data).decode("ascii")
     return f"base64://{encoded}"

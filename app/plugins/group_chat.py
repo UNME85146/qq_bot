@@ -26,8 +26,20 @@ from app.features.runtime_features import (
     reminder_worker,
 )
 from app.features.sticker_service import is_sticker_request
+from app.features.tts_service import (
+    DEFAULT_VOICE_REPLY_DECIDER,
+    TTSService,
+    extract_explicit_voice_read_text,
+    record_explicit_voice_selected,
+    record_tts_fallback_text_sent,
+    tts_enabled_for_scope,
+)
 from app.models import MediaItem, NormalizedMessage
-from app.plugins.send_helper import send_group_image_direct, send_reply_bubbles
+from app.plugins.send_helper import (
+    send_group_image_direct,
+    send_group_record_direct,
+    send_reply_bubbles,
+)
 from app.routing.group_mute import (
     is_group_mute_enable_command,
     should_group_mute_wake_for_message,
@@ -63,6 +75,15 @@ _rate_limiter = RateLimiter(
     max_user_messages_per_minute=_config.limits.max_user_messages_per_minute,
     max_group_messages_per_minute=_config.limits.max_group_messages_per_minute,
 )
+_tts_service = TTSService(
+    _config.tts,
+    record_system_event=_conversation_service.record_system_event,
+)
+_voice_safety_service = SafetyService(
+    identity_disclosure=_config.persona.style_profile.identity_disclosure,
+    source_user_id=_config.persona.style_profile.source_user_id,
+)
+_voice_reply_decider = DEFAULT_VOICE_REPLY_DECIDER
 _active_windows: dict[tuple[str, str], float] = {}
 _group_reply_queues: dict[str, asyncio.Queue["GroupReplyTask"]] = {}
 _group_reply_workers: dict[str, asyncio.Task] = {}
@@ -282,6 +303,18 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
                 safety_blocked=False,
             )
             return
+        if _should_enqueue_sticker_intent_reply(normalized, sticker_asset_id=sticker_asset_id):
+            normalized = replace(normalized, trigger_reason="sticker_intent_interjection")
+            trigger_reason = normalized.trigger_reason
+        elif sticker_asset_id is not None:
+            await _conversation_service.record_reply_audit(
+                normalized,
+                action="silence",
+                reason="sticker_intent_interjection_skipped",
+                model_called=False,
+                safety_blocked=False,
+            )
+            return
 
     if trigger_reason == "nickname_probability_skipped":
         await _conversation_service.handle_group_message(normalized)
@@ -481,6 +514,21 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             _active_windows[(message.group_id, target.user_id)] = (
                 time.monotonic() + _config.reply.active_window_seconds
             )
+        voice_sent = await _maybe_send_group_voice_reply(task.bot, target_message, reply)
+        if voice_sent:
+            if message.group_id is not None:
+                _group_last_sent_at[message.group_id] = time.monotonic()
+                _feature_hub.focus_group(message.group_id)
+            if reply.send_sticker and _is_explicit_group_sticker_request(target_message):
+                await _send_reply_sticker_if_requested(
+                    task.bot,
+                    message,
+                    reply.sticker_intent or target.question_text,
+                )
+            await _pending_question_service.mark_answered(target)
+            if target is not targets[-1] and message.group_id is not None:
+                await _wait_group_interval(message.group_id)
+            continue
 
         await send_reply_bubbles(
             task.bot,
@@ -541,6 +589,90 @@ async def _targets_for_task(task: GroupReplyTask):
     return []
 
 
+async def _maybe_send_group_voice_reply(
+    bot: Bot,
+    message: NormalizedMessage,
+    reply,
+) -> bool:
+    if not tts_enabled_for_scope(_config.tts, message.scope_type):
+        return False
+    explicit_text = extract_explicit_voice_read_text(message)
+    if explicit_text is not None:
+        safety = _voice_safety_service.check_input(explicit_text, scope_type=message.scope_type)
+        if safety.action != "allow":
+            return False
+        if len(explicit_text) > _config.tts.max_chars:
+            return False
+        await record_explicit_voice_selected(
+            message,
+            config=_config.tts,
+            chars=len(explicit_text),
+            record_system_event=_conversation_service.record_system_event,
+        )
+        sent = await _maybe_send_group_tts_text(bot, message, explicit_text)
+        if not sent:
+            await record_tts_fallback_text_sent(
+                message,
+                reason="explicit_tts_failed",
+                record_system_event=_conversation_service.record_system_event,
+            )
+        return sent
+
+    decision = await _voice_reply_decider.decide_random(
+        message,
+        reply,
+        config=_config.tts,
+        record_system_event=_conversation_service.record_system_event,
+    )
+    if not decision.selected:
+        return False
+    sent = await _maybe_send_group_tts_text(bot, message, decision.speech_text)
+    if not sent:
+        await record_tts_fallback_text_sent(
+            message,
+            reason="random_tts_failed",
+            record_system_event=_conversation_service.record_system_event,
+        )
+    return sent
+
+
+async def _maybe_send_group_tts(
+    bot: Bot,
+    message: NormalizedMessage,
+    reply,
+) -> bool:
+    return await _maybe_send_group_tts_text(bot, message, reply.text)
+
+
+async def _maybe_send_group_tts_text(
+    bot: Bot,
+    message: NormalizedMessage,
+    text: str,
+) -> bool:
+    if message.group_id is None:
+        return False
+    result = await _tts_service.generate_for_text(message, text)
+    if result is None:
+        return False
+    try:
+        await _wait_group_interval(message.group_id)
+        await send_group_record_direct(
+            bot,
+            group_id=message.group_id,
+            file_path=result.audio_path,
+        )
+        _group_last_sent_at[message.group_id] = time.monotonic()
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="tts_send_failed",
+            detail=f"scope=group; profile={result.voice_profile_id}; reason={type(exc).__name__}; detail={str(exc)[:120]}",
+            trace_id=message.trace_id,
+        )
+        return False
+    return True
+
+
 async def _pending_backfill_targets(message: NormalizedMessage) -> list[PendingQuestionTarget]:
     if message.group_id is None:
         return [_single_message_target(message)]
@@ -590,6 +722,20 @@ def _should_try_probabilistic_repeat(
     if pending_question is not None:
         return False
     return bool(normalized.media_items or normalized.text.strip())
+
+
+def _should_enqueue_sticker_intent_reply(
+    normalized: NormalizedMessage,
+    *,
+    sticker_asset_id: str | None,
+) -> bool:
+    if sticker_asset_id is None or not normalized.media_items:
+        return False
+    return _feature_hub.presence.should_repeat(
+        normalized,
+        repeat_kind="sticker",
+        plus_one=False,
+    )
 
 
 def _thread_key(normalized) -> str:
@@ -734,17 +880,23 @@ async def _send_reply_sticker_if_requested(
 
 
 async def _choose_safe_sticker(intent_text: str):
-    asset = await _feature_hub.stickers.choose_for_text(intent_text)
-    if asset is None:
-        return None
-    if _feature_hub.sticker_analysis is not None:
-        analysis = await _feature_hub.sticker_analysis.ensure_analyzed(asset)
-        if (
-            analysis is not None
-            and analysis.safety_category in {"adult", "illegal", "violence", "privacy"}
-        ):
+    for _ in range(3):
+        asset = await _feature_hub.stickers.choose_for_text(intent_text)
+        if asset is None:
             return None
-    return asset
+        if await _is_sticker_asset_sendable(asset):
+            return asset
+    return None
+
+
+async def _is_sticker_asset_sendable(asset) -> bool:
+    if _feature_hub.sticker_analysis is None:
+        return True
+    analysis = await _feature_hub.sticker_analysis.get_completed_analysis(asset.asset_id)
+    return not (
+        analysis is not None
+        and analysis.safety_category in {"adult", "illegal", "violence", "privacy"}
+    )
 
 
 async def _send_context_sticker_missing_text(

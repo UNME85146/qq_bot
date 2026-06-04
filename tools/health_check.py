@@ -69,6 +69,16 @@ def build_health_report(
             "mode": config.persona.mode,
             "sourceUserId": config.persona.style_profile.source_user_id,
         },
+        "tts": {
+            "enabled": config.tts.enabled,
+            "privateEnabled": config.tts.private_enabled,
+            "groupEnabled": config.tts.group_enabled,
+            "provider": config.tts.provider,
+            "backend": config.tts.backend,
+            "executionProvider": config.tts.execution_provider,
+            "endpoint": config.tts.endpoint,
+            "defaultVoiceProfileId": config.tts.default_voice_profile_id,
+        },
         "db": _db_health(db_path, recent_event_limit),
         "logs": _log_health(log_dir),
     }

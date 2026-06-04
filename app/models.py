@@ -250,6 +250,45 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class TTSVoiceProfileConfig:
+    id: str
+    voice: str
+    language: str
+    gender: str
+    prompt_audio_path: str | None = None
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class TTSConfig:
+    enabled: bool = False
+    provider: str = "moss_tts_nano"
+    backend: str = "onnx"
+    execution_provider: str = "cuda"
+    endpoint: str = "http://127.0.0.1:18100/tts"
+    voice: str = "xiaohuang_default"
+    format: str = "wav"
+    max_chars: int = 160
+    request_timeout_seconds: float = 20.0
+    private_enabled: bool = False
+    group_enabled: bool = False
+    private_cooldown_seconds: float = 30.0
+    group_cooldown_seconds: float = 60.0
+    cache_dir: str = "data/tts/cache"
+    default_voice_profile_id: str = "xiaohuang_default"
+    voice_profiles: tuple[TTSVoiceProfileConfig, ...] = field(default_factory=tuple)
+
+    def current_profile(self) -> TTSVoiceProfileConfig | None:
+        for profile in self.voice_profiles:
+            if profile.id == self.default_voice_profile_id and profile.enabled:
+                return profile
+        for profile in self.voice_profiles:
+            if profile.enabled:
+                return profile
+        return None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     qq: QQConfig
     onebot: OneBotConfig
@@ -260,6 +299,7 @@ class AppConfig:
     limits: LimitsConfig
     storage: StorageConfig
     logging: LoggingConfig
+    tts: TTSConfig = field(default_factory=TTSConfig)
 
 
 @dataclass(frozen=True)

@@ -4,10 +4,10 @@
     "rootUserIds": ["ROOT_QQ"],
     "ownerUserIds": ["OWNER_QQ"],
     "allowedPrivateUserIds": ["OWNER_QQ"],
-    "allowedGroupIds": ["ALLOWED_GROUP_ID"],
+    "allowedGroupIds": [],
     "groupMuteControllerUserIds": ["OWNER_QQ"],
     "memoryAllowedUserIds": ["OWNER_QQ"],
-    "nicknames": ["BOT_NICKNAME", "机器人"]
+    "nicknames": ["your-bot-name", "bot"]
   },
   "onebot": {
     "mode": "ws_reverse",
@@ -17,7 +17,7 @@
     "apiRoot": "http://127.0.0.1:3000"
   },
   "model": {
-    "provider": "openai-compatible",
+    "provider": "openai_compatible",
     "apiKeyEnv": "QQ_BOT_MODEL_API_KEY",
     "baseUrl": "https://api.example.com/v1",
     "name": "your-model-name",
@@ -66,5 +66,40 @@
     "level": "INFO",
     "logDir": "logs",
     "sanitizeMessageContent": true
+  },
+  "tts": {
+    "enabled": false,
+    "provider": "moss_tts_nano",
+    "backend": "onnx",
+    "executionProvider": "cuda",
+    "endpoint": "http://127.0.0.1:18100/tts",
+    "voice": "xiaohuang_default",
+    "format": "wav",
+    "maxChars": 160,
+    "requestTimeoutSeconds": 20,
+    "privateEnabled": false,
+    "groupEnabled": false,
+    "privateCooldownSeconds": 30,
+    "groupCooldownSeconds": 60,
+    "cacheDir": "data/tts/cache",
+    "defaultVoiceProfileId": "xiaohuang_default",
+    "voiceProfiles": [
+      {
+        "id": "xiaohuang_default",
+        "voice": "your-built-in-or-profile-voice",
+        "language": "zh",
+        "gender": "neutral",
+        "promptAudioPath": null,
+        "enabled": true
+      },
+      {
+        "id": "xiaohuang_zh_female",
+        "voice": "your-female-voice",
+        "language": "zh",
+        "gender": "female",
+        "promptAudioPath": null,
+        "enabled": false
+      }
+    ]
   }
 }

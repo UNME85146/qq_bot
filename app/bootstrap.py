@@ -65,7 +65,7 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
     )
     return ConversationService(
         permission_service=PermissionService(config.qq),
-        prompt_builder=PromptBuilder(config.persona),
+        prompt_builder=PromptBuilder(config.persona, config.tts),
         model_client=model_client,
         conversation_repository=conversation_repository,
         persona_state_service=PersonaStateService(

@@ -7,6 +7,10 @@ from typing import Any
 
 _SENTENCE_PATTERN = re.compile(r"[^。！？!?\n]+[。！？!?]+|[^。！？!?\n]+")
 _FENCED_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+_FENCED_BLOCK_DETAIL_PATTERN = re.compile(
+    r"```[ \t]*(?P<label>[A-Za-z0-9_+#.-]*)[ \t]*\n(?P<body>[\s\S]*?)\n?```",
+    re.MULTILINE,
+)
 _CODE_LIKE_PATTERN = re.compile(
     r"\b(def|class|import|from|return|async|await|function|const|let|var|SELECT|INSERT|UPDATE)\b|[{};]",
     re.IGNORECASE,
@@ -53,6 +57,7 @@ def parse_model_reply(text: str) -> ReplyParseResult:
     cleaned = _strip_labeled_prefix(cleaned)
     cleaned = _strip_orphan_fences(cleaned)
     cleaned = clean_reply_text(cleaned)
+    cleaned = _normalize_code_blocks(cleaned)
     if not cleaned:
         cleaned = "我刚刚没组织好，重说一下。"
     if reply_mode == "short":
@@ -238,4 +243,161 @@ def _clean_code_text(text: str) -> str:
     cleaned = str(text or "").strip()
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
     cleaned = re.sub(r"\n\s*\n+", "\n", cleaned)
-    return _strip_orphan_fences(cleaned)
+    cleaned = _strip_orphan_fences(cleaned)
+    return _normalize_code_blocks(cleaned)
+
+
+def _normalize_code_blocks(text: str) -> str:
+    if not text:
+        return text
+    if _FENCED_BLOCK_DETAIL_PATTERN.search(text):
+        return _FENCED_BLOCK_DETAIL_PATTERN.sub(_normalize_fenced_code_match, text)
+    if _looks_like_standalone_code(text):
+        return _format_code_body(_unwrap_quoted_code(text), _guess_code_language(text))
+    return text
+
+
+def _normalize_fenced_code_match(match: re.Match[str]) -> str:
+    label = match.group("label").strip().lower()
+    body = _unwrap_quoted_code(match.group("body").strip())
+    formatted = _format_code_body(body, label)
+    return f"```\n{formatted}\n```"
+
+
+def _unwrap_quoted_code(text: str) -> str:
+    candidate = text.strip()
+    for quote in ('"', "'"):
+        if candidate.startswith(quote) and candidate.endswith(quote) and len(candidate) >= 2:
+            candidate = candidate[1:-1]
+            break
+    return (
+        candidate.replace("\\n", "\n")
+        .replace('\\"', '"')
+        .replace("\\'", "'")
+        .strip()
+    )
+
+
+def _guess_code_language(text: str) -> str:
+    lowered = text.lower()
+    if re.search(r"\b(def|import|from|elif|lambda|print)\b", lowered):
+        return "python"
+    if re.search(r"#include|std::|int\s+main|void\s+\w+\s*\(|\{|\}", text):
+        return "cpp"
+    return ""
+
+
+def _format_code_body(body: str, language: str = "") -> str:
+    language = (language or _guess_code_language(body)).lower()
+    body = body.strip()
+    if not body:
+        return body
+    if language in {"py", "python"}:
+        return _format_python_like_code(body)
+    if language in {"c", "cc", "cpp", "c++", "h", "hpp"} or _guess_code_language(body) == "cpp":
+        return _format_c_like_code(body)
+    return _normalize_code_indentation(body)
+
+
+def _format_python_like_code(body: str) -> str:
+    lines = _normalize_code_indentation(body).splitlines()
+    formatted: list[str] = []
+    indent = 0
+    dedent_prefixes = ("elif ", "else:", "except", "finally:")
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(dedent_prefixes):
+            indent = max(0, indent - 1)
+        formatted.append("    " * indent + line)
+        if line.endswith(":") and not line.startswith("#"):
+            indent += 1
+        if line.startswith(("return", "raise", "break", "continue")):
+            indent = max(0, indent - 1)
+    return "\n".join(formatted)
+
+
+def _format_c_like_code(body: str) -> str:
+    raw_lines = _c_like_statement_lines(body)
+    formatted: list[str] = []
+    indent = 0
+    for line in raw_lines:
+        if line.startswith("}"):
+            indent = max(0, indent - 1)
+        formatted.append("    " * indent + line)
+        opens = line.count("{")
+        closes = line.count("}")
+        indent = max(0, indent + opens - closes)
+    return "\n".join(formatted)
+
+
+def _c_like_statement_lines(body: str) -> list[str]:
+    lines: list[str] = []
+    current: list[str] = []
+    quote = ""
+    escape = False
+    paren_depth = 0
+
+    def flush() -> None:
+        line = re.sub(r"\s+", " ", "".join(current)).strip()
+        current.clear()
+        if line:
+            lines.append(line)
+
+    for ch in body.strip():
+        if quote:
+            current.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in {'"', "'"}:
+            quote = ch
+            current.append(ch)
+            continue
+        if ch == "(":
+            paren_depth += 1
+            current.append(ch)
+            continue
+        if ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+            current.append(ch)
+            continue
+        if ch in "\r\n":
+            flush()
+            continue
+        if ch == "{":
+            flush()
+            lines.append("{")
+            continue
+        if ch == "}":
+            flush()
+            lines.append("}")
+            continue
+        if ch == ";" and paren_depth == 0:
+            current.append(ch)
+            flush()
+            continue
+        current.append(" " if ch == "\t" else ch)
+    flush()
+    return lines
+
+
+def _normalize_code_indentation(body: str) -> str:
+    lines = [line.rstrip() for line in body.replace("\r\n", "\n").replace("\r", "\n").splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    non_empty = [line for line in lines if line.strip()]
+    if not non_empty:
+        return ""
+    indents = [len(line) - len(line.lstrip(" ")) for line in non_empty if line.startswith(" ")]
+    common = min(indents) if indents else 0
+    if common <= 0:
+        return "\n".join(line.strip() for line in lines)
+    return "\n".join(line[common:] if line.startswith(" " * common) else line.strip() for line in lines)

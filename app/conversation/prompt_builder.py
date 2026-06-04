@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models import PersonaConfig, PersonaState
+from app.models import PersonaConfig, PersonaState, TTSConfig
 
 
 class PromptBuilder:
-    def __init__(self, persona: PersonaConfig) -> None:
+    def __init__(self, persona: PersonaConfig, tts: TTSConfig | None = None) -> None:
         self._persona = persona
+        self._tts = tts
 
     def build_private_prompt(
         self,
@@ -17,6 +18,7 @@ class PromptBuilder:
         persona_state: PersonaState,
         long_term_memory: str = "",
         model_context: str = "",
+        voice_scope_type: str | None = "private",
     ) -> list[dict[str, Any]]:
         profile = self._persona.style_profile
         system_parts = [
@@ -28,6 +30,9 @@ class PromptBuilder:
             "聊天记录画像只是风格参考，不是必须使用的词库或固定台词。",
             "优先根据当前语境自然回答；不要为了模仿而硬塞口头禅、数字梗、技术词或示例句。",
             "只有语境自然匹配时，才少量借用短表达、话题倾向或示例里的节奏。",
+            "长期记忆、群名片、群内语义词和旧梗只作背景；当前问题无关时不要主动带入。",
+            "普通寒暄要像正常 QQ 对话，不要把称呼、问候和无关动词硬拼在一起。",
+            "遇到代码、调试、技术步骤请求时，优先正确清晰；不要夹带无关玩梗或旧聊天梗。",
             _format_section("语气规则", profile.tone_rules),
             _format_section("可参考的话题倾向，按当前语境取用", profile.topic_biases),
             _format_section("语境合适时可参考的短表达，不要强行使用", profile.lexicon),
@@ -36,7 +41,7 @@ class PromptBuilder:
             _format_section("少量风格示例，只学节奏和语气，不要复述原句", profile.few_shot_examples),
             "回复要像 QQ 好友即时聊天，大多数回复 1-2 句，短一点，自然一点。",
             "不要主动列表化回答，除非用户明确要求。",
-            "如需代码块，保持完整 Markdown 代码块；不要输出孤立的 ```。",
+            "如需代码块，保持完整 Markdown 代码块；不要输出孤立的 ```；代码块开头不要写 cpp/python 等语言名。",
             "如果用 JSON 包装回复，只使用 reply_text/text/content、reply_mode、send_sticker、sticker_intent 这些字段。",
             "当前角色状态："
             f"mood={persona_state.mood}, "
@@ -44,6 +49,13 @@ class PromptBuilder:
             f"trust={persona_state.trust}, "
             f"relationship_stage={persona_state.relationship_stage}。",
         ]
+        voice_instruction = (
+            self._voice_reply_instruction(voice_scope_type)
+            if voice_scope_type is not None
+            else None
+        )
+        if voice_instruction is not None:
+            system_parts.append(voice_instruction)
         if long_term_memory.strip():
             system_parts.append(f"可用的受控长期记忆：\n{long_term_memory.strip()}")
         if model_context.strip():
@@ -84,7 +96,11 @@ class PromptBuilder:
             persona_state=persona_state,
             long_term_memory=long_term_memory,
             model_context=model_context,
+            voice_scope_type=None,
         )
+        voice_instruction = self._voice_reply_instruction("group")
+        if voice_instruction is not None and voice_instruction not in messages[0]["content"]:
+            messages[0]["content"] += f"\n{voice_instruction}"
         messages[0]["content"] += (
             "\n当前场景：群聊。你是在被 @ 后回复，回复要短，不要抢话，"
             "不要把群聊当成客服工单。"
@@ -102,6 +118,21 @@ class PromptBuilder:
                 "只把它当作当前群话题背景，不要复述原文或暴露成员信息。"
             )
         return messages
+
+    def _voice_reply_instruction(self, scope_type: str) -> str | None:
+        if self._tts is None or not self._tts.enabled:
+            return None
+        if scope_type == "private" and not self._tts.private_enabled:
+            return None
+        if scope_type == "group" and not self._tts.group_enabled:
+            return None
+        return (
+            "当前会话已开启本地 TTS 语音追加：你只负责生成正常聊天回复文本，"
+            "系统会把最终回复文本交给本地语音服务朗读。"
+            "用户要求语音、念一下、读出来时，直接给出要表达或要朗读的内容；"
+            "不要说自己没有语音功能、不能发语音、发不出语音、让用户脑补、"
+            "文字代替语音、念完了，也不要输出音频标记、SSML 或解释 TTS 机制。"
+        )
 
     def build_group_system_message(
         self,

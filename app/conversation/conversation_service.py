@@ -99,6 +99,24 @@ class ConversationService:
         if has_media(message.media_items):
             return await self.handle_private_image_message(message, started_at=started_at)
 
+        greeting_reply = self._simple_private_greeting_reply(message)
+        if greeting_reply is not None:
+            await self._save_user_message(message)
+            await self._save_assistant_message(message, greeting_reply)
+            await self._persona_state_service.record_successful_reply(
+                message.scope_type,
+                message.scope_id,
+            )
+            await self._audit(
+                message,
+                action="reply",
+                reason="private_simple_greeting",
+                model_called=False,
+                safety_blocked=False,
+                started_at=started_at,
+            )
+            return greeting_reply
+
         recent_context, persona_state, model_context = await self._prepare_model_context(message)
         prompt = self._prompt_builder.build_private_prompt(
             user_name=message.user_name,
@@ -642,21 +660,22 @@ class ConversationService:
         )
         if parsed.reply_mode in {"long_text", "code_block"} and not unlimited:
             formatted_text = self._reply_formatter.format_unlimited(reply_text)
+        formatted_reply = GeneratedReply(
+            text=formatted_text,
+            raw_model_text=reply.raw_model_text,
+            model_name=reply.model_name,
+            finish_reason=reply.finish_reason,
+            safety_level=output_safety.safety_level
+            if output_safety.action != "allow"
+            else reply.safety_level,
+            prompt_tokens=reply.prompt_tokens,
+            completion_tokens=reply.completion_tokens,
+            reply_mode=parsed.reply_mode,
+            send_sticker=parsed.send_sticker and _is_explicit_sticker_context(message.text),
+            sticker_intent=parsed.sticker_intent,
+        )
         return (
-            GeneratedReply(
-                text=formatted_text,
-                raw_model_text=reply.raw_model_text,
-                model_name=reply.model_name,
-                finish_reason=reply.finish_reason,
-                safety_level=output_safety.safety_level
-                if output_safety.action != "allow"
-                else reply.safety_level,
-                prompt_tokens=reply.prompt_tokens,
-                completion_tokens=reply.completion_tokens,
-                reply_mode=parsed.reply_mode,
-                send_sticker=parsed.send_sticker,
-                sticker_intent=parsed.sticker_intent,
-            ),
+            formatted_reply,
             output_safety,
         )
 
@@ -706,6 +725,22 @@ class ConversationService:
             )
 
         return ModelCallResult(reply=reply, model_called=True)
+
+    def _simple_private_greeting_reply(self, message: NormalizedMessage) -> GeneratedReply | None:
+        if message.scope_type != "private" or _normalized_greeting_text(message.text) not in {
+            "你好",
+            "hi",
+            "hello",
+            "在吗",
+        }:
+            return None
+        text = "在呢"
+        return GeneratedReply(
+            text=text,
+            raw_model_text=text,
+            model_name="local",
+            finish_reason="private_simple_greeting",
+        )
 
     async def record_system_event(
         self,
@@ -836,3 +871,28 @@ def _image_failure_reason(failure_reason: str) -> str:
     if failure_reason == "vision_unavailable":
         return "vision_unavailable"
     return "vision_generate_failed"
+
+
+def _normalized_greeting_text(text: str) -> str:
+    return "".join(str(text or "").strip().lower().split()).strip("，。！？!?~～")
+
+
+def _is_explicit_sticker_context(text: str) -> bool:
+    compact = "".join(str(text or "").split())
+    if not compact:
+        return False
+    if any(marker in compact for marker in ("存", "保存", "收下", "记下")):
+        return False
+    return "表情" in compact and any(
+        marker in compact
+        for marker in (
+            "发",
+            "来",
+            "要",
+            "整",
+            "随机",
+            "换",
+            "再来",
+            "再发",
+        )
+    )

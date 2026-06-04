@@ -19,6 +19,8 @@ from app.models import (
     ReplyConfig,
     StorageConfig,
     StyleProfileConfig,
+    TTSConfig,
+    TTSVoiceProfileConfig,
 )
 
 
@@ -40,6 +42,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     limits = raw["limits"]
     storage = raw["storage"]
     logging = raw["logging"]
+    tts = raw.get("tts", {})
 
     api_key_env = str(model["apiKeyEnv"])
     api_key = os.getenv(api_key_env) or None
@@ -123,11 +126,66 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             log_dir=str(logging["logDir"]),
             sanitize_message_content=bool(logging["sanitizeMessageContent"]),
         ),
+        tts=_load_tts_config(tts),
     )
 
 
 def _to_str_set(values: list[Any]) -> set[str]:
     return {str(value) for value in values if str(value).strip()}
+
+
+def _load_tts_config(raw: dict[str, Any]) -> TTSConfig:
+    profiles = tuple(_load_tts_voice_profile(item) for item in raw.get("voiceProfiles", []))
+    default_profile_id = str(raw.get("defaultVoiceProfileId", "xiaohuang_default"))
+    if profiles and default_profile_id not in {profile.id for profile in profiles}:
+        enabled_profile = next((profile for profile in profiles if profile.enabled), profiles[0])
+        default_profile_id = enabled_profile.id
+    current = next(
+        (
+            profile
+            for profile in profiles
+            if profile.id == default_profile_id and profile.enabled
+        ),
+        None,
+    )
+    return TTSConfig(
+        enabled=bool(raw.get("enabled", False)),
+        provider=str(raw.get("provider", "moss_tts_nano")),
+        backend=str(raw.get("backend", "onnx")),
+        execution_provider=str(raw.get("executionProvider", "cuda")).lower(),
+        endpoint=str(raw.get("endpoint", "http://127.0.0.1:18100/tts")).rstrip("/"),
+        voice=str(raw.get("voice", current.voice if current else "xiaohuang_default")),
+        format=str(raw.get("format", "wav")).lower(),
+        max_chars=int(raw.get("maxChars", 160)),
+        request_timeout_seconds=float(raw.get("requestTimeoutSeconds", 20.0)),
+        private_enabled=bool(raw.get("privateEnabled", False)),
+        group_enabled=bool(raw.get("groupEnabled", False)),
+        private_cooldown_seconds=float(raw.get("privateCooldownSeconds", 30.0)),
+        group_cooldown_seconds=float(raw.get("groupCooldownSeconds", 60.0)),
+        cache_dir=str(raw.get("cacheDir", "data/tts/cache")),
+        default_voice_profile_id=default_profile_id,
+        voice_profiles=profiles,
+    )
+
+
+def _load_tts_voice_profile(raw: dict[str, Any]) -> TTSVoiceProfileConfig:
+    profile_id = str(raw.get("id", "")).strip()
+    if not profile_id:
+        raise ValueError("tts voice profile missing required field: id")
+    voice = str(raw.get("voice", profile_id)).strip()
+    language = str(raw.get("language", "zh")).strip().lower()
+    gender = str(raw.get("gender", "neutral")).strip().lower()
+    prompt_audio_path = raw.get("promptAudioPath")
+    if prompt_audio_path is not None:
+        prompt_audio_path = str(prompt_audio_path).strip() or None
+    return TTSVoiceProfileConfig(
+        id=profile_id,
+        voice=voice or profile_id,
+        language=language or "zh",
+        gender=gender or "neutral",
+        prompt_audio_path=prompt_audio_path,
+        enabled=bool(raw.get("enabled", True)),
+    )
 
 
 def _load_persona_config(raw: dict[str, Any], config_dir: Path) -> PersonaConfig:

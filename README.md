@@ -18,6 +18,8 @@ This repository is a sanitized public export. It intentionally excludes private 
 - Optional image understanding via the configured OpenAI-compatible model, with safe fallback when unsupported.
 - Global sticker asset pool with content-hash deduplication, semantic analysis, matching, probability repeat behavior, and a 3500 asset cap.
 - Text repeat only after the same low-risk short text appears consecutively in the same group.
+- Optional local MOSS-TTS-Nano voice replies through an independent HTTP TTS service. When enabled, 8-12 of every 80 eligible short model replies are randomly sent as QQ voice records; successful voice replies do not also send text, while TTS or record failures fall back to text.
+- Explicit read-aloud requests are supported in private chat and in group chat only when the bot is mentioned. Generic requests such as "send a voice reply" still use the model reply path rather than reading the user's raw message.
 - SQLite audit/runtime inspection, backup, export, and vacuum tools.
 
 ## Quick Start
@@ -92,6 +94,15 @@ Owner/root private commands:
 /mute status
 /mute clear
 /mute clear <group_id>
+/voice status
+/voice on
+/voice off
+/voice private on|off
+/voice group on|off
+/voice profile list
+/voice profile set <profile_id>
+/voice gender male|female|neutral
+/voice language <code>
 ```
 
 Root-only commands:
@@ -101,6 +112,46 @@ Root-only commands:
 /owner remove <qq>
 /owner list
 ```
+
+## Optional Voice Replies
+
+Voice replies use a separate local MOSS-TTS-Nano adapter service. The bot process only calls the stable local HTTP API and does not install MOSS, PyTorch, ONNX Runtime, or audio dependencies into the bot virtual environment.
+
+Default public-safe service values:
+
+```text
+Bot root: /opt/qq_bot
+TTS root: /opt/moss_tts_nano
+Endpoint: http://127.0.0.1:18100/tts
+Service: qq-bot-tts.service
+Output cache: /opt/qq_bot/data/tts/cache
+```
+
+Install and start the adapter on Linux:
+
+```bash
+cd /opt/qq_bot
+bash scripts/server/install_moss_tts_service.sh
+sudo systemctl start qq-bot-tts.service
+curl http://127.0.0.1:18100/health
+```
+
+Set `tts.enabled=true` plus `tts.privateEnabled` or `tts.groupEnabled` in private config, or use owner/root private commands:
+
+```text
+/voice status
+/voice on|off
+/voice private on|off
+/voice group on|off
+/voice profile list
+/voice profile set <profile_id>
+/voice gender male|female|neutral
+/voice language <code>
+```
+
+`/voice profile list` shows configured local profiles and a safe MOSS built-in voice summary in the form `voice | display_name | group`. It does not expose private `promptAudioPath` values or large `prompt_audio_codes`. To use a built-in MOSS voice, add a matching profile to your private `config/config.json`, then switch with `/voice profile set <profile_id>`.
+
+There is no `/voice age` command because the current public integration does not rely on a stable age control exposed by the MOSS-TTS-Nano service.
 
 ## Tools
 

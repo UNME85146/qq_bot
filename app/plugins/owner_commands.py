@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 
+import httpx
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, PrivateMessageEvent
 
@@ -17,8 +18,13 @@ from app.features.reminder_service import (
     parse_reminder_cancel_id,
 )
 from app.features.runtime_features import create_runtime_feature_hub
+from app.features.tts_service import TTSService
 from app.model.llm_client import create_model_client
-from app.ops.config_editor import handle_allow_config_command, handle_owner_config_command
+from app.ops.config_editor import (
+    handle_allow_config_command,
+    handle_owner_config_command,
+    handle_voice_config_command,
+)
 from app.ops.runtime_status import build_owner_status_text
 from app.plugins.send_helper import send_reply_bubbles
 from app.routing.permission_service import PermissionService
@@ -48,6 +54,7 @@ OWNER_COMMAND_PREFIXES = (
     "/mute",
     "/owner",
     "/remind",
+    "/voice",
 )
 
 
@@ -96,6 +103,8 @@ async def _handle_owner_command(bot: Bot, event: PrivateMessageEvent) -> None:
         if not is_root:
             return
         reply = await _owner_text(text)
+    elif text.startswith("/voice "):
+        reply = await _voice_text(text)
     elif text == "/mute status":
         reply = await _mute_status_text()
     elif text == "/mute clear" or text.startswith("/mute clear "):
@@ -209,6 +218,22 @@ def _help_text(*, is_root: bool) -> str:
     lines.extend(
         [
             "",
+            "语音命令：",
+            "/voice status - 查看语音回复状态、当前音色、服务端点和推理后端。用法：/voice status",
+            "/voice on - 开启全局语音回复。用法：/voice on",
+            "/voice off - 关闭全局语音回复。用法：/voice off",
+            "/voice private on|off - 开关私聊回复附加语音。例：/voice private on",
+            "/voice group on|off - 开关群聊回复附加语音，命令仍只允许 owner/root 私聊使用。例：/voice group on",
+            "/voice profile list - 查看可用 voice profile 和 MOSS 内置音色，不显示私有参考音频路径。用法：/voice profile list",
+            "/voice profile set <profile_id> - 切换指定 voice profile。例：/voice profile set xiaohuang_default",
+            "/voice gender male|female|neutral - 按 profile 元数据切换性别音色。例：/voice gender female",
+            "/voice language <code> - 按 profile 元数据切换语言音色，不翻译回复文本。例：/voice language zh",
+            "内置音色需先在私有配置 tts.voiceProfiles 中添加对应 profile，再用 /voice profile set 切换。",
+        ]
+    )
+    lines.extend(
+        [
+            "",
             "定时提醒命令：",
             "/remind <提醒内容> - 创建私聊定时提醒。例：/remind 十分钟后提醒我喝水",
             "/remind list - 查看待触发提醒。用法：/remind list",
@@ -294,6 +319,86 @@ async def _owner_text(text: str) -> str:
     return f"{result.text}\nhot reloaded"
 
 
+async def _voice_text(text: str) -> str:
+    try:
+        result = handle_voice_config_command(_config_path, text)
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="voice_config_write_failed",
+            detail=f"{type(exc).__name__}: {str(exc)[:120]}",
+            trace_id=None,
+        )
+        return f"语音配置写入失败：{type(exc).__name__}"
+
+    if not result.changed:
+        if _is_voice_profile_list_command(text):
+            builtin_text = await _builtin_voice_text()
+            if builtin_text:
+                return f"{result.text}\n\n{builtin_text}"
+        return result.text
+
+    try:
+        _reload_runtime_config()
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="voice_config_reload_failed",
+            detail=f"{type(exc).__name__}: {str(exc)[:120]}",
+            trace_id=None,
+        )
+        return f"{result.text}\n配置已写入，需要重启服务后生效"
+
+    return f"{result.text}\n配置已热加载"
+
+
+def _is_voice_profile_list_command(text: str) -> bool:
+    return text.strip().lower() == "/voice profile list"
+
+
+async def _builtin_voice_text() -> str:
+    voices_url = _config.tts.endpoint.rsplit("/", 1)[0] + "/voices"
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(voices_url)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return ""
+    voices = _safe_builtin_voice_rows(payload)
+    if not voices:
+        return ""
+    lines = ["MOSS 内置音色："]
+    for voice in voices[:40]:
+        lines.append(
+            f"- {voice['voice']} | {voice['display_name']} | {voice['group']}"
+        )
+    if len(voices) > 40:
+        lines.append(f"... 还有 {len(voices) - 40} 个，见 TTS 服务 /voices")
+    return "\n".join(lines)
+
+
+def _safe_builtin_voice_rows(payload) -> list[dict[str, str]]:
+    raw_voices = payload.get("builtinVoices", []) if isinstance(payload, dict) else []
+    rows = []
+    if not isinstance(raw_voices, list):
+        return rows
+    for item in raw_voices:
+        if not isinstance(item, dict):
+            continue
+        voice = str(item.get("voice", "")).strip()
+        if not voice:
+            continue
+        rows.append(
+            {
+                "voice": voice,
+                "display_name": str(item.get("display_name", "")).strip() or "-",
+                "group": str(item.get("group", "")).strip() or "-",
+            }
+        )
+    return rows
+
+
 def _reload_runtime_config() -> None:
     global _config
     global _conversation_service
@@ -334,6 +439,18 @@ def _reload_private_chat(new_config) -> None:
     )
     if hasattr(private_chat, "_reply_formatter"):
         private_chat._reply_formatter = ReplyFormatter(new_config.reply.max_reply_length)  # noqa: SLF001
+    if hasattr(private_chat, "_tts_service"):
+        private_chat._tts_service = TTSService(  # noqa: SLF001
+            new_config.tts,
+            record_system_event=private_chat._conversation_service.record_system_event,  # noqa: SLF001
+        )
+    if hasattr(private_chat, "_voice_safety_service"):
+        from app.safety.safety_service import SafetyService
+
+        private_chat._voice_safety_service = SafetyService(  # noqa: SLF001
+            identity_disclosure=new_config.persona.style_profile.identity_disclosure,
+            source_user_id=new_config.persona.style_profile.source_user_id,
+        )
 
 
 def _reload_group_chat(new_config) -> None:
@@ -380,6 +497,16 @@ def _reload_group_chat(new_config) -> None:
         max_user_messages_per_minute=new_config.limits.max_user_messages_per_minute,
         max_group_messages_per_minute=new_config.limits.max_group_messages_per_minute,
     )
+    if hasattr(group_chat, "_tts_service"):
+        group_chat._tts_service = TTSService(  # noqa: SLF001
+            new_config.tts,
+            record_system_event=group_chat._conversation_service.record_system_event,  # noqa: SLF001
+        )
+    if hasattr(group_chat, "_voice_safety_service"):
+        group_chat._voice_safety_service = SafetyService(  # noqa: SLF001
+            identity_disclosure=new_config.persona.style_profile.identity_disclosure,
+            source_user_id=new_config.persona.style_profile.source_user_id,
+        )
 
 
 def _reload_group_reactions(new_config) -> None:
