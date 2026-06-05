@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -7,8 +7,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import types
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,20 @@ class TTSRequest(BaseModel):
     voiceProfileId: str
     format: str = "wav"
     traceId: str | None = None
+    exactText: bool = False
+
+
+@dataclass(frozen=True)
+class TTSGenerationProfile:
+    name: str
+    sample_mode: str
+    do_sample: bool
+    max_new_frames: int
+    enable_normalize_tts_text: bool
+    audio_temperature: float
+    audio_top_p: float
+    audio_top_k: int
+    audio_repetition_penalty: float
 
 
 class AdapterState:
@@ -55,6 +71,7 @@ class AdapterState:
         self.voice_clone_max_text_tokens = voice_clone_max_text_tokens
         self.profiles = {profile.id: profile for profile in profiles if profile.enabled}
         self._runtime = None
+        self.synthesis_lock = threading.Lock()
 
     @property
     def runtime(self):
@@ -103,6 +120,8 @@ def create_app(state: AdapterState) -> FastAPI:
                 "outputDir": str(state.output_dir),
                 "outputDirWritable": _writable(state.output_dir),
                 "voiceProfileCount": len(state.profiles),
+                "stabilityMode": True,
+                "generationProfiles": _generation_profile_summary(state.max_new_frames),
             }
         )
 
@@ -125,28 +144,25 @@ def create_app(state: AdapterState) -> FastAPI:
         text = request.text.strip()
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
+        if not _compact_tts_text(text):
+            raise HTTPException(status_code=400, detail="text has no speakable content")
         if request.format.lower() != "wav":
             raise HTTPException(status_code=400, detail="only wav is supported in v1")
         profile = state.profile_for(request.voiceProfileId)
         started_at = time.perf_counter()
         output_path = state.output_dir / _output_name(text, profile.id)
-        result = state.runtime.synthesize(
-            text=text,
-            voice=profile.voice,
-            prompt_audio_path=profile.promptAudioPath,
-            output_audio_path=output_path,
-            sample_mode="fixed",
-            do_sample=True,
-            streaming=False,
-            max_new_frames=_max_new_frames_for_text(text, state.max_new_frames),
-            voice_clone_max_text_tokens=state.voice_clone_max_text_tokens,
-            enable_wetext=False,
-            enable_normalize_tts_text=True,
-        )
-        generated_path = Path(str(result["audio_path"]))
-        final_path = _normalize_wav(generated_path, output_path)
+        with state.synthesis_lock:
+            result, generation_profile, retry_count = _synthesize_with_stability_guard(
+                state,
+                text=text,
+                profile=profile,
+                output_path=output_path,
+                exact_text=request.exactText,
+            )
+        final_path = Path(str(result["final_audio_path"]))
         sample_rate, channels, duration_ms = _wav_info(final_path)
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        duration_guard_ms = _duration_guard_ms(text)
         return JSONResponse(
             {
                 "audio_path": str(final_path),
@@ -156,6 +172,10 @@ def create_app(state: AdapterState) -> FastAPI:
                 "execution_provider": state.execution_provider,
                 "voice_profile_id": profile.id,
                 "elapsed_ms": elapsed_ms,
+                "generation_profile": generation_profile.name,
+                "max_new_frames": generation_profile.max_new_frames,
+                "retry_count": retry_count,
+                "duration_guard_ms": duration_guard_ms,
             }
         )
 
@@ -168,17 +188,278 @@ def _output_name(text: str, profile_id: str) -> str:
 
 
 def _max_new_frames_for_text(text: str, configured_max: int) -> int:
+    return _generation_profile_for_text(text, configured_max).max_new_frames
+
+
+def _compact_tts_text(text: str) -> str:
     compact = "".join(str(text or "").split())
+    punctuation = set(
+        "\uff0c,\u3002.!\uff01?\uff1f\u3001\uff1a:;\"'\u201c\u201d"
+        "\u2018\u2019\uff08\uff09()[]\u3010\u3011<>\u300a\u300b"
+    )
+    return "".join(character for character in compact if character not in punctuation)
+
+
+def _generation_profile_for_text(
+    text: str,
+    configured_max: int,
+    *,
+    exact_text: bool = False,
+    rescue: bool = False,
+) -> TTSGenerationProfile:
+    compact = _compact_tts_text(text)
     length = len(compact)
+    cap = max(1, int(configured_max))
     if length <= 0:
-        return configured_max
+        max_new_frames = cap
+        profile = TTSGenerationProfile(
+            name="default_empty",
+            sample_mode="fixed",
+            do_sample=True,
+            max_new_frames=max_new_frames,
+            enable_normalize_tts_text=True,
+            audio_temperature=0.65,
+            audio_top_p=0.85,
+            audio_top_k=16,
+            audio_repetition_penalty=1.3,
+        )
+        return _rescue_profile(profile) if rescue else profile
     if length <= 4:
-        return min(configured_max, 120)
+        profile = TTSGenerationProfile(
+            name="short_1_4_exact" if exact_text else "short_1_4",
+            sample_mode="greedy",
+            do_sample=False,
+            max_new_frames=min(cap, 24),
+            enable_normalize_tts_text=False,
+            audio_temperature=0.55,
+            audio_top_p=0.75,
+            audio_top_k=10,
+            audio_repetition_penalty=1.5,
+        )
+        return _rescue_profile(profile) if rescue else profile
     if length <= 8:
-        return min(configured_max, 160)
+        profile = TTSGenerationProfile(
+            name="short_5_8_exact" if exact_text else "short_5_8",
+            sample_mode="greedy",
+            do_sample=False,
+            max_new_frames=min(cap, 32),
+            enable_normalize_tts_text=False,
+            audio_temperature=0.55,
+            audio_top_p=0.75,
+            audio_top_k=10,
+            audio_repetition_penalty=1.5,
+        )
+        return _rescue_profile(profile) if rescue else profile
     if length <= 16:
-        return min(configured_max, 220)
-    return configured_max
+        profile = TTSGenerationProfile(
+            name="medium_9_16",
+            sample_mode="greedy",
+            do_sample=False,
+            max_new_frames=min(cap, 56),
+            enable_normalize_tts_text=True,
+            audio_temperature=0.6,
+            audio_top_p=0.8,
+            audio_top_k=12,
+            audio_repetition_penalty=1.45,
+        )
+        return _rescue_profile(profile) if rescue else profile
+    if length <= 32:
+        profile = TTSGenerationProfile(
+            name="medium_17_32",
+            sample_mode="greedy",
+            do_sample=False,
+            max_new_frames=min(cap, 96),
+            enable_normalize_tts_text=True,
+            audio_temperature=0.6,
+            audio_top_p=0.82,
+            audio_top_k=14,
+            audio_repetition_penalty=1.4,
+        )
+        return _rescue_profile(profile) if rescue else profile
+    if length <= 80:
+        profile = TTSGenerationProfile(
+            name="long_33_80",
+            sample_mode="greedy",
+            do_sample=False,
+            max_new_frames=min(cap, 160),
+            enable_normalize_tts_text=True,
+            audio_temperature=0.62,
+            audio_top_p=0.85,
+            audio_top_k=16,
+            audio_repetition_penalty=1.35,
+        )
+        return _rescue_profile(profile) if rescue else profile
+    profile = TTSGenerationProfile(
+        name="long_80_plus",
+        sample_mode="fixed",
+        do_sample=True,
+        max_new_frames=min(cap, 240),
+        enable_normalize_tts_text=True,
+        audio_temperature=0.65,
+        audio_top_p=0.85,
+        audio_top_k=16,
+        audio_repetition_penalty=1.3,
+    )
+    return _rescue_profile(profile) if rescue else profile
+
+
+def _rescue_profile(profile: TTSGenerationProfile) -> TTSGenerationProfile:
+    return TTSGenerationProfile(
+        name=f"{profile.name}_rescue",
+        sample_mode="greedy",
+        do_sample=False,
+        max_new_frames=max(12, int(profile.max_new_frames * 0.75)),
+        enable_normalize_tts_text=profile.enable_normalize_tts_text,
+        audio_temperature=min(profile.audio_temperature, 0.55),
+        audio_top_p=min(profile.audio_top_p, 0.75),
+        audio_top_k=min(profile.audio_top_k, 10),
+        audio_repetition_penalty=1.65,
+    )
+
+
+def _apply_generation_defaults(runtime: Any, profile: TTSGenerationProfile) -> dict[str, Any]:
+    defaults = runtime.manifest["generation_defaults"]
+    snapshot = dict(defaults)
+    defaults["max_new_frames"] = int(profile.max_new_frames)
+    defaults["sample_mode"] = profile.sample_mode
+    defaults["do_sample"] = bool(profile.do_sample)
+    defaults["audio_temperature"] = float(profile.audio_temperature)
+    defaults["audio_top_p"] = float(profile.audio_top_p)
+    defaults["audio_top_k"] = int(profile.audio_top_k)
+    defaults["audio_repetition_penalty"] = float(profile.audio_repetition_penalty)
+    return snapshot
+
+
+def _restore_generation_defaults(runtime: Any, snapshot: dict[str, Any]) -> None:
+    defaults = runtime.manifest["generation_defaults"]
+    defaults.clear()
+    defaults.update(snapshot)
+
+
+def _duration_guard_ms(text: str) -> int:
+    length = len(_compact_tts_text(text))
+    if length <= 0:
+        return 0
+    if length <= 4:
+        return 2200
+    if length <= 8:
+        return 3200
+    if length <= 16:
+        return 5200
+    if length <= 32:
+        return 8000
+    return min(18000, 1600 + length * 220)
+
+
+def _duration_out_of_bounds(text: str, duration_ms: int | None) -> bool:
+    guard = _duration_guard_ms(text)
+    return guard > 0 and duration_ms is not None and duration_ms > guard
+
+
+def _generation_profile_summary(configured_max: int) -> list[dict[str, Any]]:
+    examples = [
+        ("1-4", "aaaa"),
+        ("5-8", "aaaaa"),
+        ("9-16", "aaaaaaaaa"),
+        ("17-32", "a" * 18),
+        ("33-80", "a" * 33),
+        (">80", "a" * 81),
+    ]
+    rows = []
+    for label, example in examples:
+        profile = _generation_profile_for_text(example, configured_max)
+        rows.append(
+            {
+                "range": label,
+                "profile": profile.name,
+                "sampleMode": profile.sample_mode,
+                "doSample": profile.do_sample,
+                "maxNewFrames": profile.max_new_frames,
+                "audioRepetitionPenalty": profile.audio_repetition_penalty,
+            }
+        )
+    return rows
+
+
+def _synthesize_once(
+    state: AdapterState,
+    *,
+    text: str,
+    profile: VoiceProfile,
+    output_path: Path,
+    generation_profile: TTSGenerationProfile,
+) -> dict[str, Any]:
+    runtime = state.runtime
+    snapshot = _apply_generation_defaults(runtime, generation_profile)
+    try:
+        result = runtime.synthesize(
+            text=text,
+            voice=profile.voice,
+            prompt_audio_path=profile.promptAudioPath,
+            output_audio_path=output_path,
+            sample_mode=generation_profile.sample_mode,
+            do_sample=generation_profile.do_sample,
+            streaming=False,
+            max_new_frames=generation_profile.max_new_frames,
+            voice_clone_max_text_tokens=state.voice_clone_max_text_tokens,
+            enable_wetext=False,
+            enable_normalize_tts_text=generation_profile.enable_normalize_tts_text,
+        )
+    finally:
+        _restore_generation_defaults(runtime, snapshot)
+    generated_path = Path(str(result["audio_path"]))
+    final_path = _normalize_wav(generated_path, output_path)
+    result["final_audio_path"] = str(final_path)
+    return result
+
+
+def _synthesize_with_stability_guard(
+    state: AdapterState,
+    *,
+    text: str,
+    profile: VoiceProfile,
+    output_path: Path,
+    exact_text: bool,
+) -> tuple[dict[str, Any], TTSGenerationProfile, int]:
+    generation_profile = _generation_profile_for_text(
+        text,
+        state.max_new_frames,
+        exact_text=exact_text,
+    )
+    result = _synthesize_once(
+        state,
+        text=text,
+        profile=profile,
+        output_path=output_path,
+        generation_profile=generation_profile,
+    )
+    _, _, duration_ms = _wav_info(Path(str(result["final_audio_path"])))
+    if not _duration_out_of_bounds(text, duration_ms):
+        return result, generation_profile, 0
+
+    rescue_profile = _generation_profile_for_text(
+        text,
+        state.max_new_frames,
+        exact_text=exact_text,
+        rescue=True,
+    )
+    rescue_output_path = output_path.with_name(f"{output_path.stem}.rescue.wav")
+    rescue_result = _synthesize_once(
+        state,
+        text=text,
+        profile=profile,
+        output_path=rescue_output_path,
+        generation_profile=rescue_profile,
+    )
+    _, _, rescue_duration_ms = _wav_info(Path(str(rescue_result["final_audio_path"])))
+    if _duration_out_of_bounds(text, rescue_duration_ms):
+        raise HTTPException(status_code=500, detail="duration_out_of_bounds")
+    final_path = Path(str(rescue_result["final_audio_path"]))
+    if final_path != output_path:
+        final_path.replace(output_path)
+        rescue_result["final_audio_path"] = str(output_path)
+        rescue_result["audio_path"] = str(output_path)
+    return rescue_result, rescue_profile, 1
 
 
 def _normalize_wav(source: Path, target: Path) -> Path:

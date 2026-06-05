@@ -306,7 +306,12 @@ async def _maybe_send_private_voice_reply(
             chars=len(explicit_text),
             record_system_event=_conversation_service.record_system_event,
         )
-        sent = await _maybe_send_private_tts_text(bot, normalized, explicit_text)
+        sent = await _maybe_send_private_tts_text(
+            bot,
+            normalized,
+            explicit_text,
+            exact_short=True,
+        )
         if not sent:
             await record_tts_fallback_text_sent(
                 normalized,
@@ -337,8 +342,21 @@ async def _maybe_send_private_tts(bot: Bot, normalized, reply: GeneratedReply) -
     return await _maybe_send_private_tts_text(bot, normalized, reply.text)
 
 
-async def _maybe_send_private_tts_text(bot: Bot, normalized, text: str) -> bool:
-    result = await _tts_service.generate_for_text(normalized, text)
+async def _maybe_send_private_tts_text(
+    bot: Bot,
+    normalized,
+    text: str,
+    *,
+    exact_short: bool = False,
+) -> bool:
+    if exact_short:
+        result = await _tts_service.generate_for_text(
+            normalized,
+            text,
+            exact_short=True,
+        )
+    else:
+        result = await _tts_service.generate_for_text(normalized, text)
     if result is None:
         return False
     try:

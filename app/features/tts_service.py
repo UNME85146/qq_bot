@@ -21,6 +21,10 @@ class TTSGenerationResult:
     channels: int | None
     execution_provider: str
     voice_profile_id: str
+    generation_profile: str = ""
+    max_new_frames: int | None = None
+    retry_count: int = 0
+    duration_guard_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -70,9 +74,10 @@ class TTSService:
         text: str,
         *,
         voice_profile_id: str | None = None,
+        exact_short: bool = False,
     ) -> TTSGenerationResult | None:
         scope_type = message.scope_type
-        speech_text = prepare_tts_speech_text(text)
+        speech_text = prepare_tts_speech_text(text, exact_short=exact_short)
         if not speech_text:
             return None
 
@@ -115,12 +120,13 @@ class TTSService:
             ) as client:
                 response = await client.post(
                     self._config.endpoint,
-                    json={
-                        "text": speech_text,
-                        "voiceProfileId": profile_id,
-                        "format": self._config.format,
-                        "traceId": message.trace_id,
-                    },
+                    json=_tts_request_payload(
+                        text=speech_text,
+                        voiceProfileId=profile_id,
+                        format=self._config.format,
+                        traceId=message.trace_id,
+                        exact_text=exact_short,
+                    ),
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -151,13 +157,20 @@ class TTSService:
             payload.get("execution_provider") or self._config.execution_provider
         )
         result_profile_id = str(payload.get("voice_profile_id") or profile_id)
+        generation_profile = str(payload.get("generation_profile") or "")
+        max_new_frames = _optional_int(payload.get("max_new_frames"))
+        retry_count = _optional_int(payload.get("retry_count")) or 0
+        duration_guard_ms = _optional_int(payload.get("duration_guard_ms"))
         await self._record(
             "INFO",
             "tts_generate_finished",
             (
                 f"scope={scope_type}; profile={result_profile_id}; elapsed_ms={elapsed_ms}; "
                 f"duration_ms={duration_ms if duration_ms is not None else 'unknown'}; "
-                f"execution_provider={execution_provider}"
+                f"execution_provider={execution_provider}; generation_profile={generation_profile or 'unknown'}; "
+                f"max_new_frames={max_new_frames if max_new_frames is not None else 'unknown'}; "
+                f"retry_count={retry_count}; "
+                f"duration_guard_ms={duration_guard_ms if duration_guard_ms is not None else 'unknown'}"
             ),
             message.trace_id,
         )
@@ -168,6 +181,10 @@ class TTSService:
             channels=channels,
             execution_provider=execution_provider,
             voice_profile_id=result_profile_id,
+            generation_profile=generation_profile,
+            max_new_frames=max_new_frames,
+            retry_count=retry_count,
+            duration_guard_ms=duration_guard_ms,
         )
 
     def skip_reason(self, reply: GeneratedReply, *, scope_type: str) -> str | None:
@@ -409,6 +426,25 @@ def _failure_detail(scope_type: str, profile_id: str, exc: Exception) -> str:
         f"scope={scope_type}; profile={profile_id}; "
         f"reason={type(exc).__name__}; detail={str(exc)[:120]}"
     )
+
+
+def _tts_request_payload(
+    *,
+    text: str,
+    voiceProfileId: str,
+    format: str,
+    traceId: str | None,
+    exact_text: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "text": text,
+        "voiceProfileId": voiceProfileId,
+        "format": format,
+        "traceId": traceId,
+    }
+    if exact_text:
+        payload["exactText"] = True
+    return payload
 
 
 def _optional_int(value: Any) -> int | None:

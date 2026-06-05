@@ -609,7 +609,12 @@ async def _maybe_send_group_voice_reply(
             chars=len(explicit_text),
             record_system_event=_conversation_service.record_system_event,
         )
-        sent = await _maybe_send_group_tts_text(bot, message, explicit_text)
+        sent = await _maybe_send_group_tts_text(
+            bot,
+            message,
+            explicit_text,
+            exact_short=True,
+        )
         if not sent:
             await record_tts_fallback_text_sent(
                 message,
@@ -648,10 +653,19 @@ async def _maybe_send_group_tts_text(
     bot: Bot,
     message: NormalizedMessage,
     text: str,
+    *,
+    exact_short: bool = False,
 ) -> bool:
     if message.group_id is None:
         return False
-    result = await _tts_service.generate_for_text(message, text)
+    if exact_short:
+        result = await _tts_service.generate_for_text(
+            message,
+            text,
+            exact_short=True,
+        )
+    else:
+        result = await _tts_service.generate_for_text(message, text)
     if result is None:
         return False
     try:
