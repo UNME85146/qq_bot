@@ -75,6 +75,7 @@ class TTSService:
         *,
         voice_profile_id: str | None = None,
         exact_short: bool = False,
+        ignore_cooldown: bool = False,
     ) -> TTSGenerationResult | None:
         scope_type = message.scope_type
         speech_text = prepare_tts_speech_text(text, exact_short=exact_short)
@@ -89,7 +90,11 @@ class TTSService:
         )
         now = self._now()
         last_attempt_at = self._last_attempt_at.get(key)
-        if last_attempt_at is not None and now - last_attempt_at < cooldown_seconds:
+        if (
+            not ignore_cooldown
+            and last_attempt_at is not None
+            and now - last_attempt_at < cooldown_seconds
+        ):
             await self._record(
                 "INFO",
                 "tts_rate_limited",
@@ -336,7 +341,32 @@ def extract_explicit_voice_read_text(message: NormalizedMessage) -> str | None:
     if not content:
         return None
     speech_text = prepare_tts_speech_text(content, exact_short=True)
+    if _is_voice_reply_trailing_particle(speech_text):
+        return None
     return speech_text or None
+
+
+def is_explicit_voice_reply_request(message: NormalizedMessage) -> bool:
+    if message.scope_type == "group" and not message.is_at_self:
+        return False
+    text = str(message.text or "").strip()
+    if not text:
+        return False
+    if extract_explicit_voice_read_text(message) is not None:
+        return False
+    return _VOICE_REPLY_REQUEST_RE.search(text) is not None
+
+
+def tts_scope_disabled_reason(config: TTSConfig, scope_type: str) -> str | None:
+    if not config.enabled:
+        return "disabled"
+    if scope_type == "private" and not config.private_enabled:
+        return "private_disabled"
+    if scope_type == "group" and not config.group_enabled:
+        return "group_disabled"
+    if scope_type not in {"private", "group"}:
+        return "scope_unsupported"
+    return None
 
 
 def tts_candidate_skip_reason(
@@ -365,14 +395,25 @@ def tts_candidate_skip_reason(
     return None
 
 
+def forced_voice_tts_skip_reason(
+    config: TTSConfig,
+    reply: GeneratedReply,
+    *,
+    scope_type: str,
+) -> str | None:
+    skip_reason = tts_candidate_skip_reason(config, reply, scope_type=scope_type)
+    if skip_reason != "not_model_reply" or reply.model_name != "fallback":
+        return skip_reason
+    speech_text = prepare_tts_speech_text(str(reply.text or ""))
+    if not speech_text:
+        return "empty_speech_text"
+    if len(speech_text) > config.max_chars:
+        return "too_long"
+    return None
+
+
 def tts_enabled_for_scope(config: TTSConfig, scope_type: str) -> bool:
-    if not config.enabled:
-        return False
-    if scope_type == "private":
-        return config.private_enabled
-    if scope_type == "group":
-        return config.group_enabled
-    return False
+    return tts_scope_disabled_reason(config, scope_type) is None
 
 
 async def record_explicit_voice_selected(
@@ -521,11 +562,27 @@ _CJK_SINGLE_CHAR_SPACE_RE = re.compile(r"(?<=[\u4e00-\u9fff])\s+(?=[了着过吗
 _SPACE_RE = re.compile(r"\s+")
 _EXPLICIT_READ_RE = re.compile(
     r"(?:^|[\s，,。.!！?？])"
-    r"(?:用语音|语音)?(?:给我|帮我|替我)?"
-    r"(?:读|念|朗读)"
+    r"(?:再|继续|还)?"
+    r"(?:"
+    r"(?:用语音|语音)?(?:给我|帮我|替我)?(?:读|念|朗读)"
+    r"|(?:发|来|整)(?:一?(?:句|段)|个|条)?语音"
+    r"|(?:用语音|语音)(?:说|讲)"
+    r")"
     r"(?:一下|一遍|出来|下)?"
     r"[\s：:，,]*"
     r"(?P<content>.+)$"
+)
+_VOICE_REPLY_REQUEST_RE = re.compile(
+    r"(?:^|[\s，,。.!！?？])"
+    r"(?:再|继续|还)?"
+    r"(?:"
+    r"(?:给我|帮我)?(?:发|来|整)(?:一?(?:句|段)|个|条)?语音"
+    r"|(?:回|回复|随口说|随便说|说)(?:一?(?:句|段)|个|条)?语音"
+    r"|(?:用语音|语音)(?:回|回复)"
+    r")"
+    r"(?:我|一下|一段|一句|下)?"
+    r"(?:吧|呗|嘛|啊|呀|哦|呢|吗|么)?"
+    r"[\s，,。.!！?？]*$"
 )
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;]+")
 _DUP_PUNCT_RE = re.compile(r"([，。！？!?；;、])\1+")
@@ -577,6 +634,18 @@ def _collapse_dirty_short_repetition(text: str) -> str:
 def _is_short_read_text(text: str) -> bool:
     compact = re.sub(r"[\s，。！？!?；;、：:]+", "", str(text or ""))
     return 2 <= len(compact) <= 8
+
+
+def _is_voice_reply_trailing_particle(text: str) -> bool:
+    return re.sub(r"[\s，。！？!?；;、：:]+", "", str(text or "")) in {
+        "吧",
+        "呗",
+        "嘛",
+        "啊",
+        "呀",
+        "哦",
+        "呢",
+    }
 
 
 def _normalize_tts_punctuation(text: str) -> str:

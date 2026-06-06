@@ -193,7 +193,7 @@ def _handle_voice_profile_command(
             marker = "*" if str(profile.get("id", "")) == current_id else "-"
             enabled_text = "开" if bool(profile.get("enabled", True)) else "关"
             lines.append(
-                f"{marker} {profile.get('id', '')} 音色={profile.get('voice', '')} "
+                f"{marker} id={profile.get('id', '')} 音色={profile.get('voice', '')} "
                 f"语言={profile.get('language', '')} 性别={profile.get('gender', '')} "
                 f"启用={enabled_text}"
             )

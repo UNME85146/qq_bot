@@ -369,9 +369,14 @@ async def _builtin_voice_text() -> str:
     if not voices:
         return ""
     lines = ["MOSS 内置音色："]
+    profile_ids_by_voice = {
+        profile.voice: profile.id for profile in _config.tts.voice_profiles
+    }
     for voice in voices[:40]:
+        profile_id = profile_ids_by_voice.get(voice["voice"], "-")
         lines.append(
-            f"- {voice['voice']} | {voice['display_name']} | {voice['group']}"
+            f"- {voice['voice']} | profile_id={profile_id} | "
+            f"{voice['display_name']} | {voice['group']}"
         )
     if len(voices) > 40:
         lines.append(f"... 还有 {len(voices) - 40} 个，见 TTS 服务 /voices")

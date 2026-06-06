@@ -133,5 +133,5 @@ def _normalize_category(text: str) -> str:
 
 def _image_unavailable_text(scope_type: str) -> str:
     if scope_type == "group":
-        return "这图我现在看不了"
-    return "这图我现在看不了，换张或者直接说内容吧。"
+        return "图裂了 我看不了"
+    return "这图我这边看不了，你直接说内容吧"

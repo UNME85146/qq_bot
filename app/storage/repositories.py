@@ -1200,6 +1200,33 @@ class StickerAssetAnalysisRepository:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [asset_id for _, asset_id in scored]
 
+    async def list_failed_unknown(self, *, limit: int = 200) -> list[StickerAssetAnalysis]:
+        async with aiosqlite.connect(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  asset_id,
+                  intent_summary,
+                  emotion_tags,
+                  scene_tags,
+                  text_tags,
+                  reply_usage_hint,
+                  safety_category,
+                  analysis_status,
+                  analyzed_at,
+                  updated_at
+                FROM sticker_asset_analysis
+                WHERE analysis_status = 'failed'
+                  AND safety_category = 'unknown'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_analysis(row) for row in rows]
+
     def _to_analysis(self, row: aiosqlite.Row) -> StickerAssetAnalysis:
         return StickerAssetAnalysis(
             asset_id=str(row["asset_id"]),

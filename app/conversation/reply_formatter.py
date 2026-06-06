@@ -15,6 +15,45 @@ _CODE_LIKE_PATTERN = re.compile(
     r"\b(def|class|import|from|return|async|await|function|const|let|var|SELECT|INSERT|UPDATE)\b|[{};]",
     re.IGNORECASE,
 )
+_FAKE_MEDIA_ACTION_PATTERN = re.compile(
+    r"^[（(]\s*"
+    r"(?=[^）)]*(?:发送|发|附上|贴|来|整|给你发))"
+    r"(?=[^）)]*(?:表情包|表情|图片|图|语音|音频|record|image))"
+    r"[^）)]*[）)]\s*",
+    re.IGNORECASE,
+)
+_VOICE_STATUS_PATTERNS = (
+    "正在语音回复中",
+    "语音回复中",
+    "现在来一段语音",
+    "现在来一句语音",
+    "现在发一段语音",
+    "给你发一段语音",
+    "给你发一句语音",
+    "这就发语音",
+    "马上发语音",
+    "念给你听：",
+    "念给你听:",
+    "读给你听：",
+    "读给你听:",
+    "我念一句：",
+    "我念一句:",
+    "我念叨一句",
+    "读完了",
+    "念完了",
+)
+_VOICE_STATUS_PREFIX_PATTERN = re.compile(
+    r"^(?:行|好|好的|可以|嗯|ok|OK|那我|我这就|这就)?[\s，,。.!！?？]*"
+    r"(?:"
+    r"(?:正在语音回复中|语音回复中|念给你听[:：]?|读给你听[:：]?"
+    r"|我念一句[:：]?|我念叨一句|读完了|念完了)"
+    r"|(?:(?:现在)?(?:给你)?(?:来|发|回|整)(?:一?句|一?段|个)?语音(?:回复)?)"
+    r"|(?:给你发(?:一?句|一?段|个)?语音)"
+    r"|(?:马上(?:发|回|来)(?:一?句|一?段|个)?语音)"
+    r")"
+    r"[\s：:，,。.!！?？]*"
+)
+_EMPTY_REPLY_FALLBACKS = ("卡了", "刚才那句算了", "当我没说")
 
 
 @dataclass(frozen=True)
@@ -58,8 +97,8 @@ def parse_model_reply(text: str) -> ReplyParseResult:
     cleaned = _strip_orphan_fences(cleaned)
     cleaned = clean_reply_text(cleaned)
     cleaned = _normalize_code_blocks(cleaned)
-    if not cleaned:
-        cleaned = "我刚刚没组织好，重说一下。"
+    if _is_empty_or_meaningless_reply(cleaned):
+        cleaned = _empty_reply_fallback(original)
     if reply_mode == "short":
         reply_mode = detect_reply_mode(cleaned)
     return ReplyParseResult(
@@ -98,6 +137,8 @@ def clean_reply_text(text: str) -> str:
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n\s*\n+", "\n", cleaned)
+    cleaned = _strip_fake_media_actions(cleaned)
+    cleaned = _strip_voice_status_text(cleaned)
     for prefix in ("作为AI语言模型，", "作为 AI 语言模型，"):
         if cleaned.startswith(prefix):
             cleaned = cleaned.removeprefix(prefix)
@@ -106,7 +147,7 @@ def clean_reply_text(text: str) -> str:
 
 def split_reply_messages(text: str, *, reply_mode: str = "short") -> list[str]:
     text = _clean_code_text(text) if reply_mode == "code_block" else clean_reply_text(text)
-    if not text:
+    if _is_empty_or_meaningless_reply(text):
         return []
     if reply_mode in {"long_text", "code_block"}:
         return _split_long_or_code_text(text)
@@ -192,6 +233,33 @@ def _strip_labeled_prefix(text: str) -> str:
     ).strip()
 
 
+def _strip_fake_media_actions(text: str) -> str:
+    cleaned = text.strip()
+    while True:
+        next_text = _FAKE_MEDIA_ACTION_PATTERN.sub("", cleaned).strip()
+        if next_text == cleaned:
+            return cleaned
+        cleaned = next_text
+
+
+def _strip_voice_status_text(text: str) -> str:
+    cleaned = text.strip()
+    while True:
+        next_text = _VOICE_STATUS_PREFIX_PATTERN.sub("", cleaned).strip()
+        if next_text == cleaned:
+            break
+        cleaned = next_text
+    for prefix in _VOICE_STATUS_PATTERNS:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned.removeprefix(prefix).strip(" ：:，,。.!！?？")
+    return cleaned
+
+
+def _empty_reply_fallback(text: str) -> str:
+    seed = sum(ord(char) for char in str(text or ""))
+    return _EMPTY_REPLY_FALLBACKS[seed % len(_EMPTY_REPLY_FALLBACKS)]
+
+
 def _strip_orphan_fences(text: str) -> str:
     if _FENCED_BLOCK_PATTERN.search(text):
         return text
@@ -245,6 +313,22 @@ def _clean_code_text(text: str) -> str:
     cleaned = re.sub(r"\n\s*\n+", "\n", cleaned)
     cleaned = _strip_orphan_fences(cleaned)
     return _normalize_code_blocks(cleaned)
+
+
+def _is_empty_or_meaningless_reply(text: str) -> bool:
+    compact = str(text or "").strip()
+    if not compact:
+        return True
+    without_fences = re.sub(r"`+", "", compact).strip()
+    if not without_fences:
+        return True
+    for match in _FENCED_BLOCK_DETAIL_PATTERN.finditer(compact):
+        body = _unwrap_quoted_code(match.group("body"))
+        if body.strip():
+            return False
+    if _FENCED_BLOCK_PATTERN.fullmatch(compact):
+        return True
+    return False
 
 
 def _normalize_code_blocks(text: str) -> str:

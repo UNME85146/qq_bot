@@ -1,13 +1,13 @@
 {
   "qq": {
-    "selfId": "BOT_QQ",
-    "rootUserIds": ["ROOT_QQ"],
-    "ownerUserIds": ["OWNER_QQ"],
-    "allowedPrivateUserIds": ["OWNER_QQ"],
+    "selfId": "测试小号QQ",
+    "rootUserIds": ["你的主QQ"],
+    "ownerUserIds": ["你的主QQ"],
+    "allowedPrivateUserIds": ["你的主QQ"],
     "allowedGroupIds": [],
-    "groupMuteControllerUserIds": ["OWNER_QQ"],
-    "memoryAllowedUserIds": ["OWNER_QQ"],
-    "nicknames": ["your-bot-name", "bot"]
+    "groupMuteControllerUserIds": ["your owner QQ"],
+    "memoryAllowedUserIds": ["你的主QQ"],
+    "nicknames": ["测试号", "机器人"]
   },
   "onebot": {
     "mode": "ws_reverse",
@@ -17,10 +17,10 @@
     "apiRoot": "http://127.0.0.1:3000"
   },
   "model": {
-    "provider": "openai_compatible",
+    "provider": "siliconflow",
     "apiKeyEnv": "QQ_BOT_MODEL_API_KEY",
-    "baseUrl": "https://api.example.com/v1",
-    "name": "your-model-name",
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "name": "Qwen/Qwen2.5-7B-Instruct",
     "timeoutSeconds": 20,
     "temperature": 0.8,
     "maxTokens": 300

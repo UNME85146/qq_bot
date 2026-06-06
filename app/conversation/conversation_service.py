@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 
 from app.conversation.prompt_builder import PromptBuilder
@@ -7,7 +8,12 @@ from app.conversation.reply_formatter import ReplyFormatter, parse_model_reply
 from app.memory.group_context_service import NullGroupContextService
 from app.memory.memory_service import NullMemoryService
 from app.model.llm_client import LlmClient
-from app.model.resilience import ModelCallResult, ModelResilienceService, classify_model_exception
+from app.model.resilience import (
+    ModelCallResult,
+    ModelResilienceService,
+    classify_model_exception,
+    fallback_reply_text,
+)
 from app.model.vision_service import (
     ImageAnalysisResult,
     ImageUnderstandingService,
@@ -54,6 +60,7 @@ class ConversationService:
         self._model_resilience_service = model_resilience_service
         self._image_understanding_service = image_understanding_service
         self._model_context_service = model_context_service
+        self._fallback_counters: dict[str, int] = {}
 
     @property
     def model_client(self) -> LlmClient:
@@ -62,6 +69,8 @@ class ConversationService:
     async def handle_private_message(
         self,
         message: NormalizedMessage,
+        *,
+        prompt_user_text: str | None = None,
     ) -> GeneratedReply | None:
         started_at = time.monotonic()
         if not self._permission_service.is_private_user_allowed(message.user_id):
@@ -120,7 +129,7 @@ class ConversationService:
         recent_context, persona_state, model_context = await self._prepare_model_context(message)
         prompt = self._prompt_builder.build_private_prompt(
             user_name=message.user_name,
-            user_text=message.text,
+            user_text=prompt_user_text or message.text,
             recent_context=recent_context,
             persona_state=persona_state,
             long_term_memory=model_context.long_term_memory,
@@ -160,6 +169,8 @@ class ConversationService:
     async def handle_group_message(
         self,
         message: NormalizedMessage,
+        *,
+        prompt_user_text: str | None = None,
     ) -> GeneratedReply | None:
         started_at = time.monotonic()
         if message.group_id is None:
@@ -239,7 +250,7 @@ class ConversationService:
         recent_context, persona_state, model_context = await self._prepare_model_context(message)
         prompt = self._prompt_builder.build_group_prompt(
             user_name=message.user_name,
-            user_text=message.text,
+            user_text=prompt_user_text or message.text,
             recent_context=recent_context,
             persona_state=persona_state,
             long_term_memory=model_context.long_term_memory,
@@ -532,6 +543,7 @@ class ConversationService:
         question_text: str,
         question_user_name: str | None = None,
         reason: str | None = None,
+        prompt_question_text: str | None = None,
     ) -> GeneratedReply | None:
         question_message = message
         if question_text != message.text or question_user_name:
@@ -543,7 +555,10 @@ class ConversationService:
                 user_name=question_user_name or message.user_name,
                 trigger_reason=reason or message.trigger_reason,
             )
-        return await self.handle_group_message(question_message)
+        return await self.handle_group_message(
+            question_message,
+            prompt_user_text=prompt_question_text,
+        )
 
     async def record_silent_group_message(
         self,
@@ -704,7 +719,11 @@ class ConversationService:
             reply = await self._model_client.generate(prompt)
         except Exception as exc:
             failure = classify_model_exception(exc)
-            fallback = "卡了，等下再说。" if message.scope_type == "group" else "我刚刚有点卡，等下再说这个。"
+            fallback = fallback_reply_text(
+                message.scope_type,
+                finish_reason=failure.category,
+                counters=self._fallback_counters,
+            )
             reply = GeneratedReply(
                 text=fallback,
                 raw_model_text=fallback,
@@ -734,7 +753,10 @@ class ConversationService:
             "在吗",
         }:
             return None
-        text = "在呢"
+        text = _stable_choice(
+            ("在呢", "来了", "嗯 在", "咋啦"),
+            f"{message.user_id}:{message.message_id}:{message.text}",
+        )
         return GeneratedReply(
             text=text,
             raw_model_text=text,
@@ -863,8 +885,8 @@ def _reply_reason(
 
 def _image_unavailable_text(scope_type: str) -> str:
     if scope_type == "group":
-        return "这图我现在看不了"
-    return "这图我现在看不了，换张或者直接说内容吧。"
+        return "图裂了 我看不了"
+    return "这图我这边看不了，你直接说内容吧"
 
 
 def _image_failure_reason(failure_reason: str) -> str:
@@ -875,6 +897,11 @@ def _image_failure_reason(failure_reason: str) -> str:
 
 def _normalized_greeting_text(text: str) -> str:
     return "".join(str(text or "").strip().lower().split()).strip("，。！？!?~～")
+
+
+def _stable_choice(options: tuple[str, ...], key: str) -> str:
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    return options[digest[0] % len(options)]
 
 
 def _is_explicit_sticker_context(text: str) -> bool:

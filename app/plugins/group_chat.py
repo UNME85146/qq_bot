@@ -25,14 +25,15 @@ from app.features.runtime_features import (
     maybe_save_sticker,
     reminder_worker,
 )
-from app.features.sticker_service import is_sticker_request
 from app.features.tts_service import (
     DEFAULT_VOICE_REPLY_DECIDER,
     TTSService,
     extract_explicit_voice_read_text,
+    forced_voice_tts_skip_reason,
     record_explicit_voice_selected,
     record_tts_fallback_text_sent,
     tts_enabled_for_scope,
+    tts_scope_disabled_reason,
 )
 from app.models import MediaItem, NormalizedMessage
 from app.plugins.send_helper import (
@@ -45,6 +46,7 @@ from app.routing.group_mute import (
     should_group_mute_wake_for_message,
 )
 from app.routing.group_pending import GroupPendingQuestionService, PendingQuestionTarget
+from app.routing.direct_intent import parse_direct_reply_intent
 from app.routing.permission_service import PermissionService
 from app.routing.rate_limiter import RateLimiter
 from app.routing.group_trigger import contains_nickname, nickname_probability_passes
@@ -173,6 +175,7 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
     _remember_message_media(normalized)
     normalized = _with_referenced_media(normalized)
     sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
+    direct_intent = parse_direct_reply_intent(normalized)
     await _feature_hub.repeats.index_group_message(
         normalized,
         sticker_asset_id=sticker_asset_id,
@@ -275,17 +278,38 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
 
-    if _is_explicit_group_sticker_request(normalized):
-        sent = await _send_context_sticker(bot, normalized)
-        if not sent:
-            sent = await _send_context_sticker_missing_text(bot, event, normalized)
+    if direct_intent.sticker_request:
+        sticker_sent = await _send_context_sticker(bot, normalized)
+        missing_text_sent = False
+        if not sticker_sent:
+            missing_text_sent = await _send_context_sticker_missing_text(
+                bot,
+                event,
+                normalized,
+            )
         await _conversation_service.record_reply_audit(
             normalized,
-            action="reply" if sent else "silence",
-            reason="context_sticker_sent" if sent else "context_sticker_missing",
+            action="reply" if sticker_sent or missing_text_sent else "silence",
+            reason=(
+                "context_sticker_sent"
+                if sticker_sent
+                else (
+                    "context_sticker_missing_text_sent"
+                    if missing_text_sent
+                    else "context_sticker_missing"
+                )
+            ),
             model_called=False,
             safety_blocked=False,
         )
+        return
+
+    if await _try_send_group_explicit_voice(
+        bot,
+        event,
+        normalized,
+        direct_intent.voice_read_text,
+    ):
         return
 
     if _should_try_probabilistic_repeat(
@@ -413,7 +437,7 @@ def _group_trigger_reason(normalized) -> str | None:
 
 
 def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:
-    return message.is_at_self and is_sticker_request(message.text)
+    return parse_direct_reply_intent(message).sticker_request
 
 
 def _apply_reply_thread_trigger(
@@ -488,6 +512,12 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             text=target.question_text,
             trigger_reason=task.reason,
         )
+        force_voice_reply = parse_direct_reply_intent(target_message).voice_reply_requested
+        model_question_text = (
+            _voice_reply_model_text(target.question_text)
+            if force_voice_reply
+            else target.question_text
+        )
         if target_message.media_items:
             reply = await _conversation_service.handle_group_image_message(
                 target_message,
@@ -499,6 +529,9 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
                 question_text=target.question_text,
                 question_user_name=target.user_name,
                 reason=task.reason,
+                prompt_question_text=model_question_text
+                if force_voice_reply
+                else None,
             )
         if reply is None:
             logger.info(
@@ -514,17 +547,16 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             _active_windows[(message.group_id, target.user_id)] = (
                 time.monotonic() + _config.reply.active_window_seconds
             )
-        voice_sent = await _maybe_send_group_voice_reply(task.bot, target_message, reply)
+        voice_sent = await _maybe_send_group_voice_reply(
+            task.bot,
+            target_message,
+            reply,
+            force=force_voice_reply,
+        )
         if voice_sent:
             if message.group_id is not None:
                 _group_last_sent_at[message.group_id] = time.monotonic()
                 _feature_hub.focus_group(message.group_id)
-            if reply.send_sticker and _is_explicit_group_sticker_request(target_message):
-                await _send_reply_sticker_if_requested(
-                    task.bot,
-                    message,
-                    reply.sticker_intent or target.question_text,
-                )
             await _pending_question_service.mark_answered(target)
             if target is not targets[-1] and message.group_id is not None:
                 await _wait_group_interval(message.group_id)
@@ -556,12 +588,6 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
         if message.group_id is not None:
             _group_last_sent_at[message.group_id] = time.monotonic()
             _feature_hub.focus_group(message.group_id)
-        if reply.send_sticker and _is_explicit_group_sticker_request(target_message):
-            await _send_reply_sticker_if_requested(
-                task.bot,
-                message,
-                reply.sticker_intent or target.question_text,
-            )
         await _pending_question_service.mark_answered(target)
         if target is not targets[-1] and message.group_id is not None:
             await _wait_group_interval(message.group_id)
@@ -593,35 +619,64 @@ async def _maybe_send_group_voice_reply(
     bot: Bot,
     message: NormalizedMessage,
     reply,
+    *,
+    force: bool = False,
 ) -> bool:
-    if not tts_enabled_for_scope(_config.tts, message.scope_type):
+    disabled_reason = tts_scope_disabled_reason(_config.tts, message.scope_type)
+    if disabled_reason is not None:
+        if force:
+            await record_tts_fallback_text_sent(
+                message,
+                reason=f"forced_tts_skipped_{disabled_reason}",
+                record_system_event=_conversation_service.record_system_event,
+            )
         return False
     explicit_text = extract_explicit_voice_read_text(message)
     if explicit_text is not None:
-        safety = _voice_safety_service.check_input(explicit_text, scope_type=message.scope_type)
-        if safety.action != "allow":
+        return False
+    if force:
+        skip_reason = forced_voice_tts_skip_reason(
+            _config.tts,
+            reply,
+            scope_type=message.scope_type,
+        )
+        if skip_reason is not None:
+            await record_tts_fallback_text_sent(
+                message,
+                reason=f"forced_tts_skipped_{skip_reason}",
+                record_system_event=_conversation_service.record_system_event,
+            )
             return False
-        if len(explicit_text) > _config.tts.max_chars:
-            return False
+        if reply.model_name == "fallback":
+            await _conversation_service.record_system_event(
+                level="INFO",
+                event="tts_forced_model_fallback_selected",
+                detail=(
+                    f"scope={message.scope_type}; reason={reply.finish_reason}; "
+                    f"chars={len(reply.text)}"
+                ),
+                trace_id=message.trace_id,
+            )
         await record_explicit_voice_selected(
             message,
             config=_config.tts,
-            chars=len(explicit_text),
+            chars=len(reply.text),
             record_system_event=_conversation_service.record_system_event,
         )
         sent = await _maybe_send_group_tts_text(
             bot,
             message,
-            explicit_text,
-            exact_short=True,
+            reply.text,
+            ignore_cooldown=True,
         )
-        if not sent:
-            await record_tts_fallback_text_sent(
-                message,
-                reason="explicit_tts_failed",
-                record_system_event=_conversation_service.record_system_event,
-            )
-        return sent
+        if sent:
+            return True
+        await record_tts_fallback_text_sent(
+            message,
+            reason="forced_tts_failed",
+            record_system_event=_conversation_service.record_system_event,
+        )
+        return False
 
     decision = await _voice_reply_decider.decide_random(
         message,
@@ -641,6 +696,14 @@ async def _maybe_send_group_voice_reply(
     return sent
 
 
+def _voice_reply_model_text(text: str) -> str:
+    return (
+        f"{text}\n"
+        "请直接生成这条语音里要说的内容，不要解释正在发语音，"
+        "不要说“好的现在来一段语音”。"
+    )
+
+
 async def _maybe_send_group_tts(
     bot: Bot,
     message: NormalizedMessage,
@@ -655,6 +718,7 @@ async def _maybe_send_group_tts_text(
     text: str,
     *,
     exact_short: bool = False,
+    ignore_cooldown: bool = False,
 ) -> bool:
     if message.group_id is None:
         return False
@@ -663,9 +727,14 @@ async def _maybe_send_group_tts_text(
             message,
             text,
             exact_short=True,
+            ignore_cooldown=ignore_cooldown,
         )
     else:
-        result = await _tts_service.generate_for_text(message, text)
+        result = await _tts_service.generate_for_text(
+            message,
+            text,
+            ignore_cooldown=ignore_cooldown,
+        )
     if result is None:
         return False
     try:
@@ -822,6 +891,84 @@ def _single_message_target(normalized):
         pending_id=None,
         is_current=True,
     )
+
+
+async def _try_send_group_explicit_voice(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+    explicit_text: str | None = None,
+) -> bool:
+    if not tts_enabled_for_scope(_config.tts, message.scope_type):
+        return False
+    if explicit_text is None:
+        explicit_text = extract_explicit_voice_read_text(message)
+    if explicit_text is None:
+        return False
+    safety = _voice_safety_service.check_input(explicit_text, scope_type=message.scope_type)
+    if safety.action != "allow" or len(explicit_text) > _config.tts.max_chars:
+        return False
+    await record_explicit_voice_selected(
+        message,
+        config=_config.tts,
+        chars=len(explicit_text),
+        record_system_event=_conversation_service.record_system_event,
+    )
+    sent = await _maybe_send_group_tts_text(
+        bot,
+        message,
+        explicit_text,
+        exact_short=True,
+        ignore_cooldown=True,
+    )
+    if sent:
+        await _conversation_service.record_reply_audit(
+            message,
+            action="reply",
+            reason="group_explicit_voice_sent",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return True
+    await record_tts_fallback_text_sent(
+        message,
+        reason="explicit_tts_failed",
+        record_system_event=_conversation_service.record_system_event,
+    )
+    failed = False
+
+    async def on_send_error(exc, index, bubble) -> None:
+        nonlocal failed
+        failed = True
+        await _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_group_reply_failed",
+        )
+
+    await send_reply_bubbles(
+        bot,
+        event,
+        explicit_text,
+        scope_type="group",
+        reply_config=_config.reply,
+        group_reply_to_message_id=message.message_id,
+        group_at_user_id=message.user_id,
+        on_send_error=on_send_error,
+    )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply" if not failed else "silence",
+        reason=(
+            "group_explicit_voice_text_fallback"
+            if not failed
+            else "group_explicit_voice_text_fallback_failed"
+        ),
+        model_called=False,
+        safety_blocked=False,
+    )
+    return True
 
 
 async def _try_repeat_from_plus_one_text(bot: Bot, message: NormalizedMessage) -> bool:

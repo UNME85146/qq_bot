@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -633,10 +633,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the QQ bot MOSS-TTS-Nano adapter.")
     parser.add_argument("--host", default=os.getenv("QQ_BOT_TTS_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("QQ_BOT_TTS_PORT", "18100")))
-    parser.add_argument("--config-path", default=os.getenv("QQ_BOT_CONFIG_PATH", "/opt/qq_bot/config/config.json"))
-    parser.add_argument("--model-dir", default=os.getenv("QQ_BOT_TTS_MODEL_DIR", "/opt/moss_tts_nano/models"))
-    parser.add_argument("--repo-dir", default=os.getenv("QQ_BOT_TTS_REPO_DIR", "/opt/moss_tts_nano/MOSS-TTS-Nano"))
-    parser.add_argument("--output-dir", default=os.getenv("QQ_BOT_TTS_OUTPUT_DIR", "/opt/qq_bot/data/tts/cache"))
+    parser.add_argument("--config-path", default=os.getenv("QQ_BOT_CONFIG_PATH", "/home/maintain/qq_bot/config/config.json"))
+    parser.add_argument("--model-dir", default=os.getenv("QQ_BOT_TTS_MODEL_DIR", "/home/maintain/moss_tts_nano/models"))
+    parser.add_argument("--repo-dir", default=os.getenv("QQ_BOT_TTS_REPO_DIR", "/home/maintain/moss_tts_nano/MOSS-TTS-Nano"))
+    parser.add_argument("--output-dir", default=os.getenv("QQ_BOT_TTS_OUTPUT_DIR", "/home/maintain/qq_bot/data/tts/cache"))
     parser.add_argument("--execution-provider", choices=("cpu", "cuda"), default=os.getenv("QQ_BOT_TTS_EXECUTION_PROVIDER", "cuda"))
     parser.add_argument("--cpu-threads", type=int, default=int(os.getenv("QQ_BOT_TTS_CPU_THREADS", "4")))
     parser.add_argument("--max-new-frames", type=int, default=int(os.getenv("QQ_BOT_TTS_MAX_NEW_FRAMES", "375")))

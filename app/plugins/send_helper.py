@@ -24,14 +24,14 @@ def build_reply_bubbles(
     reply_mode: str = "short",
 ) -> list[str]:
     if scope_type == "private":
-        return split_reply_messages(text, reply_mode=reply_mode)
+        return _non_empty_bubbles(split_reply_messages(text, reply_mode=reply_mode))
 
     limit = 3 if reply_mode == "short" else 6
     effective_max_length = max_length
     if reply_mode in {"long_text", "code_block"}:
         effective_max_length = max(max_length * 4, 1200)
     text = truncate_naturally(text, effective_max_length, reply_mode=reply_mode)
-    bubbles = split_reply_messages(text, reply_mode=reply_mode)
+    bubbles = _non_empty_bubbles(split_reply_messages(text, reply_mode=reply_mode))
     selected: list[str] = []
     total = 0
     for bubble in bubbles:
@@ -64,6 +64,8 @@ async def send_reply_bubbles(
         max_length=reply_config.max_reply_length,
         reply_mode=reply_mode,
     )
+    if not bubbles:
+        return
     for index, bubble in enumerate(bubbles):
         if index > 0:
             await asyncio.sleep(_message_delay_seconds(reply_config, scope_type=scope_type))
@@ -134,6 +136,10 @@ def _file_segment_base64(file_path: str) -> str:
     data = Path(file_path).read_bytes()
     encoded = base64.b64encode(data).decode("ascii")
     return f"base64://{encoded}"
+
+
+def _non_empty_bubbles(bubbles: list[str]) -> list[str]:
+    return [bubble.strip() for bubble in bubbles if bubble and bubble.strip()]
 
 
 def build_group_reply_message(

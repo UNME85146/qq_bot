@@ -199,10 +199,12 @@ def extract_query_tags(text: str) -> set[str]:
     return tags
 
 
-def is_sticker_request(text: str) -> bool:
+def is_sticker_request(text: str, *, allow_short: bool = False) -> bool:
     compact = "".join(text.split()).lower()
     if is_sticker_save_request(text):
         return False
+    if allow_short and compact in {"表情包", "表情", "图"}:
+        return True
     if "表情" in compact and any(marker in compact for marker in ("有吗", "有没有", "有没", "有表情")):
         return True
     return any(
@@ -212,14 +214,20 @@ def is_sticker_request(text: str) -> bool:
             "来个表情包",
             "要个表情包",
             "整个表情包",
+            "换个表情包",
+            "换一个表情包",
             "随机表情包",
             "发个表情",
             "来个表情",
             "要个表情",
             "整个表情",
+            "换个表情",
+            "换一个表情",
             "随机表情",
             "发张图",
             "来张图",
+            "换张图",
+            "换一张图",
             "复读这个表情",
             "复读这个图",
         )

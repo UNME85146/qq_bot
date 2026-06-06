@@ -12,6 +12,7 @@ from app.models import StickerAsset, StickerAssetAnalysis
 from app.storage.repositories import StickerAssetAnalysisRepository
 
 HIGH_RISK_STICKER_CATEGORIES = {"adult", "illegal", "violence", "privacy"}
+LOCAL_TAG_FALLBACK_PREFIX = "local_tags:"
 
 
 class StickerAnalysisService:
@@ -68,10 +69,18 @@ class StickerAnalysisService:
         ]
         result = await self._model_resilience_service.generate(messages, scope_type=asset.source_scope_type)
         if result.failure_reason is not None:
-            return await self._repository.mark_failed(asset_id=asset.asset_id)
+            return await upsert_local_tag_fallback_analysis(
+                self._repository,
+                asset,
+                reason=result.failure_reason,
+            )
         data = _parse_json(result.reply.raw_model_text or result.reply.text)
         if data is None:
-            return await self._repository.mark_failed(asset_id=asset.asset_id)
+            return await upsert_local_tag_fallback_analysis(
+                self._repository,
+                asset,
+                reason="invalid_json",
+            )
         safety_category = _normalize_safety(str(data.get("safety_category", "unknown")))
         return await self._repository.upsert_completed(
             asset_id=asset.asset_id,
@@ -82,6 +91,32 @@ class StickerAnalysisService:
             reply_usage_hint=_clean_field(data.get("reply_usage_hint", ""), 160),
             safety_category=safety_category,
         )
+
+
+async def upsert_local_tag_fallback_analysis(
+    repository: StickerAssetAnalysisRepository,
+    asset: StickerAsset,
+    *,
+    reason: str,
+) -> StickerAssetAnalysis:
+    tags = _local_tags(asset.tags)
+    tag_text = ",".join(tags)
+    if not tag_text:
+        return await repository.mark_failed(asset_id=asset.asset_id)
+    reason_text = _clean_field(reason, 40) or "unknown"
+    return await repository.upsert_completed(
+        asset_id=asset.asset_id,
+        intent_summary=f"{LOCAL_TAG_FALLBACK_PREFIX}{tag_text}",
+        emotion_tags=tag_text,
+        scene_tags=tag_text,
+        text_tags=tag_text,
+        reply_usage_hint=f"本地标签降级匹配，reason={reason_text}",
+        safety_category="unknown",
+    )
+
+
+def is_local_tag_fallback_analysis(analysis: StickerAssetAnalysis) -> bool:
+    return analysis.intent_summary.startswith(LOCAL_TAG_FALLBACK_PREFIX)
 
 
 def _file_to_data_url(file_path: str) -> str | None:
@@ -127,3 +162,12 @@ def _clean_field(value: Any, max_chars: int) -> str:
     text = re.sub(r"(?<!\d)\d{7,}(?!\d)", "[number]", text)
     text = re.sub(r"\s+", " ", text).strip(" ：:，,。. ")
     return text[:max_chars]
+
+
+def _local_tags(tags: str) -> list[str]:
+    values: list[str] = []
+    for raw in str(tags or "").split(","):
+        tag = _clean_field(raw, 24)
+        if tag and tag not in values:
+            values.append(tag)
+    return values or ["default"]

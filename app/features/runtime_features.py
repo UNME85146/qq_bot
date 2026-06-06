@@ -9,7 +9,10 @@ from nonebot.adapters.onebot.v11 import Bot
 
 from app.features.reminder_service import ReminderService
 from app.features.repeat_service import RepeatService
-from app.features.sticker_analysis_service import StickerAnalysisService
+from app.features.sticker_analysis_service import (
+    StickerAnalysisService,
+    is_local_tag_fallback_analysis,
+)
 from app.features.sticker_service import StickerService
 from app.model.llm_client import create_model_client
 from app.model.resilience import ModelResilienceService
@@ -196,6 +199,13 @@ async def _analyze_sticker_asset(hub: RuntimeFeatureHub, asset, trace_id: str | 
         return
     if analysis is None:
         return
+    source = (
+        "local_tags"
+        if analysis.analysis_status == "completed" and is_local_tag_fallback_analysis(analysis)
+        else "model"
+        if analysis.analysis_status == "completed"
+        else "failed"
+    )
     event = (
         "sticker_analysis_completed"
         if analysis.analysis_status == "completed"
@@ -204,6 +214,9 @@ async def _analyze_sticker_asset(hub: RuntimeFeatureHub, asset, trace_id: str | 
     await hub.record_system_event(
         level="INFO" if analysis.analysis_status == "completed" else "ERROR",
         event=event,
-        detail=f"asset_id={asset.asset_id[:12]}; safety={analysis.safety_category}",
+        detail=(
+            f"asset_id={asset.asset_id[:12]}; safety={analysis.safety_category}; "
+            f"source={source}"
+        ),
         trace_id=trace_id,
     )

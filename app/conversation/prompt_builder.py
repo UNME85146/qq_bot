@@ -32,6 +32,9 @@ class PromptBuilder:
             "只有语境自然匹配时，才少量借用短表达、话题倾向或示例里的节奏。",
             "长期记忆、群名片、群内语义词和旧梗只作背景；当前问题无关时不要主动带入。",
             "普通寒暄要像正常 QQ 对话，不要把称呼、问候和无关动词硬拼在一起。",
+            "如果用户要表情包、图片、语音、读一句或念一句，前置逻辑会处理；你不要用文字假装发送媒体。",
+            "不要输出“（发送一个表情包）”“正在语音回复中”“念给你听”“读完了”这类动作说明。",
+            "除非用户明确追问实现细节，不要主动提模型、prompt、本地加载、硬件、TTS 机制或来源账号编号；身份问题按披露规则简短说明即可。",
             "遇到代码、调试、技术步骤请求时，优先正确清晰；不要夹带无关玩梗或旧聊天梗。",
             _format_section("语气规则", profile.tone_rules),
             _format_section("可参考的话题倾向，按当前语境取用", profile.topic_biases),
@@ -40,6 +43,7 @@ class PromptBuilder:
             _format_section("禁止事项", profile.avoid_rules),
             _format_section("少量风格示例，只学节奏和语气，不要复述原句", profile.few_shot_examples),
             "回复要像 QQ 好友即时聊天，大多数回复 1-2 句，短一点，自然一点。",
+            "非技术闲聊不要总结用户问题，不要复述“你是在问/你想让我”，直接接话。",
             "不要主动列表化回答，除非用户明确要求。",
             "如需代码块，保持完整 Markdown 代码块；不要输出孤立的 ```；代码块开头不要写 cpp/python 等语言名。",
             "如果用 JSON 包装回复，只使用 reply_text/text/content、reply_mode、send_sticker、sticker_intent 这些字段。",
@@ -63,12 +67,13 @@ class PromptBuilder:
         system_message = "\n".join(system_parts)
 
         messages = [{"role": "system", "content": system_message}]
-        for row in recent_context[-10:]:
+        for row in recent_context[-8:]:
             role = row.get("role", "user")
             if role not in {"user", "assistant"}:
                 continue
             content = row.get("content", "").strip()
             if content:
+                content = _format_history_content(row, content)
                 messages.append({"role": role, "content": content})
 
         messages.append(
@@ -104,6 +109,10 @@ class PromptBuilder:
         messages[0]["content"] += (
             "\n当前场景：群聊。你是在被 @ 后回复，回复要短，不要抢话，"
             "不要把群聊当成客服工单。"
+        )
+        messages[0]["content"] += (
+            "\n群聊回复像群友插一句：能 3-12 个字解决就不要扩写；"
+            "被骂或被吐槽时可以轻轻接梗，但不要认领侮辱性身份。"
         )
         messages[0]["content"] += (
             "\nGroup rule: answer only the current pending question in this model call. "
@@ -161,3 +170,14 @@ def _format_section(label: str, values: list[str]) -> str:
     if not cleaned:
         return f"{label}：无。"
     return f"{label}：" + "；".join(cleaned) + "。"
+
+
+def _format_history_content(row: dict[str, Any], content: str) -> str:
+    if row.get("scope_type") != "group" or row.get("role") != "user":
+        return content
+    user_name = str(row.get("user_name") or "").strip()
+    if not user_name:
+        return content
+    if content.startswith(f"{user_name}:") or content.startswith(f"{user_name}："):
+        return content
+    return f"{user_name}：{content}"

@@ -41,6 +41,7 @@ class ModelResilienceService:
         self._retry_delay_seconds = retry_delay_seconds
         self._consecutive_failures = 0
         self._breaker_open_until: float | None = None
+        self._fallback_counters: dict[str, int] = {}
 
     async def generate(
         self,
@@ -52,7 +53,11 @@ class ModelResilienceService:
         current = time.monotonic() if now is None else now
         if self._is_breaker_open(current):
             return ModelCallResult(
-                reply=_fallback_reply(scope_type, finish_reason="model_breaker_open"),
+                reply=_fallback_reply(
+                    scope_type,
+                    finish_reason="model_breaker_open",
+                    counters=self._fallback_counters,
+                ),
                 model_called=False,
                 failure_reason="model_breaker_open",
                 system_events=("model_breaker_open: call skipped",),
@@ -86,7 +91,11 @@ class ModelResilienceService:
                     await asyncio.sleep(self._retry_delay_seconds)
                     continue
                 return ModelCallResult(
-                    reply=_fallback_reply(scope_type, finish_reason=failure.category),
+                    reply=_fallback_reply(
+                        scope_type,
+                        finish_reason=failure.category,
+                        counters=self._fallback_counters,
+                    ),
                     model_called=True,
                     failure_reason=failure.category,
                     system_events=tuple(events),
@@ -101,7 +110,11 @@ class ModelResilienceService:
 
         failure_reason = last_failure.category if last_failure else "unknown_model_error"
         return ModelCallResult(
-            reply=_fallback_reply(scope_type, finish_reason=failure_reason),
+            reply=_fallback_reply(
+                scope_type,
+                finish_reason=failure_reason,
+                counters=self._fallback_counters,
+            ),
             model_called=True,
             failure_reason=failure_reason,
             system_events=tuple(events),
@@ -152,8 +165,37 @@ def classify_model_exception(exc: Exception) -> ModelFailureDetail:
     )
 
 
-def _fallback_reply(scope_type: str, *, finish_reason: str) -> GeneratedReply:
-    text = "卡了，等下再说。" if scope_type == "group" else "我刚刚有点卡，等下再说这个。"
+def fallback_reply_text(
+    scope_type: str,
+    *,
+    finish_reason: str,
+    counters: dict[str, int] | None = None,
+) -> str:
+    candidates = (
+        ("卡了 等下", "这会儿有点卡", "先缓一下")
+        if scope_type == "group"
+        else ("我这会儿有点卡，等下再说。", "卡住了，等我缓一下。", "刚才没接稳，等下再回你。")
+    )
+    if counters is None:
+        seed = sum(ord(char) for char in f"{scope_type}:{finish_reason}")
+        return candidates[seed % len(candidates)]
+    key = f"{scope_type}:{finish_reason}"
+    index = counters.get(key, 0)
+    counters[key] = index + 1
+    return candidates[index % len(candidates)]
+
+
+def _fallback_reply(
+    scope_type: str,
+    *,
+    finish_reason: str,
+    counters: dict[str, int] | None = None,
+) -> GeneratedReply:
+    text = fallback_reply_text(
+        scope_type,
+        finish_reason=finish_reason,
+        counters=counters,
+    )
     return GeneratedReply(
         text=text,
         raw_model_text=text,
