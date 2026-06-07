@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${QQ_BOT_ROOT:-/home/maintain/qq_bot}"
-TTS_ROOT="${QQ_BOT_TTS_ROOT:-/home/maintain/moss_tts_nano}"
+ROOT="${QQ_BOT_ROOT:-/opt/qq_bot}"
+TTS_ROOT="${QQ_BOT_TTS_ROOT:-/opt/moss_tts_nano}"
 REPO_DIR="${QQ_BOT_TTS_REPO_DIR:-${TTS_ROOT}/MOSS-TTS-Nano}"
 MODEL_DIR="${QQ_BOT_TTS_MODEL_DIR:-${TTS_ROOT}/models}"
 OUTPUT_DIR="${QQ_BOT_TTS_OUTPUT_DIR:-${ROOT}/data/tts/cache}"

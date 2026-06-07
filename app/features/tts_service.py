@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 import random
 import time
+import wave
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -11,6 +13,7 @@ import httpx
 from app.models import GeneratedReply, NormalizedMessage, TTSConfig, TTSVoiceProfileConfig
 
 RecordSystemEvent = Callable[..., Awaitable[None]]
+TTS_SEGMENT_MAX_CHARS = 60
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,82 @@ class TTSService:
         )
 
     async def generate_for_text(
+        self,
+        message: NormalizedMessage,
+        text: str,
+        *,
+        voice_profile_id: str | None = None,
+        exact_short: bool = False,
+        ignore_cooldown: bool = False,
+        segment_max_chars: int | None = None,
+    ) -> TTSGenerationResult | None:
+        if segment_max_chars is not None:
+            return await self._generate_segmented_for_text(
+                message,
+                text,
+                voice_profile_id=voice_profile_id,
+                exact_short=exact_short,
+                ignore_cooldown=ignore_cooldown,
+                segment_max_chars=segment_max_chars,
+            )
+        return await self._generate_single_for_text(
+            message,
+            text,
+            voice_profile_id=voice_profile_id,
+            exact_short=exact_short,
+            ignore_cooldown=ignore_cooldown,
+        )
+
+    async def _generate_segmented_for_text(
+        self,
+        message: NormalizedMessage,
+        text: str,
+        *,
+        voice_profile_id: str | None,
+        exact_short: bool,
+        ignore_cooldown: bool,
+        segment_max_chars: int,
+    ) -> TTSGenerationResult | None:
+        segments = split_tts_speech_text(
+            text,
+            exact_short=exact_short,
+            max_chars=segment_max_chars,
+        )
+        if not segments:
+            return None
+        if len(segments) == 1:
+            return await self._generate_single_for_text(
+                message,
+                segments[0],
+                voice_profile_id=voice_profile_id,
+                exact_short=exact_short,
+                ignore_cooldown=ignore_cooldown,
+            )
+        await self._record(
+            "INFO",
+            "tts_segments_selected",
+            (
+                f"scope={message.scope_type}; segments={len(segments)}; "
+                f"chars={sum(len(segment) for segment in segments)}; "
+                f"max_segment_chars={max(1, int(segment_max_chars))}; emit=single_record"
+            ),
+            message.trace_id,
+        )
+        results: list[TTSGenerationResult] = []
+        for index, segment in enumerate(segments):
+            result = await self._generate_single_for_text(
+                message,
+                segment,
+                voice_profile_id=voice_profile_id,
+                exact_short=exact_short,
+                ignore_cooldown=ignore_cooldown or index > 0,
+            )
+            if result is None:
+                return None
+            results.append(result)
+        return await self._merge_segment_results(message, results)
+
+    async def _generate_single_for_text(
         self,
         message: NormalizedMessage,
         text: str,
@@ -190,6 +269,72 @@ class TTSService:
             max_new_frames=max_new_frames,
             retry_count=retry_count,
             duration_guard_ms=duration_guard_ms,
+        )
+
+    async def _merge_segment_results(
+        self,
+        message: NormalizedMessage,
+        results: list[TTSGenerationResult],
+    ) -> TTSGenerationResult | None:
+        if not results:
+            return None
+        if self._config.format.lower() != "wav":
+            await self._record(
+                "ERROR",
+                "tts_merge_failed",
+                f"scope={message.scope_type}; reason=unsupported_format; format={self._config.format}",
+                message.trace_id,
+            )
+            return None
+        output_path = _merged_audio_path(
+            self._config.cache_dir,
+            trace_id=message.trace_id,
+            input_paths=[result.audio_path for result in results],
+        )
+        try:
+            merge_info = _merge_wav_files(
+                [Path(result.audio_path) for result in results],
+                output_path,
+            )
+        except Exception as exc:
+            await self._record(
+                "ERROR",
+                "tts_merge_failed",
+                (
+                    f"scope={message.scope_type}; segments={len(results)}; "
+                    f"reason={type(exc).__name__}; detail={str(exc)[:120]}"
+                ),
+                message.trace_id,
+            )
+            return None
+        first = results[0]
+        retry_count = sum(result.retry_count for result in results)
+        await self._record(
+            "INFO",
+            "tts_segments_merged",
+            (
+                f"scope={message.scope_type}; segments={len(results)}; "
+                f"duration_ms={merge_info['duration_ms']}; "
+                f"sample_rate={merge_info['sample_rate']}; channels={merge_info['channels']}"
+            ),
+            message.trace_id,
+        )
+        return TTSGenerationResult(
+            audio_path=str(output_path),
+            duration_ms=merge_info["duration_ms"],
+            sample_rate=merge_info["sample_rate"],
+            channels=merge_info["channels"],
+            execution_provider=first.execution_provider,
+            voice_profile_id=first.voice_profile_id,
+            generation_profile="merged_segments",
+            max_new_frames=sum(
+                result.max_new_frames or 0
+                for result in results
+                if result.max_new_frames is not None
+            )
+            or None,
+            retry_count=retry_count,
+            duration_guard_ms=None,
         )
 
     def skip_reason(self, reply: GeneratedReply, *, scope_type: str) -> str | None:
@@ -328,8 +473,31 @@ def prepare_tts_speech_text(text: str, *, exact_short: bool = False) -> str:
     return _normalize_tts_punctuation(cleaned)
 
 
-def extract_explicit_voice_read_text(message: NormalizedMessage) -> str | None:
-    if message.scope_type == "group" and not message.is_at_self:
+def split_tts_speech_text(
+    text: str,
+    *,
+    exact_short: bool = False,
+    max_chars: int = TTS_SEGMENT_MAX_CHARS,
+) -> list[str]:
+    speech_text = prepare_tts_speech_text(text, exact_short=exact_short)
+    if not speech_text:
+        return []
+    max_chars = max(1, int(max_chars))
+    if len(speech_text) <= max_chars:
+        return [speech_text]
+    return _pack_tts_segments(_split_speech_chunks(speech_text), max_chars=max_chars)
+
+
+def extract_explicit_voice_read_text(
+    message: NormalizedMessage,
+    *,
+    allow_group_without_at: bool = False,
+) -> str | None:
+    if (
+        message.scope_type == "group"
+        and not message.is_at_self
+        and not allow_group_without_at
+    ):
         return None
     text = str(message.text or "").strip()
     if not text:
@@ -346,13 +514,27 @@ def extract_explicit_voice_read_text(message: NormalizedMessage) -> str | None:
     return speech_text or None
 
 
-def is_explicit_voice_reply_request(message: NormalizedMessage) -> bool:
-    if message.scope_type == "group" and not message.is_at_self:
+def is_explicit_voice_reply_request(
+    message: NormalizedMessage,
+    *,
+    allow_group_without_at: bool = False,
+) -> bool:
+    if (
+        message.scope_type == "group"
+        and not message.is_at_self
+        and not allow_group_without_at
+    ):
         return False
     text = str(message.text or "").strip()
     if not text:
         return False
-    if extract_explicit_voice_read_text(message) is not None:
+    if (
+        extract_explicit_voice_read_text(
+            message,
+            allow_group_without_at=allow_group_without_at,
+        )
+        is not None
+    ):
         return False
     return _VOICE_REPLY_REQUEST_RE.search(text) is not None
 
@@ -497,6 +679,64 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _merged_audio_path(
+    cache_dir: str,
+    *,
+    trace_id: str | None,
+    input_paths: list[str],
+) -> Path:
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    safe_trace_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", trace_id or "no-trace").strip("-")
+    source_key = abs(hash(tuple(input_paths)))
+    return cache_path / f"tts-merged-{safe_trace_id}-{source_key:x}.wav"
+
+
+def _merge_wav_files(input_paths: list[Path], output_path: Path) -> dict[str, int]:
+    if not input_paths:
+        raise ValueError("missing input wav files")
+    params = None
+    total_frames = 0
+    frame_chunks: list[bytes] = []
+    for input_path in input_paths:
+        with wave.open(str(input_path), "rb") as wav:
+            current_params = wav.getparams()
+            if params is None:
+                params = current_params
+            elif _wav_format_key(current_params) != _wav_format_key(params):
+                raise ValueError(
+                    "wav params mismatch: "
+                    f"{input_path} has {_wav_format_key(current_params)} "
+                    f"expected {_wav_format_key(params)}"
+                )
+            frames = wav.readframes(wav.getnframes())
+            frame_chunks.append(frames)
+            total_frames += wav.getnframes()
+    if params is None:
+        raise ValueError("missing wav params")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as output:
+        output.setparams(params)
+        for frames in frame_chunks:
+            output.writeframes(frames)
+    duration_ms = int(total_frames * 1000 / params.framerate)
+    return {
+        "duration_ms": duration_ms,
+        "sample_rate": int(params.framerate),
+        "channels": int(params.nchannels),
+    }
+
+
+def _wav_format_key(params) -> tuple[int, int, int, str, str]:
+    return (
+        int(params.nchannels),
+        int(params.sampwidth),
+        int(params.framerate),
+        str(params.comptype),
+        str(params.compname),
+    )
+
+
 def _on_off(value: bool) -> str:
     return "on" if value else "off"
 
@@ -585,6 +825,7 @@ _VOICE_REPLY_REQUEST_RE = re.compile(
     r"[\s，,。.!！?？]*$"
 )
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;]+")
+_TTS_SEGMENT_BOUNDARY_RE = re.compile(r"([^，,、。！？!?；;：:\n]+[，,、。！？!?；;：:\n]*)")
 _DUP_PUNCT_RE = re.compile(r"([，。！？!?；;、])\1+")
 
 
@@ -653,6 +894,46 @@ def _normalize_tts_punctuation(text: str) -> str:
     cleaned = re.sub(r"\s+([，。！？!?；;、：:])", r"\1", cleaned)
     cleaned = re.sub(r"([，。！？!?；;、：:])\s+", r"\1", cleaned)
     return cleaned.strip(" \t\r\n，。！？!?~～、；;：:")
+
+
+def _split_speech_chunks(text: str) -> list[str]:
+    chunks = [match.group(1).strip() for match in _TTS_SEGMENT_BOUNDARY_RE.finditer(text)]
+    chunks = [chunk for chunk in chunks if chunk]
+    return chunks or [text]
+
+
+def _pack_tts_segments(chunks: list[str], *, max_chars: int) -> list[str]:
+    segments: list[str] = []
+    current = ""
+    for chunk in chunks:
+        if len(chunk) > max_chars:
+            if current:
+                segments.append(_trim_tts_segment(current))
+                current = ""
+            segments.extend(_hard_split_tts_chunk(chunk, max_chars=max_chars))
+            continue
+        candidate = current + chunk if current else chunk
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            segments.append(_trim_tts_segment(current))
+        current = chunk
+    if current:
+        segments.append(_trim_tts_segment(current))
+    return [segment for segment in segments if segment]
+
+
+def _hard_split_tts_chunk(chunk: str, *, max_chars: int) -> list[str]:
+    return [
+        _trim_tts_segment(chunk[index : index + max_chars])
+        for index in range(0, len(chunk), max_chars)
+        if _trim_tts_segment(chunk[index : index + max_chars])
+    ]
+
+
+def _trim_tts_segment(text: str) -> str:
+    return str(text or "").strip(" \t\r\n，,、；;：:")
 
 
 def _normalize_speech_text(text: str) -> str:

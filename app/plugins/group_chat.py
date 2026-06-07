@@ -25,8 +25,10 @@ from app.features.runtime_features import (
     maybe_save_sticker,
     reminder_worker,
 )
+from app.features.sticker_service import is_sticker_media
 from app.features.tts_service import (
     DEFAULT_VOICE_REPLY_DECIDER,
+    TTS_SEGMENT_MAX_CHARS,
     TTSService,
     extract_explicit_voice_read_text,
     forced_voice_tts_skip_reason,
@@ -46,7 +48,7 @@ from app.routing.group_mute import (
     should_group_mute_wake_for_message,
 )
 from app.routing.group_pending import GroupPendingQuestionService, PendingQuestionTarget
-from app.routing.direct_intent import parse_direct_reply_intent
+from app.routing.direct_intent import DirectReplyIntent, parse_direct_reply_intent
 from app.routing.permission_service import PermissionService
 from app.routing.rate_limiter import RateLimiter
 from app.routing.group_trigger import contains_nickname, nickname_probability_passes
@@ -92,6 +94,7 @@ _group_reply_workers: dict[str, asyncio.Task] = {}
 _group_last_sent_at: dict[str, float] = {}
 _group_recent_thread_events: list[dict[str, str | float | int]] = []
 _group_recent_media_by_message_id: OrderedDict[str, tuple[MediaItem, ...]] = OrderedDict()
+_group_recent_direct_actions: dict[tuple[str, str], tuple[str, float]] = {}
 GROUP_REPLY_INTERVAL_SECONDS = 1.5
 GROUP_INTERJECTION_PROBABILITY = 0.15
 MAX_RECENT_MEDIA_MESSAGES = 200
@@ -127,6 +130,14 @@ class GroupReplyTask:
     reason: str
     queued_at: float
     include_pending_backfill: bool = False
+
+
+@dataclass(frozen=True)
+class ContextStickerSendResult:
+    sent: bool = False
+    asset_found: bool = False
+    send_failed: bool = False
+
 
 group_chat = on_message(priority=10, block=False)
 
@@ -175,7 +186,20 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
     _remember_message_media(normalized)
     normalized = _with_referenced_media(normalized)
     sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
-    direct_intent = parse_direct_reply_intent(normalized)
+    direct_intent = parse_direct_reply_intent(
+        normalized,
+        allow_group_without_at=_allows_nickname_voice_intent(trigger_reason),
+    )
+    if (
+        trigger_reason == "nickname_probability_skipped"
+        and (
+            direct_intent.voice_read_text is not None
+            or direct_intent.voice_reply_requested
+        )
+    ):
+        trigger_reason = "nickname_trigger"
+        normalized = replace(normalized, trigger_reason=trigger_reason)
+    direct_intent = _apply_group_followup_intent(normalized, direct_intent)
     await _feature_hub.repeats.index_group_message(
         normalized,
         sticker_asset_id=sticker_asset_id,
@@ -278,30 +302,42 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
 
-    if direct_intent.sticker_request:
-        sticker_sent = await _send_context_sticker(bot, normalized)
-        missing_text_sent = False
-        if not sticker_sent:
-            missing_text_sent = await _send_context_sticker_missing_text(
-                bot,
-                event,
-                normalized,
-            )
+    if direct_intent.sticker_request or direct_intent.sticker_battle_request:
+        sticker_result = await _send_context_sticker(
+            bot,
+            normalized,
+            exclude_asset_id=sticker_asset_id,
+        )
+        fallback_text_sent = False
+        if not sticker_result.sent:
+            if sticker_result.send_failed:
+                fallback_text_sent = await _send_context_sticker_failed_text(
+                    bot,
+                    event,
+                    normalized,
+                )
+            else:
+                fallback_text_sent = await _send_context_sticker_missing_text(
+                    bot,
+                    event,
+                    normalized,
+                )
         await _conversation_service.record_reply_audit(
             normalized,
-            action="reply" if sticker_sent or missing_text_sent else "silence",
-            reason=(
-                "context_sticker_sent"
-                if sticker_sent
-                else (
-                    "context_sticker_missing_text_sent"
-                    if missing_text_sent
-                    else "context_sticker_missing"
-                )
+            action="reply" if sticker_result.sent or fallback_text_sent else "silence",
+            reason=_context_sticker_audit_reason(
+                sticker_result,
+                fallback_text_sent=fallback_text_sent,
+                sticker_battle_request=direct_intent.sticker_battle_request,
             ),
             model_called=False,
             safety_blocked=False,
         )
+        if sticker_result.sent or fallback_text_sent:
+            _remember_group_direct_action(
+                normalized,
+                "sticker_battle" if direct_intent.sticker_battle_request else "sticker",
+            )
         return
 
     if await _try_send_group_explicit_voice(
@@ -440,6 +476,95 @@ def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:
     return parse_direct_reply_intent(message).sticker_request
 
 
+def _allows_nickname_voice_intent(trigger_reason: str | None) -> bool:
+    return trigger_reason in {"nickname_trigger", "nickname_probability_skipped"}
+
+
+def _apply_group_followup_intent(
+    message: NormalizedMessage,
+    direct_intent: DirectReplyIntent,
+) -> DirectReplyIntent:
+    if (
+        direct_intent.sticker_request
+        or direct_intent.sticker_battle_request
+        or direct_intent.voice_read_text is not None
+        or direct_intent.voice_reply_requested
+    ):
+        return direct_intent
+    recent_action = _recent_group_direct_action(message)
+    if recent_action is None:
+        return direct_intent
+    if recent_action == "sticker_battle" and _has_sticker_battle_followup_media(message):
+        return DirectReplyIntent(sticker_battle_request=True)
+    if _is_repeat_previous_sticker_send_request(message.text):
+        return DirectReplyIntent(
+            sticker_request=recent_action == "sticker",
+            sticker_battle_request=recent_action == "sticker_battle",
+        )
+    return direct_intent
+
+
+def _remember_group_direct_action(message: NormalizedMessage, action: str) -> None:
+    if message.group_id is None or not action:
+        return
+    _group_recent_direct_actions[(message.group_id, message.user_id)] = (
+        action,
+        time.monotonic() + _group_direct_action_window_seconds(),
+    )
+
+
+def _recent_group_direct_action(message: NormalizedMessage) -> str | None:
+    if message.group_id is None:
+        return None
+    key = (message.group_id, message.user_id)
+    item = _group_recent_direct_actions.get(key)
+    if item is None:
+        return None
+    action, expires_at = item
+    if time.monotonic() >= expires_at:
+        _group_recent_direct_actions.pop(key, None)
+        return None
+    return action
+
+
+def _group_direct_action_window_seconds() -> float:
+    reply_config = getattr(_config, "reply", None)
+    return float(getattr(reply_config, "active_window_seconds", 120))
+
+
+def _has_sticker_battle_followup_media(message: NormalizedMessage) -> bool:
+    return any(item.type == "face" or is_sticker_media(item) for item in message.media_items)
+
+
+def _is_repeat_previous_sticker_send_request(text: str) -> bool:
+    compact = "".join(str(text or "").split()).strip("，,。.!！?？~～").lower()
+    if not compact or any(marker in compact for marker in ("语音", "读", "念", "朗读")):
+        return False
+    return compact in {
+        "再发一个",
+        "再来一个",
+        "再整一个",
+        "再发个",
+        "再来个",
+        "再整一个吧",
+        "再发一个吧",
+        "再来一个吧",
+        "继续发一个",
+        "继续来一个",
+        "还要一个",
+        "还有吗",
+        "还有没",
+        "还有没有",
+        "再发张",
+        "再来张",
+        "再发一张",
+        "再来一张",
+        "换一个",
+        "换个",
+        "再换一个",
+    }
+
+
 def _apply_reply_thread_trigger(
     normalized,
     trigger_reason: str | None,
@@ -512,7 +637,12 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             text=target.question_text,
             trigger_reason=task.reason,
         )
-        force_voice_reply = parse_direct_reply_intent(target_message).voice_reply_requested
+        force_voice_reply = parse_direct_reply_intent(
+            target_message,
+            allow_group_without_at=_allows_nickname_voice_intent(
+                target_message.trigger_reason,
+            ),
+        ).voice_reply_requested
         model_question_text = (
             _voice_reply_model_text(target.question_text)
             if force_voice_reply
@@ -722,19 +852,15 @@ async def _maybe_send_group_tts_text(
 ) -> bool:
     if message.group_id is None:
         return False
-    if exact_short:
-        result = await _tts_service.generate_for_text(
-            message,
-            text,
-            exact_short=True,
-            ignore_cooldown=ignore_cooldown,
-        )
-    else:
-        result = await _tts_service.generate_for_text(
-            message,
-            text,
-            ignore_cooldown=ignore_cooldown,
-        )
+    result = await _tts_service.generate_for_text(
+        message,
+        text,
+        exact_short=exact_short,
+        ignore_cooldown=ignore_cooldown,
+        segment_max_chars=_tts_segment_max_chars()
+        if exact_short or ignore_cooldown
+        else None,
+    )
     if result is None:
         return False
     try:
@@ -754,6 +880,11 @@ async def _maybe_send_group_tts_text(
         )
         return False
     return True
+
+
+def _tts_segment_max_chars() -> int:
+    configured_max = max(1, int(getattr(_config.tts, "max_chars", TTS_SEGMENT_MAX_CHARS)))
+    return min(configured_max, TTS_SEGMENT_MAX_CHARS)
 
 
 async def _pending_backfill_targets(message: NormalizedMessage) -> list[PendingQuestionTarget]:
@@ -985,12 +1116,45 @@ async def _try_repeat_from_plus_one_text(bot: Bot, message: NormalizedMessage) -
     return await _send_repeat_candidate(bot, candidate, trace_id=message.trace_id)
 
 
-async def _send_context_sticker(bot: Bot, message: NormalizedMessage) -> bool:
+def _context_sticker_audit_reason(
+    result: ContextStickerSendResult,
+    *,
+    fallback_text_sent: bool,
+    sticker_battle_request: bool,
+) -> str:
+    if result.sent:
+        return (
+            "context_sticker_battle_sent"
+            if sticker_battle_request
+            else "context_sticker_sent"
+        )
+    if result.send_failed:
+        return (
+            "context_sticker_send_failed_text_sent"
+            if fallback_text_sent
+            else "context_sticker_send_failed"
+        )
+    return (
+        "context_sticker_missing_text_sent"
+        if fallback_text_sent
+        else "context_sticker_missing"
+    )
+
+
+async def _send_context_sticker(
+    bot: Bot,
+    message: NormalizedMessage,
+    *,
+    exclude_asset_id: str | None = None,
+) -> ContextStickerSendResult:
     if message.group_id is None:
-        return False
-    asset = await _choose_safe_sticker(message.text)
+        return ContextStickerSendResult()
+    asset = await _choose_safe_sticker(
+        _sticker_battle_query_text(message),
+        exclude_asset_id=exclude_asset_id,
+    )
     if asset is None:
-        return False
+        return ContextStickerSendResult()
     try:
         await asyncio.sleep(_repeat_delay_seconds())
         await send_group_image_direct(
@@ -998,7 +1162,6 @@ async def _send_context_sticker(bot: Bot, message: NormalizedMessage) -> bool:
             group_id=message.group_id,
             file_path=asset.file_path,
         )
-        await _feature_hub.stickers.mark_used(asset.asset_id)
     except Exception as exc:
         await _conversation_service.record_system_event(
             level="ERROR",
@@ -1006,8 +1169,17 @@ async def _send_context_sticker(bot: Bot, message: NormalizedMessage) -> bool:
             detail=f"{type(exc).__name__}: {str(exc)[:120]}",
             trace_id=message.trace_id,
         )
-        return False
-    return True
+        return ContextStickerSendResult(asset_found=True, send_failed=True)
+    try:
+        await _feature_hub.stickers.mark_used(asset.asset_id)
+    except Exception as exc:
+        await _conversation_service.record_system_event(
+            level="WARNING",
+            event="mark_context_sticker_used_failed",
+            detail=f"asset_id={asset.asset_id}; {type(exc).__name__}: {str(exc)[:120]}",
+            trace_id=message.trace_id,
+        )
+    return ContextStickerSendResult(sent=True, asset_found=True)
 
 
 async def _send_reply_sticker_if_requested(
@@ -1040,14 +1212,34 @@ async def _send_reply_sticker_if_requested(
     return True
 
 
-async def _choose_safe_sticker(intent_text: str):
+async def _choose_safe_sticker(
+    intent_text: str,
+    *,
+    exclude_asset_id: str | None = None,
+):
     for _ in range(3):
         asset = await _feature_hub.stickers.choose_for_text(intent_text)
         if asset is None:
             return None
+        if exclude_asset_id is not None and asset.asset_id == exclude_asset_id:
+            continue
         if await _is_sticker_asset_sendable(asset):
             return asset
     return None
+
+
+def _sticker_battle_query_text(message: NormalizedMessage) -> str:
+    parts = [message.text.strip()]
+    media_parts: list[str] = []
+    for item in message.media_items:
+        if item.type != "face" and not is_sticker_media(item):
+            continue
+        for value in (item.summary, item.sub_type, item.file, item.type):
+            if value and value not in media_parts:
+                media_parts.append(value)
+    if media_parts:
+        parts.append(" ".join(media_parts))
+    return " ".join(part for part in parts if part).strip() or "表情包"
 
 
 async def _is_sticker_asset_sendable(asset) -> bool:
@@ -1065,6 +1257,28 @@ async def _send_context_sticker_missing_text(
     event: GroupMessageEvent,
     message: NormalizedMessage,
 ) -> bool:
+    return await _send_context_sticker_fallback_text(bot, event, message, "没有")
+
+
+async def _send_context_sticker_failed_text(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+) -> bool:
+    return await _send_context_sticker_fallback_text(
+        bot,
+        event,
+        message,
+        "图发不出去，卡了",
+    )
+
+
+async def _send_context_sticker_fallback_text(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+    text: str,
+) -> bool:
     failed = False
 
     async def on_send_error(exc, index, bubble) -> None:
@@ -1080,7 +1294,7 @@ async def _send_context_sticker_missing_text(
     await send_reply_bubbles(
         bot,
         event,
-        "没有",
+        text,
         scope_type="group",
         reply_config=_config.reply,
         group_reply_to_message_id=message.message_id,
@@ -1151,10 +1365,15 @@ def _repeat_delay_seconds() -> float:
     return random.uniform(0.3, 1.2)
 
 
-async def _record_send_error(trace_id: str, exc: Exception, index: int) -> None:
+async def _record_send_error(
+    trace_id: str,
+    exc: Exception,
+    index: int,
+    event_name: str = "send_group_reply_failed",
+) -> None:
     await _conversation_service.record_system_event(
         level="ERROR",
-        event="send_group_reply_failed",
+        event=event_name,
         detail=f"{type(exc).__name__}: bubble_index={index}; {str(exc)[:120]}",
         trace_id=trace_id,
     )

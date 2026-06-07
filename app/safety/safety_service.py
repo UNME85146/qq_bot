@@ -150,7 +150,7 @@ class SafetyService:
             r"你叫什?么",
             r"你叫啥",
             r"怎么称呼你",
-            r"你是(?:不是)?(?:小黄|小黄bot|机器人|bot|ai|真人|本人)",
+            r"你是(?:不是)?(?:机器人|bot|ai|真人|本人)",
             r"你是真人吗",
             r"你是人吗",
             r"你是不是人",
@@ -214,6 +214,6 @@ def _normalize(text: str) -> str:
 
 
 def _default_robot_identity_disclosure(identity_disclosure: str) -> str:
-    if identity_disclosure.strip() == "我是小黄":
-        return "我是小黄bot，一个机器人"
+    if identity_disclosure.strip() in {"我是机器人", "我是 BOT", "我是bot"}:
+        return "我是一个机器人"
     return identity_disclosure

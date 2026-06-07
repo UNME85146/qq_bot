@@ -23,6 +23,7 @@ from app.features.runtime_features import create_runtime_feature_hub, maybe_save
 from app.features.sticker_service import is_sticker_save_request
 from app.features.tts_service import (
     DEFAULT_VOICE_REPLY_DECIDER,
+    TTS_SEGMENT_MAX_CHARS,
     TTSService,
     extract_explicit_voice_read_text,
     forced_voice_tts_skip_reason,
@@ -187,8 +188,11 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                 ),
             )
             return
-        if direct_intent.sticker_request:
-            asset = await _choose_safe_sticker(normalized.text)
+        if direct_intent.sticker_request or direct_intent.sticker_battle_request:
+            asset = await _choose_safe_sticker(
+                normalized.text,
+                exclude_asset_id=saved_sticker_asset_id,
+            )
             if asset is not None:
                 sticker_sent = False
                 try:
@@ -508,19 +512,15 @@ async def _maybe_send_private_tts_text(
     exact_short: bool = False,
     ignore_cooldown: bool = False,
 ) -> bool:
-    if exact_short:
-        result = await _tts_service.generate_for_text(
-            normalized,
-            text,
-            exact_short=True,
-            ignore_cooldown=ignore_cooldown,
-        )
-    else:
-        result = await _tts_service.generate_for_text(
-            normalized,
-            text,
-            ignore_cooldown=ignore_cooldown,
-        )
+    result = await _tts_service.generate_for_text(
+        normalized,
+        text,
+        exact_short=exact_short,
+        ignore_cooldown=ignore_cooldown,
+        segment_max_chars=_tts_segment_max_chars()
+        if exact_short or ignore_cooldown
+        else None,
+    )
     if result is None:
         return False
     try:
@@ -538,6 +538,11 @@ async def _maybe_send_private_tts_text(
         )
         return False
     return True
+
+
+def _tts_segment_max_chars() -> int:
+    configured_max = max(1, int(getattr(_config.tts, "max_chars", TTS_SEGMENT_MAX_CHARS)))
+    return min(configured_max, TTS_SEGMENT_MAX_CHARS)
 
 
 async def _handle_user_reminder_command(
@@ -691,6 +696,7 @@ def _apply_private_followup_intent(
 ) -> DirectReplyIntent:
     if (
         direct_intent.sticker_request
+        or direct_intent.sticker_battle_request
         or direct_intent.voice_read_text is not None
         or direct_intent.voice_reply_requested
     ):

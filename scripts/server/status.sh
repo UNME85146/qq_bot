@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${QQ_BOT_ROOT:-/home/maintain/qq_bot}"
+ROOT="${QQ_BOT_ROOT:-/opt/qq_bot}"
 SERVICE="${QQ_BOT_SERVICE:-qq-bot.service}"
 TTS_SERVICE="${QQ_BOT_TTS_SERVICE:-qq-bot-tts.service}"
 NAPCAT_CONTAINER="${NAPCAT_CONTAINER:-napcat}"

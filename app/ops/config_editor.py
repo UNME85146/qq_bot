@@ -274,7 +274,7 @@ def _ensure_tts(raw: dict[str, Any]) -> dict[str, Any]:
     tts.setdefault("voice", "xiaohuang_default")
     tts.setdefault("format", "wav")
     tts.setdefault("maxChars", 160)
-    tts.setdefault("requestTimeoutSeconds", 20)
+    tts.setdefault("requestTimeoutSeconds", 60)
     tts.setdefault("privateEnabled", False)
     tts.setdefault("groupEnabled", False)
     tts.setdefault("privateCooldownSeconds", 30)

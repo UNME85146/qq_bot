@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from app.models import (
     AppConfig,
+    BehaviorProfileConfig,
     LimitsConfig,
     LoggingConfig,
     ModelConfig,
@@ -157,7 +158,7 @@ def _load_tts_config(raw: dict[str, Any]) -> TTSConfig:
         voice=str(raw.get("voice", current.voice if current else "xiaohuang_default")),
         format=str(raw.get("format", "wav")).lower(),
         max_chars=int(raw.get("maxChars", 160)),
-        request_timeout_seconds=float(raw.get("requestTimeoutSeconds", 20.0)),
+        request_timeout_seconds=float(raw.get("requestTimeoutSeconds", 60.0)),
         private_enabled=bool(raw.get("privateEnabled", False)),
         group_enabled=bool(raw.get("groupEnabled", False)),
         private_cooldown_seconds=float(raw.get("privateCooldownSeconds", 30.0)),
@@ -224,6 +225,7 @@ def _load_persona_config(raw: dict[str, Any], config_dir: Path) -> PersonaConfig
         avoid_rules=["不要编造真实学校、住址、手机号、身份证等身份信息。"],
         few_shot_examples=[],
         updated_at=None,
+        behavior_profile=BehaviorProfileConfig(),
     )
     return PersonaConfig(
         mode="legacy_persona",
@@ -270,6 +272,7 @@ def _load_style_profile(profile_path: Path, fallback_profile_path: Path) -> Styl
         avoid_rules=_to_str_list(raw["avoidRules"]),
         few_shot_examples=_to_str_list(raw["fewShotExamples"]),
         updated_at=str(raw["updatedAt"]) if raw.get("updatedAt") else None,
+        behavior_profile=_load_behavior_profile(raw.get("behaviorProfile", {})),
     )
 
 
@@ -285,3 +288,14 @@ def _resolve_config_path(path: str, config_dir: Path) -> Path:
 
 def _to_str_list(values: list[Any]) -> list[str]:
     return [str(value) for value in values if str(value).strip()]
+
+
+def _load_behavior_profile(raw: Any) -> BehaviorProfileConfig:
+    if not isinstance(raw, dict):
+        return BehaviorProfileConfig()
+    return BehaviorProfileConfig(
+        reply_cadence=_to_str_list(raw.get("replyCadence") or []),
+        punctuation_profile=_to_str_list(raw.get("punctuationProfile") or []),
+        interaction_habits=_to_str_list(raw.get("interactionHabits") or []),
+        chat_action_rules=_to_str_list(raw.get("chatActionRules") or []),
+    )

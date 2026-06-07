@@ -47,6 +47,7 @@ class PromptBuilder:
             "不要主动列表化回答，除非用户明确要求。",
             "如需代码块，保持完整 Markdown 代码块；不要输出孤立的 ```；代码块开头不要写 cpp/python 等语言名。",
             "如果用 JSON 包装回复，只使用 reply_text/text/content、reply_mode、send_sticker、sticker_intent 这些字段。",
+            _format_behavior_profile(profile.behavior_profile),
             "当前角色状态："
             f"mood={persona_state.mood}, "
             f"energy={persona_state.energy}, "
@@ -170,6 +171,16 @@ def _format_section(label: str, values: list[str]) -> str:
     if not cleaned:
         return f"{label}：无。"
     return f"{label}：" + "；".join(cleaned) + "。"
+
+
+def _format_behavior_profile(profile) -> str:
+    sections = [
+        _format_section("历史画像提炼出的回复节奏", profile.reply_cadence),
+        _format_section("历史画像提炼出的标点习惯", profile.punctuation_profile),
+        _format_section("历史画像提炼出的互动习惯", profile.interaction_habits),
+        _format_section("可用聊天动作规则", profile.chat_action_rules),
+    ]
+    return "\n".join(section for section in sections if not section.endswith("无。"))
 
 
 def _format_history_content(row: dict[str, Any], content: str) -> str:

@@ -13,6 +13,7 @@ config/*.local.json
 
 data/*.db
 data/*.png
+data/export/
 data/backups/
 data/tts/cache/
 data/tts/reference_audio/

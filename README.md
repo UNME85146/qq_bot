@@ -20,7 +20,7 @@ This repository is a sanitized public export. It intentionally excludes private 
 - Direct sticker requests such as "send a sticker", "change sticker", or "send another one" use the local sticker pool before model chat; the model is not allowed to fake media actions in text.
 - Text repeat only after the same low-risk short text appears consecutively in the same group.
 - Optional local MOSS-TTS-Nano voice replies through an independent HTTP TTS service. When enabled, 8-12 of every 80 eligible short model replies are randomly sent as QQ voice records; successful voice replies do not also send text, while TTS or record failures fall back to text.
-- Explicit read-aloud requests are supported in private chat and in group chat only when the bot is mentioned. Generic requests such as "send a voice reply" do not read the user's raw message; they generate a short model reply and then force a QQ voice record. Follow-up phrases like "change one" can continue the previous voice action in private chat.
+- Explicit read-aloud requests are supported in private chat and in group chat only when the bot is mentioned, either by a real OneBot/CQ @ segment or by a configured nickname in text. Long read-aloud text may be generated in internal chunks, but the bot merges the chunks and sends one QQ voice record. Generic requests such as "send a voice reply" do not read the user's raw message; they generate a short model reply and then force a QQ voice record. Follow-up phrases like "change one" can continue the previous voice action in private chat.
 - SQLite audit/runtime inspection, backup, export, and vacuum tools.
 
 ## Quick Start

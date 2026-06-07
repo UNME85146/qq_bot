@@ -2,7 +2,7 @@ param(
     [string]$HostName = "your-server-ip",
     [string]$User = "your-server-user",
     [int]$Port = 22,
-    [string]$Root = "/home/maintain/qq_bot",
+    [string]$Root = "/opt/qq_bot",
     [string]$PasswordEnv = "",
     [string]$SudoPasswordEnv = "",
     [switch]$SkipTests,

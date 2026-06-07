@@ -46,6 +46,14 @@ class PersonaConfig:
 
 
 @dataclass(frozen=True)
+class BehaviorProfileConfig:
+    reply_cadence: list[str] = field(default_factory=list)
+    punctuation_profile: list[str] = field(default_factory=list)
+    interaction_habits: list[str] = field(default_factory=list)
+    chat_action_rules: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class StyleProfileConfig:
     source_user_id: str
     identity_disclosure: str
@@ -57,6 +65,7 @@ class StyleProfileConfig:
     avoid_rules: list[str]
     few_shot_examples: list[str]
     updated_at: str | None
+    behavior_profile: BehaviorProfileConfig = field(default_factory=BehaviorProfileConfig)
 
 
 @dataclass(frozen=True)
@@ -269,7 +278,7 @@ class TTSConfig:
     voice: str = "xiaohuang_default"
     format: str = "wav"
     max_chars: int = 160
-    request_timeout_seconds: float = 20.0
+    request_timeout_seconds: float = 60.0
     private_enabled: bool = False
     group_enabled: bool = False
     private_cooldown_seconds: float = 30.0
