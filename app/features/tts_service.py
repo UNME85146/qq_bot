@@ -695,7 +695,7 @@ def _tts_request_timeout_seconds(
     if not exact_short:
         return configured
     length = len(_compact_for_timeout(text))
-    if length <= max(1, int(getattr(config, "max_chars", TTS_SEGMENT_MAX_CHARS))):
+    if length <= 80:
         return configured
     return max(configured, min(300.0, 30.0 + length * 1.2))
 
