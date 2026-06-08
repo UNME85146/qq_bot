@@ -504,11 +504,7 @@ def extract_explicit_voice_read_text(
     *,
     allow_group_without_at: bool = False,
 ) -> str | None:
-    if (
-        message.scope_type == "group"
-        and not message.is_at_self
-        and not allow_group_without_at
-    ):
+    if message.scope_type == "group" and not message.is_at_self:
         return None
     text = str(message.text or "").strip()
     if not text:
@@ -530,11 +526,7 @@ def is_explicit_voice_reply_request(
     *,
     allow_group_without_at: bool = False,
 ) -> bool:
-    if (
-        message.scope_type == "group"
-        and not message.is_at_self
-        and not allow_group_without_at
-    ):
+    if message.scope_type == "group" and not message.is_at_self:
         return False
     text = str(message.text or "").strip()
     if not text:
@@ -840,7 +832,7 @@ _EXPLICIT_READ_RE = re.compile(
     r"(?:"
     r"(?:用语音|语音)?(?:给我|帮我|替我)?(?:读|念|朗读)"
     r"|(?:发|来|整)(?:一?(?:句|段)|个|条)?语音"
-    r"|(?:用语音|语音)(?:说|讲)"
+    r"|(?:用语音|语音)(?:说|讲|骂)"
     r")"
     r"(?:一下|一遍|出来|下)?"
     r"[\s：:，,]*"

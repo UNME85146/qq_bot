@@ -191,7 +191,7 @@ async def _send_owner_help(
 
 def _help_text(*, is_root: bool) -> str:
     lines = [
-        "机器人管理命令帮助",
+        "小黄管理命令帮助",
         "",
         "普通管理命令：",
         "/help - 查看这份命令帮助。用法：/help",

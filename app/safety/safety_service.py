@@ -5,6 +5,9 @@ import re
 from app.models import SafetyCheckResult
 
 
+BOT_DISPLAY_NAME = "小黄"
+
+
 class SafetyService:
     def __init__(
         self,
@@ -13,12 +16,8 @@ class SafetyService:
         robot_identity_disclosure: str | None = None,
         source_user_id: str = "SOURCE_QQ",
     ) -> None:
-        self._identity_disclosure = identity_disclosure
-        self._robot_identity_disclosure = (
-            robot_identity_disclosure
-            if robot_identity_disclosure is not None
-            else _default_robot_identity_disclosure(identity_disclosure)
-        )
+        self._identity_disclosure = BOT_DISPLAY_NAME
+        self._robot_identity_disclosure = BOT_DISPLAY_NAME
         self._source_user_id = source_user_id
 
     _identity_patterns = (
@@ -136,9 +135,7 @@ class SafetyService:
     def _identity_reply_text(self, normalized: str) -> str | None:
         if not self._mentions_identity(normalized):
             return None
-        if self._asks_robot_identity(normalized):
-            return self._robot_identity_disclosure
-        return self._identity_disclosure
+        return BOT_DISPLAY_NAME
 
     def _mentions_identity(self, normalized: str) -> bool:
         normalized_lower = normalized.lower()
@@ -149,8 +146,12 @@ class SafetyService:
             r"你[，,。！？!?\s]*是什么",
             r"你叫什?么",
             r"你叫啥",
+            r"你叫什么名字",
+            r"你的名字",
+            r"你名字",
             r"怎么称呼你",
-            r"你是(?:不是)?(?:机器人|bot|ai|真人|本人)",
+            r"叫你什么",
+            r"你是(?:不是)?(?:小黄|小黄bot|机器人|bot|ai|真人|本人)",
             r"你是真人吗",
             r"你是人吗",
             r"你是不是人",
@@ -196,6 +197,21 @@ class SafetyService:
             "我不是虚拟",
             "我是本人",
             "我就是本人",
+            "我是机器人",
+            "我是一个机器人",
+            "我是ai",
+            "我是一个ai",
+            "我是AI",
+            "我是一个AI",
+            "作为AI语言模型",
+            "作为ai语言模型",
+            "AI语言模型",
+            "我是小黄bot",
+            "我是小黄机器人",
+            "我是测试号",
+            "不是本人",
+            "聊天风格调出来",
+            "基于SOURCE_QQ",
             "这就是我的真实账号",
             f"我是{self._source_user_id}",
             f"我就是{self._source_user_id}",
@@ -214,6 +230,4 @@ def _normalize(text: str) -> str:
 
 
 def _default_robot_identity_disclosure(identity_disclosure: str) -> str:
-    if identity_disclosure.strip() in {"我是机器人", "我是 BOT", "我是bot"}:
-        return "我是一个机器人"
-    return identity_disclosure
+    return BOT_DISPLAY_NAME

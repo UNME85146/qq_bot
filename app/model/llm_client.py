@@ -24,7 +24,7 @@ class MockModelClient:
         )
         text = "收到啦，我在。"
         if "真人" in last_user_message or "AI" in last_user_message:
-            text = "我是基于 SOURCE_QQ 的聊天风格调出来的测试号，不是本人。"
+            text = "小黄"
         return GeneratedReply(
             text=text,
             raw_model_text=text,

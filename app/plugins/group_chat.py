@@ -27,7 +27,6 @@ from app.features.runtime_features import (
 )
 from app.features.sticker_service import is_sticker_media
 from app.features.tts_service import (
-    DEFAULT_VOICE_REPLY_DECIDER,
     EXACT_TTS_SEGMENT_MAX_CHARS,
     TTS_SEGMENT_MAX_CHARS,
     TTSService,
@@ -35,11 +34,14 @@ from app.features.tts_service import (
     forced_voice_tts_skip_reason,
     record_explicit_voice_selected,
     record_tts_fallback_text_sent,
+    prepare_tts_speech_text,
+    tts_candidate_skip_reason,
     tts_enabled_for_scope,
     tts_scope_disabled_reason,
 )
 from app.models import MediaItem, NormalizedMessage
 from app.plugins.send_helper import (
+    _extract_sent_message_id,
     send_group_image_direct,
     send_group_record_direct,
     send_reply_bubbles,
@@ -88,7 +90,6 @@ _voice_safety_service = SafetyService(
     identity_disclosure=_config.persona.style_profile.identity_disclosure,
     source_user_id=_config.persona.style_profile.source_user_id,
 )
-_voice_reply_decider = DEFAULT_VOICE_REPLY_DECIDER
 _active_windows: dict[tuple[str, str], float] = {}
 _group_reply_queues: dict[str, asyncio.Queue["GroupReplyTask"]] = {}
 _group_reply_workers: dict[str, asyncio.Task] = {}
@@ -96,9 +97,14 @@ _group_last_sent_at: dict[str, float] = {}
 _group_recent_thread_events: list[dict[str, str | float | int]] = []
 _group_recent_media_by_message_id: OrderedDict[str, tuple[MediaItem, ...]] = OrderedDict()
 _group_recent_direct_actions: dict[tuple[str, str], tuple[str, float]] = {}
+_group_voice_windows: dict[str, "GroupVoiceWindow"] = {}
+_group_voice_counted_outgoing_keys: OrderedDict[tuple[str, str], None] = OrderedDict()
 GROUP_REPLY_INTERVAL_SECONDS = 1.5
 GROUP_INTERJECTION_PROBABILITY = 0.15
+GROUP_RANDOM_VOICE_WINDOW_SIZE = 50
+GROUP_RANDOM_VOICE_SELECTED_COUNT = 3
 MAX_RECENT_MEDIA_MESSAGES = 200
+MAX_GROUP_VOICE_COUNTED_KEYS = 500
 FOLLOW_UP_MARKERS = (
     "那",
     "所以",
@@ -138,6 +144,20 @@ class ContextStickerSendResult:
     sent: bool = False
     asset_found: bool = False
     send_failed: bool = False
+
+
+@dataclass
+class GroupVoiceWindow:
+    window_id: int = 0
+    index: int = 0
+    selected_indexes: set[int] | None = None
+
+
+@dataclass(frozen=True)
+class GroupRandomVoiceDecision:
+    selected: bool
+    window_id: int
+    window_index: int
 
 
 group_chat = on_message(priority=10, block=False)
@@ -187,10 +207,7 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
     _remember_message_media(normalized)
     normalized = _with_referenced_media(normalized)
     sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
-    direct_intent = parse_direct_reply_intent(
-        normalized,
-        allow_group_without_at=_allows_nickname_voice_intent(trigger_reason),
-    )
+    direct_intent = parse_direct_reply_intent(normalized)
     if (
         trigger_reason == "nickname_probability_skipped"
         and (
@@ -477,10 +494,6 @@ def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:
     return parse_direct_reply_intent(message).sticker_request
 
 
-def _allows_nickname_voice_intent(trigger_reason: str | None) -> bool:
-    return trigger_reason in {"nickname_trigger", "nickname_probability_skipped"}
-
-
 def _apply_group_followup_intent(
     message: NormalizedMessage,
     direct_intent: DirectReplyIntent,
@@ -640,9 +653,6 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
         )
         force_voice_reply = parse_direct_reply_intent(
             target_message,
-            allow_group_without_at=_allows_nickname_voice_intent(
-                target_message.trigger_reason,
-            ),
         ).voice_reply_requested
         model_question_text = (
             _voice_reply_model_text(target.question_text)
@@ -717,6 +727,10 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             ),
         )
         if message.group_id is not None:
+            _remember_group_non_random_outgoing(
+                target_message.group_id,
+                target_message.message_id,
+            )
             _group_last_sent_at[message.group_id] = time.monotonic()
             _feature_hub.focus_group(message.group_id)
         await _pending_question_service.mark_answered(target)
@@ -809,15 +823,45 @@ async def _maybe_send_group_voice_reply(
         )
         return False
 
-    decision = await _voice_reply_decider.decide_random(
-        message,
-        reply,
-        config=_config.tts,
-        record_system_event=_conversation_service.record_system_event,
-    )
-    if not decision.selected:
+    group_decision = _next_group_random_voice_decision(message)
+    if group_decision is None:
         return False
-    sent = await _maybe_send_group_tts_text(bot, message, decision.speech_text)
+    if not group_decision.selected:
+        speech_text = prepare_tts_speech_text(reply.text)
+        await _record_group_random_voice_decision(
+            message,
+            selected=False,
+            reason="random_not_selected",
+            chars=len(speech_text),
+            window_id=group_decision.window_id,
+            window_index=group_decision.window_index,
+        )
+        return False
+    speech_text = prepare_tts_speech_text(reply.text)
+    skip_reason = tts_candidate_skip_reason(
+        _config.tts,
+        reply,
+        scope_type=message.scope_type,
+    )
+    if skip_reason is not None:
+        await _record_group_random_voice_decision(
+            message,
+            selected=False,
+            reason=skip_reason,
+            chars=len(speech_text),
+            window_id=group_decision.window_id,
+            window_index=group_decision.window_index,
+        )
+        return False
+    await _record_group_random_voice_decision(
+        message,
+        selected=True,
+        reason="random",
+        chars=len(speech_text),
+        window_id=group_decision.window_id,
+        window_index=group_decision.window_index,
+    )
+    sent = await _maybe_send_group_tts_text(bot, message, speech_text)
     if not sent:
         await record_tts_fallback_text_sent(
             message,
@@ -851,6 +895,7 @@ async def _maybe_send_group_tts_text(
     exact_short: bool = False,
     ignore_cooldown: bool = False,
     single_request: bool = False,
+    count_voice_window: bool = True,
 ) -> bool:
     if message.group_id is None:
         return False
@@ -867,11 +912,17 @@ async def _maybe_send_group_tts_text(
         return False
     try:
         await _wait_group_interval(message.group_id)
-        await send_group_record_direct(
+        send_result = await send_group_record_direct(
             bot,
             group_id=message.group_id,
             file_path=result.audio_path,
         )
+        await _record_sent_group_voice_message(
+            message,
+            _extract_sent_message_id(send_result),
+        )
+        if count_voice_window:
+            _remember_group_non_random_outgoing(message.group_id, message.message_id)
         _group_last_sent_at[message.group_id] = time.monotonic()
     except Exception as exc:
         await _conversation_service.record_system_event(
@@ -1000,6 +1051,92 @@ def _remember_thread_event(task: GroupReplyTask, queue_size: int) -> None:
     del _group_recent_thread_events[:-20]
 
 
+def _next_group_random_voice_decision(
+    message: NormalizedMessage,
+) -> GroupRandomVoiceDecision | None:
+    if message.group_id is None:
+        return None
+    decision = _advance_group_voice_window(message.group_id, eligible=True)
+    _mark_group_outgoing_counted(message.group_id, message.message_id)
+    return decision
+
+
+def _remember_group_non_random_outgoing(
+    group_id: str | None,
+    message_id: str | None = None,
+) -> None:
+    if group_id is None:
+        return
+    if message_id is not None and _is_group_outgoing_counted(group_id, message_id):
+        return
+    _advance_group_voice_window(group_id, eligible=False)
+    if message_id is not None:
+        _mark_group_outgoing_counted(group_id, message_id)
+
+
+def _is_group_outgoing_counted(group_id: str, message_id: str) -> bool:
+    return (group_id, message_id) in _group_voice_counted_outgoing_keys
+
+
+def _mark_group_outgoing_counted(group_id: str, message_id: str) -> None:
+    key = (group_id, message_id)
+    _group_voice_counted_outgoing_keys[key] = None
+    _group_voice_counted_outgoing_keys.move_to_end(key)
+    while len(_group_voice_counted_outgoing_keys) > MAX_GROUP_VOICE_COUNTED_KEYS:
+        _group_voice_counted_outgoing_keys.popitem(last=False)
+
+
+def _advance_group_voice_window(
+    group_id: str,
+    *,
+    eligible: bool,
+) -> GroupRandomVoiceDecision:
+    window = _group_voice_windows.setdefault(group_id, GroupVoiceWindow())
+    if (
+        window.index <= 0
+        or window.index >= GROUP_RANDOM_VOICE_WINDOW_SIZE
+        or window.selected_indexes is None
+    ):
+        _start_group_voice_window(window)
+    window.index += 1
+    return GroupRandomVoiceDecision(
+        selected=eligible and window.index in (window.selected_indexes or set()),
+        window_id=window.window_id,
+        window_index=window.index,
+    )
+
+
+def _start_group_voice_window(window: GroupVoiceWindow) -> None:
+    window.window_id += 1
+    window.index = 0
+    count = min(GROUP_RANDOM_VOICE_SELECTED_COUNT, GROUP_RANDOM_VOICE_WINDOW_SIZE)
+    window.selected_indexes = set(
+        random.sample(range(1, GROUP_RANDOM_VOICE_WINDOW_SIZE + 1), count)
+    )
+
+
+async def _record_group_random_voice_decision(
+    message: NormalizedMessage,
+    *,
+    selected: bool,
+    reason: str,
+    chars: int,
+    window_id: int,
+    window_index: int,
+) -> None:
+    profile = _config.tts.current_profile()
+    profile_id = profile.id if profile is not None else _config.tts.default_voice_profile_id
+    await _conversation_service.record_system_event(
+        level="INFO",
+        event="tts_selected_random" if selected else "tts_skipped_random",
+        detail=(
+            f"scope=group; window={window_id}; index={window_index}; "
+            f"profile={profile_id}; chars={chars}; reason={reason}"
+        ),
+        trace_id=message.trace_id,
+    )
+
+
 def _remember_message_media(message: NormalizedMessage) -> None:
     if not message.media_items:
         return
@@ -1035,6 +1172,8 @@ async def _try_send_group_explicit_voice(
     message: NormalizedMessage,
     explicit_text: str | None = None,
 ) -> bool:
+    if not message.is_at_self:
+        return False
     if not tts_enabled_for_scope(_config.tts, message.scope_type):
         return False
     if explicit_text is None:
@@ -1094,6 +1233,8 @@ async def _try_send_group_explicit_voice(
         group_at_user_id=message.user_id,
         on_send_error=on_send_error,
     )
+    if not failed:
+        _remember_group_non_random_outgoing(message.group_id, message.message_id)
     await _conversation_service.record_reply_audit(
         message,
         action="reply" if not failed else "silence",
@@ -1168,6 +1309,7 @@ async def _send_context_sticker(
             group_id=message.group_id,
             file_path=asset.file_path,
         )
+        _remember_group_non_random_outgoing(message.group_id, message.message_id)
     except Exception as exc:
         await _conversation_service.record_system_event(
             level="ERROR",
@@ -1206,6 +1348,7 @@ async def _send_reply_sticker_if_requested(
             file_path=asset.file_path,
         )
         await _feature_hub.stickers.mark_used(asset.asset_id)
+        _remember_group_non_random_outgoing(message.group_id, message.message_id)
         _group_last_sent_at[message.group_id] = time.monotonic()
     except Exception as exc:
         await _conversation_service.record_system_event(
@@ -1307,6 +1450,8 @@ async def _send_context_sticker_fallback_text(
         group_at_user_id=message.user_id,
         on_send_error=on_send_error,
     )
+    if not failed:
+        _remember_group_non_random_outgoing(message.group_id, message.message_id)
     return not failed
 
 
@@ -1350,6 +1495,7 @@ async def _send_repeat_candidate(bot: Bot, candidate, *, trace_id: str) -> bool:
             await _feature_hub.stickers.mark_used(candidate.sticker_asset.asset_id)
         else:
             await bot.send_group_msg(group_id=int(candidate.group_id), message=candidate.text)
+        _remember_group_non_random_outgoing(candidate.group_id, candidate.message_id)
     except Exception as exc:
         await _conversation_service.record_system_event(
             level="ERROR",
@@ -1402,4 +1548,19 @@ async def _record_sent_group_message(
         group_id=group_id,
         user_id=self_id,
         original_message_id=target.message_id,
+    )
+
+
+async def _record_sent_group_voice_message(
+    message: NormalizedMessage,
+    sent_message_id: str | None,
+) -> None:
+    if sent_message_id is None or message.group_id is None:
+        return
+    await _bot_sent_repository.save_group_message(
+        message_id=sent_message_id,
+        trace_id=message.trace_id,
+        group_id=message.group_id,
+        user_id=message.self_id,
+        original_message_id=message.message_id,
     )

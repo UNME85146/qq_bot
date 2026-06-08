@@ -237,7 +237,7 @@ def _extract_short_terms(text: str) -> list[str]:
     )
     matched = [term for term in known if re.search(rf"(?i)(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", text)]
     chinese_terms = re.findall(r"(?<![\d])[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_+#.-]{1,9}", text)
-    ignored = {"这个", "那个", "什么", "一下", "可以", "就是", "然后", "我们", "你们", "机器人"}
+    ignored = {"这个", "那个", "什么", "一下", "可以", "就是", "然后", "我们", "你们", "机器人", "小黄"}
     for term in chinese_terms:
         if term not in ignored and term not in matched and len(term) <= 10:
             if any(marker in term for marker in ("接口", "模型", "表情", "复读", "部署", "配置")):

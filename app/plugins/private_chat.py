@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
+from collections import OrderedDict
+from dataclasses import dataclass
 
 from loguru import logger
 from nonebot import get_driver, on_message
@@ -22,14 +25,15 @@ from app.features.reminder_service import (
 from app.features.runtime_features import create_runtime_feature_hub, maybe_save_sticker
 from app.features.sticker_service import is_sticker_save_request
 from app.features.tts_service import (
-    DEFAULT_VOICE_REPLY_DECIDER,
     EXACT_TTS_SEGMENT_MAX_CHARS,
     TTS_SEGMENT_MAX_CHARS,
     TTSService,
     extract_explicit_voice_read_text,
     forced_voice_tts_skip_reason,
+    prepare_tts_speech_text,
     record_explicit_voice_selected,
     record_tts_fallback_text_sent,
+    tts_candidate_skip_reason,
     tts_enabled_for_scope,
     tts_scope_disabled_reason,
 )
@@ -63,12 +67,30 @@ _voice_safety_service = SafetyService(
     identity_disclosure=_config.persona.style_profile.identity_disclosure,
     source_user_id=_config.persona.style_profile.source_user_id,
 )
-_voice_reply_decider = DEFAULT_VOICE_REPLY_DECIDER
 _reply_formatter = ReplyFormatter(_config.reply.max_reply_length)
 _recent_private_sticker_assets: dict[str, str] = {}
 _recent_private_direct_actions: dict[str, str] = {}
 _private_user_locks: dict[str, asyncio.Lock] = {}
 _pending_private_greetings: set[str] = set()
+_private_voice_windows: dict[str, "PrivateVoiceWindow"] = {}
+_private_voice_counted_outgoing_keys: OrderedDict[tuple[str, str], None] = OrderedDict()
+PRIVATE_RANDOM_VOICE_WINDOW_SIZE = 50
+PRIVATE_RANDOM_VOICE_SELECTED_COUNT = 6
+MAX_PRIVATE_VOICE_COUNTED_KEYS = 1000
+
+
+@dataclass
+class PrivateVoiceWindow:
+    window_id: int = 0
+    index: int = 0
+    selected_indexes: set[int] | None = None
+
+
+@dataclass(frozen=True)
+class PrivateRandomVoiceDecision:
+    selected: bool
+    window_id: int
+    window_index: int
 
 private_chat = on_message(priority=10, block=False)
 
@@ -133,6 +155,7 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                     "send_private_reply_failed",
                 ),
             )
+            _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
             return
         if is_reminder_command(normalized.text):
             _clear_private_direct_action(normalized.user_id)
@@ -155,6 +178,7 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                     "send_private_reply_failed",
                 ),
             )
+            _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
             return
         reminder = await _feature_hub.reminders.try_create_from_message(normalized)
         if reminder is not None:
@@ -172,6 +196,7 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                     "send_private_reply_failed",
                 ),
             )
+            _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
             return
         if is_explicit_reminder_request(normalized.text):
             _clear_private_direct_action(normalized.user_id)
@@ -188,6 +213,7 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                     "send_private_reply_failed",
                 ),
             )
+            _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
             return
         if direct_intent.sticker_request or direct_intent.sticker_battle_request:
             asset = await _choose_safe_sticker(
@@ -203,6 +229,10 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                         file_path=asset.file_path,
                     )
                     await _feature_hub.stickers.mark_used(asset.asset_id)
+                    _remember_private_non_random_outgoing(
+                        normalized.user_id,
+                        normalized.message_id,
+                    )
                     sticker_sent = True
                 except Exception as exc:
                     await _record_send_error(
@@ -235,6 +265,10 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                         index,
                         "send_private_reply_failed",
                     ),
+                )
+                _remember_private_non_random_outgoing(
+                    normalized.user_id,
+                    normalized.message_id,
                 )
                 await _conversation_service.record_reply_audit(
                     normalized,
@@ -291,6 +325,7 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                     "send_private_reply_failed",
                 ),
             )
+            _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
             return
 
     force_voice_reply = (
@@ -334,14 +369,17 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
             "send_private_reply_failed",
         ),
     )
+    _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
     if normalized.media_items and _can_pair_sticker_with_media_reply(reply):
-        await _send_reply_sticker_if_requested(
+        sticker_sent = await _send_reply_sticker_if_requested(
             bot,
+            normalized,
             normalized.user_id,
             reply.text,
-            trace_id=normalized.trace_id,
             exclude_asset_id=saved_sticker_asset_id,
         )
+        if sticker_sent:
+            _remember_private_non_random_outgoing(normalized.user_id)
 
 
 _REMINDER_CREATE_HELP_TEXT = "要提醒什么？比如：十分钟后提醒我喝水"
@@ -403,6 +441,7 @@ async def _try_send_private_explicit_voice(
             "send_private_reply_failed",
         ),
     )
+    _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
     await _conversation_service.record_reply_audit(
         normalized,
         action="reply",
@@ -476,15 +515,44 @@ async def _maybe_send_private_voice_reply(
         )
         return False
 
-    decision = await _voice_reply_decider.decide_random(
-        normalized,
-        reply,
-        config=_config.tts,
-        record_system_event=_conversation_service.record_system_event,
-    )
-    if not decision.selected:
+    private_decision = _next_private_random_voice_decision(normalized)
+    if private_decision is None:
         return False
-    sent = await _maybe_send_private_tts_text(bot, normalized, decision.speech_text)
+    speech_text = prepare_tts_speech_text(reply.text)
+    if not private_decision.selected:
+        await _record_private_random_voice_decision(
+            normalized,
+            selected=False,
+            reason="random_not_selected",
+            chars=len(speech_text),
+            window_id=private_decision.window_id,
+            window_index=private_decision.window_index,
+        )
+        return False
+    skip_reason = tts_candidate_skip_reason(
+        _config.tts,
+        reply,
+        scope_type=normalized.scope_type,
+    )
+    if skip_reason is not None:
+        await _record_private_random_voice_decision(
+            normalized,
+            selected=False,
+            reason=skip_reason,
+            chars=len(speech_text),
+            window_id=private_decision.window_id,
+            window_index=private_decision.window_index,
+        )
+        return False
+    await _record_private_random_voice_decision(
+        normalized,
+        selected=True,
+        reason="random",
+        chars=len(speech_text),
+        window_id=private_decision.window_id,
+        window_index=private_decision.window_index,
+    )
+    sent = await _maybe_send_private_tts_text(bot, normalized, speech_text)
     if not sent:
         await record_tts_fallback_text_sent(
             normalized,
@@ -532,6 +600,7 @@ async def _maybe_send_private_tts_text(
             user_id=normalized.user_id,
             file_path=result.audio_path,
         )
+        _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
     except Exception as exc:
         await _conversation_service.record_system_event(
             level="ERROR",
@@ -541,6 +610,90 @@ async def _maybe_send_private_tts_text(
         )
         return False
     return True
+
+
+def _next_private_random_voice_decision(normalized) -> PrivateRandomVoiceDecision | None:
+    if not normalized.user_id:
+        return None
+    decision = _advance_private_voice_window(normalized.user_id, eligible=True)
+    _mark_private_outgoing_counted(normalized.user_id, normalized.message_id)
+    return decision
+
+
+def _remember_private_non_random_outgoing(
+    user_id: str | None,
+    message_id: str | None = None,
+) -> None:
+    if not user_id:
+        return
+    if message_id is not None and _is_private_outgoing_counted(user_id, message_id):
+        return
+    _advance_private_voice_window(user_id, eligible=False)
+    if message_id is not None:
+        _mark_private_outgoing_counted(user_id, message_id)
+
+
+def _is_private_outgoing_counted(user_id: str, message_id: str) -> bool:
+    return (user_id, message_id) in _private_voice_counted_outgoing_keys
+
+
+def _mark_private_outgoing_counted(user_id: str, message_id: str) -> None:
+    key = (user_id, message_id)
+    _private_voice_counted_outgoing_keys[key] = None
+    _private_voice_counted_outgoing_keys.move_to_end(key)
+    while len(_private_voice_counted_outgoing_keys) > MAX_PRIVATE_VOICE_COUNTED_KEYS:
+        _private_voice_counted_outgoing_keys.popitem(last=False)
+
+
+def _advance_private_voice_window(
+    user_id: str,
+    *,
+    eligible: bool,
+) -> PrivateRandomVoiceDecision:
+    window = _private_voice_windows.setdefault(user_id, PrivateVoiceWindow())
+    if (
+        window.index <= 0
+        or window.index >= PRIVATE_RANDOM_VOICE_WINDOW_SIZE
+        or window.selected_indexes is None
+    ):
+        _start_private_voice_window(window)
+    window.index += 1
+    return PrivateRandomVoiceDecision(
+        selected=eligible and window.index in (window.selected_indexes or set()),
+        window_id=window.window_id,
+        window_index=window.index,
+    )
+
+
+def _start_private_voice_window(window: PrivateVoiceWindow) -> None:
+    window.window_id += 1
+    window.index = 0
+    count = min(PRIVATE_RANDOM_VOICE_SELECTED_COUNT, PRIVATE_RANDOM_VOICE_WINDOW_SIZE)
+    window.selected_indexes = set(
+        random.sample(range(1, PRIVATE_RANDOM_VOICE_WINDOW_SIZE + 1), count)
+    )
+
+
+async def _record_private_random_voice_decision(
+    normalized,
+    *,
+    selected: bool,
+    reason: str,
+    chars: int,
+    window_id: int,
+    window_index: int,
+) -> None:
+    profile = _config.tts.current_profile()
+    profile_id = profile.id if profile is not None else _config.tts.default_voice_profile_id
+    await _conversation_service.record_system_event(
+        level="INFO",
+        event="tts_selected_random" if selected else "tts_skipped_random",
+        detail=(
+            f"scope=private; window={window_id}; index={window_index}; "
+            f"profile={profile_id}; chars={chars}; reason={reason}"
+        ),
+        trace_id=normalized.trace_id,
+    )
 
 
 def _tts_segment_max_chars() -> int:
@@ -618,10 +771,10 @@ def _sticker_save_reply_text(
 
 async def _send_reply_sticker_if_requested(
     bot: Bot,
+    normalized,
     user_id: str,
     intent_text: str,
     *,
-    trace_id: str,
     exclude_asset_id: str | None = None,
 ) -> bool:
     asset = await _choose_safe_sticker(intent_text, exclude_asset_id=exclude_asset_id)
@@ -635,7 +788,12 @@ async def _send_reply_sticker_if_requested(
         )
         await _feature_hub.stickers.mark_used(asset.asset_id)
     except Exception as exc:
-        await _record_send_error(trace_id, exc, 0, "send_private_sticker_failed")
+        await _record_send_error(
+            normalized.trace_id,
+            exc,
+            0,
+            "send_private_sticker_failed",
+        )
         return False
     return True
 
