@@ -697,7 +697,7 @@ def _tts_request_timeout_seconds(
     length = len(_compact_for_timeout(text))
     if length <= 80:
         return configured
-    return max(configured, min(300.0, 30.0 + length * 1.2))
+    return max(configured, min(900.0, 180.0 + length * 2.5))
 
 
 def _compact_for_timeout(text: str) -> str:
@@ -925,6 +925,10 @@ def _is_voice_reply_trailing_particle(text: str) -> bool:
 
 def _normalize_tts_punctuation(text: str) -> str:
     cleaned = _DUP_PUNCT_RE.sub(r"\1", str(text or ""))
+    cleaned = cleaned.replace("——", "，")
+    cleaned = cleaned.replace("—", "，")
+    cleaned = cleaned.replace("……", "。")
+    cleaned = cleaned.replace("…", "。")
     cleaned = re.sub(r"\s+([，。！？!?；;、：:])", r"\1", cleaned)
     cleaned = re.sub(r"([，。！？!?；;、：:])\s+", r"\1", cleaned)
     return cleaned.strip(" \t\r\n，。！？!?~～、；;：:")

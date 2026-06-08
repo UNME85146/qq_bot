@@ -42,6 +42,7 @@ class TTSGenerationProfile:
     sample_mode: str
     do_sample: bool
     max_new_frames: int
+    voice_clone_max_text_tokens: int | None
     enable_normalize_tts_text: bool
     audio_temperature: float
     audio_top_p: float
@@ -57,6 +58,10 @@ class WavQualityInfo:
     silence_ratio: float = 0.0
     longest_silence_ms: int = 0
     rms_median: int = 0
+    roughness_p95: float = 0.0
+    tail_roughness_p95: float = 0.0
+    roughness_bad_windows: int = 0
+    tail_roughness_bad_windows: int = 0
 
 
 class AdapterState:
@@ -188,6 +193,10 @@ def create_app(state: AdapterState) -> FastAPI:
                 "duration_guard_ms": duration_guard_ms,
                 "silence_ratio": quality.silence_ratio,
                 "longest_silence_ms": quality.longest_silence_ms,
+                "roughness_p95": quality.roughness_p95,
+                "tail_roughness_p95": quality.tail_roughness_p95,
+                "roughness_bad_windows": quality.roughness_bad_windows,
+                "tail_roughness_bad_windows": quality.tail_roughness_bad_windows,
             }
         )
 
@@ -229,6 +238,7 @@ def _generation_profile_for_text(
             sample_mode="fixed",
             do_sample=True,
             max_new_frames=max_new_frames,
+            voice_clone_max_text_tokens=None,
             enable_normalize_tts_text=True,
             audio_temperature=0.65,
             audio_top_p=0.85,
@@ -242,6 +252,7 @@ def _generation_profile_for_text(
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 24),
+            voice_clone_max_text_tokens=None,
             enable_normalize_tts_text=False,
             audio_temperature=0.55,
             audio_top_p=0.75,
@@ -255,6 +266,7 @@ def _generation_profile_for_text(
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 32),
+            voice_clone_max_text_tokens=None,
             enable_normalize_tts_text=False,
             audio_temperature=0.55,
             audio_top_p=0.75,
@@ -268,6 +280,7 @@ def _generation_profile_for_text(
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 56),
+            voice_clone_max_text_tokens=None,
             enable_normalize_tts_text=not exact_text,
             audio_temperature=0.6,
             audio_top_p=0.8,
@@ -281,6 +294,7 @@ def _generation_profile_for_text(
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 96),
+            voice_clone_max_text_tokens=None,
             enable_normalize_tts_text=not exact_text,
             audio_temperature=0.6,
             audio_top_p=0.82,
@@ -294,6 +308,7 @@ def _generation_profile_for_text(
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 160),
+            voice_clone_max_text_tokens=None,
             enable_normalize_tts_text=not exact_text,
             audio_temperature=0.62,
             audio_top_p=0.85,
@@ -305,23 +320,34 @@ def _generation_profile_for_text(
         name="long_80_plus_exact" if exact_text else "long_80_plus",
         sample_mode="greedy" if exact_text else "fixed",
         do_sample=not exact_text,
-        max_new_frames=cap if exact_text else min(cap, 240),
-        enable_normalize_tts_text=not exact_text,
-        audio_temperature=0.65,
-        audio_top_p=0.85,
-        audio_top_k=16,
-        audio_repetition_penalty=1.3,
+        max_new_frames=min(cap, 136) if exact_text else min(cap, 160),
+        voice_clone_max_text_tokens=36 if exact_text else 48,
+        enable_normalize_tts_text=True,
+        audio_temperature=0.55 if exact_text else 0.62,
+        audio_top_p=0.75 if exact_text else 0.85,
+        audio_top_k=10 if exact_text else 16,
+        audio_repetition_penalty=1.65 if exact_text else 1.35,
     )
     return _rescue_profile(profile) if rescue else profile
 
 
 def _rescue_profile(profile: TTSGenerationProfile) -> TTSGenerationProfile:
+    frame_multiplier = 0.85 if profile.voice_clone_max_text_tokens is not None else 0.75
     return TTSGenerationProfile(
         name=f"{profile.name}_rescue",
         sample_mode="greedy",
         do_sample=False,
-        max_new_frames=max(12, int(profile.max_new_frames * 0.75)),
-        enable_normalize_tts_text=profile.enable_normalize_tts_text,
+        max_new_frames=max(12, int(profile.max_new_frames * frame_multiplier)),
+        voice_clone_max_text_tokens=(
+            max(24, int(profile.voice_clone_max_text_tokens * 0.75))
+            if profile.voice_clone_max_text_tokens is not None
+            else None
+        ),
+        enable_normalize_tts_text=(
+            True
+            if profile.voice_clone_max_text_tokens is not None
+            else profile.enable_normalize_tts_text
+        ),
         audio_temperature=min(profile.audio_temperature, 0.55),
         audio_top_p=min(profile.audio_top_p, 0.75),
         audio_top_k=min(profile.audio_top_k, 10),
@@ -422,14 +448,17 @@ def _synthesize_once(
             do_sample=generation_profile.do_sample,
             streaming=False,
             max_new_frames=generation_profile.max_new_frames,
-            voice_clone_max_text_tokens=state.voice_clone_max_text_tokens,
+            voice_clone_max_text_tokens=(
+                generation_profile.voice_clone_max_text_tokens
+                or state.voice_clone_max_text_tokens
+            ),
             enable_wetext=False,
             enable_normalize_tts_text=generation_profile.enable_normalize_tts_text,
         )
     finally:
         _restore_generation_defaults(runtime, snapshot)
     generated_path = Path(str(result["audio_path"]))
-    final_path = _normalize_wav(generated_path, output_path)
+    final_path = _postprocess_wav(_normalize_wav(generated_path, output_path))
     result["final_audio_path"] = str(final_path)
     return result
 
@@ -525,6 +554,31 @@ def _normalize_wav(source: Path, target: Path) -> Path:
         return target
 
 
+def _postprocess_wav(path: Path) -> Path:
+    ffmpeg = os.getenv("QQ_BOT_TTS_FFMPEG", "ffmpeg")
+    filtered_path = path.with_name(f"{path.stem}.filtered.tmp.wav")
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(path),
+        "-af",
+        "highpass=f=80,lowpass=f=7200,afftdn=nf=-25",
+        "-ar",
+        "24000",
+        "-ac",
+        "1",
+        str(filtered_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=30)
+        _assert_wav_shape(filtered_path, sample_rate=24000, channels=1)
+        filtered_path.replace(path)
+    except Exception:
+        filtered_path.unlink(missing_ok=True)
+    return path
+
+
 def _wav_info(path: Path) -> tuple[int, int, int | None]:
     try:
         import wave
@@ -578,6 +632,9 @@ def _wav_quality_info(path: Path) -> WavQualityInfo:
     silence_windows = 0
     longest_silence_windows = 0
     current_silence_windows = 0
+    roughness_values: list[float] = []
+    roughness_indexed_values: list[tuple[int, float]] = []
+    roughness_bad_windows = 0
     for rms in rms_values:
         if rms < silence_threshold:
             silence_windows += 1
@@ -588,8 +645,41 @@ def _wav_quality_info(path: Path) -> WavQualityInfo:
             )
         else:
             current_silence_windows = 0
+    for window_index, index in enumerate(range(0, len(data), window_bytes)):
+        chunk = data[index : index + window_bytes]
+        if len(chunk) < max(2, window_bytes // 2):
+            continue
+        rms = _rms_16bit_le(chunk)
+        if rms < 500:
+            continue
+        roughness = _roughness_16bit_le(chunk, rms=rms)
+        roughness_values.append(roughness)
+        roughness_indexed_values.append((window_index, roughness))
+        if roughness > 1.0:
+            roughness_bad_windows += 1
     sorted_rms = sorted(rms_values)
     median = sorted_rms[len(sorted_rms) // 2]
+    sorted_roughness = sorted(roughness_values)
+    roughness_p95 = (
+        sorted_roughness[min(len(sorted_roughness) - 1, int(len(sorted_roughness) * 0.95))]
+        if sorted_roughness
+        else 0.0
+    )
+    tail_start_window = max(0, len(rms_values) - max(5, int(len(rms_values) * 0.25)))
+    tail_roughness_values = [
+        roughness
+        for window_index, roughness in roughness_indexed_values
+        if window_index >= tail_start_window
+    ]
+    tail_bad_windows = sum(1 for value in tail_roughness_values if value > 0.85)
+    sorted_tail_roughness = sorted(tail_roughness_values)
+    tail_roughness_p95 = (
+        sorted_tail_roughness[
+            min(len(sorted_tail_roughness) - 1, int(len(sorted_tail_roughness) * 0.95))
+        ]
+        if sorted_tail_roughness
+        else 0.0
+    )
     return WavQualityInfo(
         sample_rate=rate,
         channels=channels,
@@ -597,6 +687,10 @@ def _wav_quality_info(path: Path) -> WavQualityInfo:
         silence_ratio=round(silence_windows / len(rms_values), 4),
         longest_silence_ms=int(longest_silence_windows * 200),
         rms_median=median,
+        roughness_p95=round(roughness_p95, 4),
+        tail_roughness_p95=round(tail_roughness_p95, 4),
+        roughness_bad_windows=roughness_bad_windows,
+        tail_roughness_bad_windows=tail_bad_windows,
     )
 
 
@@ -609,6 +703,19 @@ def _rms_16bit_le(data: bytes) -> int:
         sample = int.from_bytes(data[index : index + 2], "little", signed=True)
         total += sample * sample
     return int((total / sample_count) ** 0.5)
+
+
+def _roughness_16bit_le(data: bytes, *, rms: int) -> float:
+    sample_count = len(data) // 2
+    if sample_count <= 1:
+        return 0.0
+    previous = int.from_bytes(data[0:2], "little", signed=True)
+    total_delta = 0
+    for index in range(2, sample_count * 2, 2):
+        sample = int.from_bytes(data[index : index + 2], "little", signed=True)
+        total_delta += abs(sample - previous)
+        previous = sample
+    return float(total_delta / (sample_count - 1) / max(1, rms))
 
 
 def _needs_rescue(
@@ -640,6 +747,10 @@ def _audio_quality_out_of_bounds(
     return (
         quality.silence_ratio >= 0.60
         or quality.longest_silence_ms >= longest_allowed_ms
+        or quality.roughness_p95 >= 0.80
+        or quality.tail_roughness_p95 >= 0.70
+        or quality.roughness_bad_windows >= 3
+        or quality.tail_roughness_bad_windows >= 2
     )
 
 
