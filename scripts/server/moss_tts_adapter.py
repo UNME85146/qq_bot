@@ -293,7 +293,7 @@ def _generation_profile_for_text(
         name="long_80_plus_exact" if exact_text else "long_80_plus",
         sample_mode="greedy" if exact_text else "fixed",
         do_sample=not exact_text,
-        max_new_frames=min(cap, 240),
+        max_new_frames=cap if exact_text else min(cap, 240),
         enable_normalize_tts_text=not exact_text,
         audio_temperature=0.65,
         audio_top_p=0.85,
@@ -351,7 +351,7 @@ def _duration_guard_ms(text: str, *, exact_text: bool = False) -> int:
             return 12800
         return 8000
     if exact_text:
-        return min(30000, 2200 + length * 450)
+        return min(120000, 3000 + length * 600)
     return min(18000, 1600 + length * 220)
 
 

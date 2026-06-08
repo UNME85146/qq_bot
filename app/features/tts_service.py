@@ -203,10 +203,15 @@ class TTSService:
             ),
             message.trace_id,
         )
+        request_timeout_seconds = _tts_request_timeout_seconds(
+            self._config,
+            speech_text,
+            exact_short=exact_short,
+        )
         started_at = self._now()
         try:
             async with self._client_factory(
-                timeout=self._config.request_timeout_seconds,
+                timeout=request_timeout_seconds,
             ) as client:
                 response = await client.post(
                     self._config.endpoint,
@@ -678,6 +683,25 @@ def _tts_request_payload(
     if exact_text:
         payload["exactText"] = True
     return payload
+
+
+def _tts_request_timeout_seconds(
+    config: TTSConfig,
+    text: str,
+    *,
+    exact_short: bool,
+) -> float:
+    configured = float(getattr(config, "request_timeout_seconds", 60.0) or 60.0)
+    if not exact_short:
+        return configured
+    length = len(_compact_for_timeout(text))
+    if length <= max(1, int(getattr(config, "max_chars", TTS_SEGMENT_MAX_CHARS))):
+        return configured
+    return max(configured, min(300.0, 30.0 + length * 1.2))
+
+
+def _compact_for_timeout(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or ""))
 
 
 def _optional_int(value: Any) -> int | None:

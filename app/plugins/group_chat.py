@@ -850,6 +850,7 @@ async def _maybe_send_group_tts_text(
     *,
     exact_short: bool = False,
     ignore_cooldown: bool = False,
+    single_request: bool = False,
 ) -> bool:
     if message.group_id is None:
         return False
@@ -859,7 +860,7 @@ async def _maybe_send_group_tts_text(
         exact_short=exact_short,
         ignore_cooldown=ignore_cooldown,
         segment_max_chars=_tts_segment_max_chars()
-        if exact_short or ignore_cooldown
+        if not single_request and (exact_short or ignore_cooldown)
         else None,
     )
     if result is None:
@@ -1055,6 +1056,7 @@ async def _try_send_group_explicit_voice(
         explicit_text,
         exact_short=True,
         ignore_cooldown=True,
+        single_request=True,
     )
     if sent:
         await _conversation_service.record_reply_audit(
