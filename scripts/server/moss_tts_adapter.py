@@ -49,6 +49,16 @@ class TTSGenerationProfile:
     audio_repetition_penalty: float
 
 
+@dataclass(frozen=True)
+class WavQualityInfo:
+    sample_rate: int
+    channels: int
+    duration_ms: int | None
+    silence_ratio: float = 0.0
+    longest_silence_ms: int = 0
+    rms_median: int = 0
+
+
 class AdapterState:
     def __init__(
         self,
@@ -160,15 +170,15 @@ def create_app(state: AdapterState) -> FastAPI:
                 exact_text=request.exactText,
             )
         final_path = Path(str(result["final_audio_path"]))
-        sample_rate, channels, duration_ms = _wav_info(final_path)
+        quality = _wav_quality_info(final_path)
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         duration_guard_ms = _duration_guard_ms(text, exact_text=request.exactText)
         return JSONResponse(
             {
                 "audio_path": str(final_path),
-                "duration_ms": duration_ms,
-                "sample_rate": sample_rate,
-                "channels": channels,
+                "duration_ms": quality.duration_ms,
+                "sample_rate": quality.sample_rate,
+                "channels": quality.channels,
                 "execution_provider": state.execution_provider,
                 "voice_profile_id": profile.id,
                 "elapsed_ms": elapsed_ms,
@@ -176,6 +186,8 @@ def create_app(state: AdapterState) -> FastAPI:
                 "max_new_frames": generation_profile.max_new_frames,
                 "retry_count": retry_count,
                 "duration_guard_ms": duration_guard_ms,
+                "silence_ratio": quality.silence_ratio,
+                "longest_silence_ms": quality.longest_silence_ms,
             }
         )
 
@@ -442,8 +454,8 @@ def _synthesize_with_stability_guard(
         output_path=output_path,
         generation_profile=generation_profile,
     )
-    _, _, duration_ms = _wav_info(Path(str(result["final_audio_path"])))
-    if not _duration_out_of_bounds(text, duration_ms, exact_text=exact_text):
+    quality = _wav_quality_info(Path(str(result["final_audio_path"])))
+    if not _needs_rescue(text, quality, exact_text=exact_text):
         return result, generation_profile, 0
 
     rescue_profile = _generation_profile_for_text(
@@ -460,9 +472,11 @@ def _synthesize_with_stability_guard(
         output_path=rescue_output_path,
         generation_profile=rescue_profile,
     )
-    _, _, rescue_duration_ms = _wav_info(Path(str(rescue_result["final_audio_path"])))
-    if _duration_out_of_bounds(text, rescue_duration_ms, exact_text=exact_text):
+    rescue_quality = _wav_quality_info(Path(str(rescue_result["final_audio_path"])))
+    if _duration_out_of_bounds(text, rescue_quality.duration_ms, exact_text=exact_text):
         raise HTTPException(status_code=500, detail="duration_out_of_bounds")
+    if _audio_quality_out_of_bounds(text, rescue_quality, exact_text=exact_text):
+        raise HTTPException(status_code=500, detail="audio_quality_out_of_bounds")
     final_path = Path(str(rescue_result["final_audio_path"]))
     if final_path != output_path:
         final_path.replace(output_path)
@@ -522,6 +536,111 @@ def _wav_info(path: Path) -> tuple[int, int, int | None]:
         return rate, channels, int(frames / rate * 1000) if rate else None
     except Exception:
         raise HTTPException(status_code=500, detail="invalid wav output") from None
+
+
+def _wav_quality_info(path: Path) -> WavQualityInfo:
+    try:
+        import wave
+
+        with wave.open(str(path), "rb") as wav:
+            frames = wav.getnframes()
+            rate = wav.getframerate()
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            data = wav.readframes(frames)
+    except Exception:
+        raise HTTPException(status_code=500, detail="invalid wav output") from None
+
+    duration_ms = int(frames / rate * 1000) if rate else None
+    if sample_width != 2 or rate <= 0 or channels <= 0 or not data:
+        return WavQualityInfo(
+            sample_rate=rate,
+            channels=channels,
+            duration_ms=duration_ms,
+        )
+
+    window_frames = max(1, int(rate * 0.2))
+    window_bytes = window_frames * channels * sample_width
+    rms_values: list[int] = []
+    for index in range(0, len(data), window_bytes):
+        chunk = data[index : index + window_bytes]
+        if len(chunk) < max(2, window_bytes // 2):
+            continue
+        rms_values.append(_rms_16bit_le(chunk))
+    if not rms_values:
+        return WavQualityInfo(
+            sample_rate=rate,
+            channels=channels,
+            duration_ms=duration_ms,
+        )
+
+    silence_threshold = 250
+    silence_windows = 0
+    longest_silence_windows = 0
+    current_silence_windows = 0
+    for rms in rms_values:
+        if rms < silence_threshold:
+            silence_windows += 1
+            current_silence_windows += 1
+            longest_silence_windows = max(
+                longest_silence_windows,
+                current_silence_windows,
+            )
+        else:
+            current_silence_windows = 0
+    sorted_rms = sorted(rms_values)
+    median = sorted_rms[len(sorted_rms) // 2]
+    return WavQualityInfo(
+        sample_rate=rate,
+        channels=channels,
+        duration_ms=duration_ms,
+        silence_ratio=round(silence_windows / len(rms_values), 4),
+        longest_silence_ms=int(longest_silence_windows * 200),
+        rms_median=median,
+    )
+
+
+def _rms_16bit_le(data: bytes) -> int:
+    sample_count = len(data) // 2
+    if sample_count <= 0:
+        return 0
+    total = 0
+    for index in range(0, sample_count * 2, 2):
+        sample = int.from_bytes(data[index : index + 2], "little", signed=True)
+        total += sample * sample
+    return int((total / sample_count) ** 0.5)
+
+
+def _needs_rescue(
+    text: str,
+    quality: WavQualityInfo,
+    *,
+    exact_text: bool = False,
+) -> bool:
+    return _duration_out_of_bounds(
+        text,
+        quality.duration_ms,
+        exact_text=exact_text,
+    ) or _audio_quality_out_of_bounds(text, quality, exact_text=exact_text)
+
+
+def _audio_quality_out_of_bounds(
+    text: str,
+    quality: WavQualityInfo,
+    *,
+    exact_text: bool = False,
+) -> bool:
+    if not exact_text:
+        return False
+    if len(_compact_tts_text(text)) <= 80:
+        return False
+    if quality.duration_ms is None or quality.duration_ms <= 0:
+        return False
+    longest_allowed_ms = min(12000, max(5000, int(quality.duration_ms * 0.30)))
+    return (
+        quality.silence_ratio >= 0.60
+        or quality.longest_silence_ms >= longest_allowed_ms
+    )
 
 
 def _assert_wav_shape(path: Path, *, sample_rate: int, channels: int) -> None:
