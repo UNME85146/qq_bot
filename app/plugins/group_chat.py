@@ -28,6 +28,7 @@ from app.features.runtime_features import (
 from app.features.sticker_service import is_sticker_media
 from app.features.tts_service import (
     DEFAULT_VOICE_REPLY_DECIDER,
+    EXACT_TTS_SEGMENT_MAX_CHARS,
     TTS_SEGMENT_MAX_CHARS,
     TTSService,
     extract_explicit_voice_read_text,
@@ -884,7 +885,10 @@ async def _maybe_send_group_tts_text(
 
 def _tts_segment_max_chars() -> int:
     configured_max = max(1, int(getattr(_config.tts, "max_chars", TTS_SEGMENT_MAX_CHARS)))
-    return min(configured_max, TTS_SEGMENT_MAX_CHARS)
+    return min(
+        configured_max,
+        EXACT_TTS_SEGMENT_MAX_CHARS,
+    )
 
 
 async def _pending_backfill_targets(message: NormalizedMessage) -> list[PendingQuestionTarget]:
@@ -1037,7 +1041,7 @@ async def _try_send_group_explicit_voice(
     if explicit_text is None:
         return False
     safety = _voice_safety_service.check_input(explicit_text, scope_type=message.scope_type)
-    if safety.action != "allow" or len(explicit_text) > _config.tts.max_chars:
+    if safety.action != "allow":
         return False
     await record_explicit_voice_selected(
         message,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import random
+import hashlib
 import time
 import wave
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from app.models import GeneratedReply, NormalizedMessage, TTSConfig, TTSVoicePro
 
 RecordSystemEvent = Callable[..., Awaitable[None]]
 TTS_SEGMENT_MAX_CHARS = 60
+EXACT_TTS_SEGMENT_MAX_CHARS = 24
 
 
 @dataclass(frozen=True)
@@ -129,7 +131,10 @@ class TTSService:
             (
                 f"scope={message.scope_type}; segments={len(segments)}; "
                 f"chars={sum(len(segment) for segment in segments)}; "
-                f"max_segment_chars={max(1, int(segment_max_chars))}; emit=single_record"
+                f"segment_chars={','.join(str(len(segment)) for segment in segments)}; "
+                f"max_segment_chars={max(1, int(segment_max_chars))}; "
+                f"exact_text={str(exact_short).lower()}; "
+                f"text_hash={_speech_text_hash(''.join(segments))}; emit=single_record"
             ),
             message.trace_id,
         )
@@ -193,7 +198,8 @@ class TTSService:
             "tts_generate_started",
             (
                 f"scope={scope_type}; profile={profile_id}; chars={len(speech_text)}; "
-                f"format={self._config.format}; execution_provider={self._config.execution_provider}"
+                f"format={self._config.format}; execution_provider={self._config.execution_provider}; "
+                f"exact_text={str(exact_short).lower()}; text_hash={_speech_text_hash(speech_text)}"
             ),
             message.trace_id,
         )
@@ -649,6 +655,10 @@ def _failure_detail(scope_type: str, profile_id: str, exc: Exception) -> str:
         f"scope={scope_type}; profile={profile_id}; "
         f"reason={type(exc).__name__}; detail={str(exc)[:120]}"
     )
+
+
+def _speech_text_hash(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:12]
 
 
 def _tts_request_payload(

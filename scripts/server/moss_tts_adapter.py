@@ -162,7 +162,7 @@ def create_app(state: AdapterState) -> FastAPI:
         final_path = Path(str(result["final_audio_path"]))
         sample_rate, channels, duration_ms = _wav_info(final_path)
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        duration_guard_ms = _duration_guard_ms(text)
+        duration_guard_ms = _duration_guard_ms(text, exact_text=request.exactText)
         return JSONResponse(
             {
                 "audio_path": str(final_path),
@@ -252,11 +252,11 @@ def _generation_profile_for_text(
         return _rescue_profile(profile) if rescue else profile
     if length <= 16:
         profile = TTSGenerationProfile(
-            name="medium_9_16",
+            name="medium_9_16_exact" if exact_text else "medium_9_16",
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 56),
-            enable_normalize_tts_text=True,
+            enable_normalize_tts_text=not exact_text,
             audio_temperature=0.6,
             audio_top_p=0.8,
             audio_top_k=12,
@@ -265,11 +265,11 @@ def _generation_profile_for_text(
         return _rescue_profile(profile) if rescue else profile
     if length <= 32:
         profile = TTSGenerationProfile(
-            name="medium_17_32",
+            name="medium_17_32_exact" if exact_text else "medium_17_32",
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 96),
-            enable_normalize_tts_text=True,
+            enable_normalize_tts_text=not exact_text,
             audio_temperature=0.6,
             audio_top_p=0.82,
             audio_top_k=14,
@@ -278,11 +278,11 @@ def _generation_profile_for_text(
         return _rescue_profile(profile) if rescue else profile
     if length <= 80:
         profile = TTSGenerationProfile(
-            name="long_33_80",
+            name="long_33_80_exact" if exact_text else "long_33_80",
             sample_mode="greedy",
             do_sample=False,
             max_new_frames=min(cap, 160),
-            enable_normalize_tts_text=True,
+            enable_normalize_tts_text=not exact_text,
             audio_temperature=0.62,
             audio_top_p=0.85,
             audio_top_k=16,
@@ -290,11 +290,11 @@ def _generation_profile_for_text(
         )
         return _rescue_profile(profile) if rescue else profile
     profile = TTSGenerationProfile(
-        name="long_80_plus",
-        sample_mode="fixed",
-        do_sample=True,
+        name="long_80_plus_exact" if exact_text else "long_80_plus",
+        sample_mode="greedy" if exact_text else "fixed",
+        do_sample=not exact_text,
         max_new_frames=min(cap, 240),
-        enable_normalize_tts_text=True,
+        enable_normalize_tts_text=not exact_text,
         audio_temperature=0.65,
         audio_top_p=0.85,
         audio_top_k=16,
@@ -336,7 +336,7 @@ def _restore_generation_defaults(runtime: Any, snapshot: dict[str, Any]) -> None
     defaults.update(snapshot)
 
 
-def _duration_guard_ms(text: str) -> int:
+def _duration_guard_ms(text: str, *, exact_text: bool = False) -> int:
     length = len(_compact_tts_text(text))
     if length <= 0:
         return 0
@@ -347,12 +347,21 @@ def _duration_guard_ms(text: str) -> int:
     if length <= 16:
         return 5200
     if length <= 32:
+        if exact_text:
+            return 12800
         return 8000
+    if exact_text:
+        return min(30000, 2200 + length * 450)
     return min(18000, 1600 + length * 220)
 
 
-def _duration_out_of_bounds(text: str, duration_ms: int | None) -> bool:
-    guard = _duration_guard_ms(text)
+def _duration_out_of_bounds(
+    text: str,
+    duration_ms: int | None,
+    *,
+    exact_text: bool = False,
+) -> bool:
+    guard = _duration_guard_ms(text, exact_text=exact_text)
     return guard > 0 and duration_ms is not None and duration_ms > guard
 
 
@@ -434,7 +443,7 @@ def _synthesize_with_stability_guard(
         generation_profile=generation_profile,
     )
     _, _, duration_ms = _wav_info(Path(str(result["final_audio_path"])))
-    if not _duration_out_of_bounds(text, duration_ms):
+    if not _duration_out_of_bounds(text, duration_ms, exact_text=exact_text):
         return result, generation_profile, 0
 
     rescue_profile = _generation_profile_for_text(
@@ -452,7 +461,7 @@ def _synthesize_with_stability_guard(
         generation_profile=rescue_profile,
     )
     _, _, rescue_duration_ms = _wav_info(Path(str(rescue_result["final_audio_path"])))
-    if _duration_out_of_bounds(text, rescue_duration_ms):
+    if _duration_out_of_bounds(text, rescue_duration_ms, exact_text=exact_text):
         raise HTTPException(status_code=500, detail="duration_out_of_bounds")
     final_path = Path(str(rescue_result["final_audio_path"]))
     if final_path != output_path:
