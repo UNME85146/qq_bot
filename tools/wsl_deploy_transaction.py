@@ -504,7 +504,7 @@ def _execute(
             "replayAllowed": False,
             "qqMessagesSentByAcceptance": False,
             "videoCacheMode": oct(Path(str(target["videoCacheHost"])).stat().st_mode & 0o7777),
-            "videoCacheOwner": f"{service_user}:{_group_name(napcat_gid)}",
+            "videoCacheOwner": f"{service_user}:{_group_label(napcat_gid)}",
             "applicationOwner": f"{service_user}:{service_group}",
             "ownership": ownership,
             "providerValidation": "deferred_to_post_deploy_acceptance",
@@ -2032,6 +2032,13 @@ def _group_name(gid: int) -> str:
     import grp
 
     return grp.getgrgid(gid).gr_name
+
+
+def _group_label(gid: int) -> str:
+    try:
+        return _group_name(gid)
+    except KeyError:
+        return str(gid)
 
 
 def _group_id(name: str) -> int:
