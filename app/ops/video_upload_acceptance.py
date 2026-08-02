@@ -127,9 +127,10 @@ def build_video_upload_plan(
             category="file_too_large",
         )
     relative = candidate.relative_to(host_root)
-    container_file = str(
+    container_path = (
         PurePosixPath(config.container_cache_path) / PurePosixPath(relative.as_posix())
     )
+    container_file = f"file://{container_path}"
     plan = {
         "schema_version": SCHEMA_VERSION,
         "operation": "upload_small_video_acceptance",

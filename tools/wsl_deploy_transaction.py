@@ -415,11 +415,22 @@ def _execute(
         _install_private_file(profile, root / "config/persona_profile.local.json", service_user, service_group)
         venv_switch_started = True
         _switch_venv(root, versioned_venv, backup, old_venv)
-        _prepare_cache(Path(str(target["videoCacheHost"])), service_user, service_group, plan_hash, cache_state)
+        napcat_uid = int(pre_napcat["runtimeUid"])
+        napcat_gid = int(pre_napcat["runtimeGid"])
+        _prepare_cache(
+            Path(str(target["videoCacheHost"])),
+            service_user,
+            service_group,
+            plan_hash,
+            cache_state,
+            napcat_gid=napcat_gid,
+        )
         _validate_cache_mount(
             str(target["napcatContainer"]),
             Path(str(target["videoCacheHost"])),
             str(target["videoCacheContainer"]),
+            runtime_uid=napcat_uid,
+            runtime_gid=napcat_gid,
         )
         if database_path is not None:
             if not database_state.get("existed") and database_path.exists():
@@ -450,6 +461,7 @@ def _execute(
             cache=Path(str(target["videoCacheHost"])),
             user=service_user,
             group=service_group,
+            cache_group=napcat_gid,
         )
         started_at = datetime.now(UTC)
         _run(["systemctl", "start", service])
@@ -491,7 +503,8 @@ def _execute(
             "historicalTtsUnchanged": True,
             "replayAllowed": False,
             "qqMessagesSentByAcceptance": False,
-            "videoCacheMode": oct(Path(str(target["videoCacheHost"])).stat().st_mode & 0o777),
+            "videoCacheMode": oct(Path(str(target["videoCacheHost"])).stat().st_mode & 0o7777),
+            "videoCacheOwner": f"{service_user}:{_group_name(napcat_gid)}",
             "applicationOwner": f"{service_user}:{service_group}",
             "ownership": ownership,
             "providerValidation": "deferred_to_post_deploy_acceptance",
@@ -757,13 +770,31 @@ def _napcat_state(container: str) -> dict[str, Any]:
     payload = json.loads(
         _run(["docker", "inspect", container], quiet=True).stdout
     )[0]
+    runtime_uid, runtime_gid = _napcat_runtime_identity(container)
     return {
         "id": payload.get("Id"),
         "startedAt": _object(payload.get("State")).get("StartedAt"),
         "restartCount": payload.get("RestartCount"),
         "status": _object(payload.get("State")).get("Status"),
         "running": _object(payload.get("State")).get("Running"),
+        "runtimeUid": runtime_uid,
+        "runtimeGid": runtime_gid,
     }
+
+
+def _napcat_runtime_identity(container: str) -> tuple[int, int]:
+    output = _run(
+        ["docker", "exec", container, "ps", "-eo", "uid=,gid=,comm="],
+        quiet=True,
+    ).stdout
+    identities = {
+        (int(parts[0]), int(parts[1]))
+        for line in output.splitlines()
+        if len(parts := line.split(None, 2)) == 3 and parts[2] == "qq"
+    }
+    if len(identities) != 1:
+        raise DeploymentError("NapCat QQ runtime identity is unavailable or ambiguous")
+    return next(iter(identities))
 
 
 def _tts_state() -> dict[str, Any]:
@@ -829,6 +860,8 @@ def _validate_cache_mount(
     container_path: str,
     *,
     require_leaf: bool = True,
+    runtime_uid: int | None = None,
+    runtime_gid: int | None = None,
 ) -> None:
     if host_path.is_symlink():
         raise DeploymentError("video cache path must not be a symlink")
@@ -847,7 +880,18 @@ def _validate_cache_mount(
     if not matched:
         raise DeploymentError("NapCat cache mount does not match the plan")
     if require_leaf:
-        _run(["docker", "exec", container, "test", "-r", container_path])
+        if runtime_uid is None or runtime_gid is None:
+            raise DeploymentError("NapCat runtime identity is required for cache validation")
+        prefix = [
+            "docker",
+            "exec",
+            "--user",
+            f"{runtime_uid}:{runtime_gid}",
+            container,
+            "test",
+        ]
+        _run([*prefix, "-r", container_path])
+        _run([*prefix, "-x", container_path])
 
 
 def _backup_code(root: Path, output: Path) -> None:
@@ -927,6 +971,7 @@ def _verify_application_ownership(
     cache: Path,
     user: str,
     group: str,
+    cache_group: int,
 ) -> dict[str, Any]:
     uid = _user_id(user)
     gid = _group_id(group)
@@ -948,7 +993,7 @@ def _verify_application_ownership(
         else 0
     )
     venv_entries = _require_owned_path(versioned_venv, uid, gid, recursive=True)
-    cache_entries = _require_owned_path(cache, uid, gid)
+    cache_entries = _require_owned_path(cache, uid, cache_group)
     return {
         "codeEntries": code_entries,
         "privateConfigEntries": config_entries,
@@ -1352,7 +1397,7 @@ def _capture_cache(path: Path) -> dict[str, Any]:
     return {
         "existed": True,
         "createdByDeployment": False,
-        "mode": stat.st_mode & 0o777,
+        "mode": stat.st_mode & 0o7777,
         "uid": stat.st_uid,
         "gid": stat.st_gid,
         "device": stat.st_dev,
@@ -1360,14 +1405,34 @@ def _capture_cache(path: Path) -> dict[str, Any]:
     }
 
 
-def _prepare_cache(path: Path, user: str, group: str, plan_hash: str, state: dict[str, Any]) -> None:
+def _prepare_cache(
+    path: Path,
+    user: str,
+    group: str,
+    plan_hash: str,
+    state: dict[str, Any],
+    *,
+    napcat_gid: int,
+) -> None:
     if path.is_symlink():
         raise DeploymentError("video cache path became a symlink")
     if not state.get("existed"):
         if path.exists():
             raise DeploymentError("video cache appeared after pre-deploy capture")
         try:
-            _run(["install", "-d", "-m", "0750", "-o", user, "-g", group, str(path)])
+            _run(
+                [
+                    "install",
+                    "-d",
+                    "-m",
+                    "2750",
+                    "-o",
+                    user,
+                    "-g",
+                    str(napcat_gid),
+                    str(path),
+                ]
+            )
         finally:
             if path.is_dir() and not path.is_symlink():
                 state["createdByDeployment"] = True
@@ -1379,8 +1444,8 @@ def _prepare_cache(path: Path, user: str, group: str, plan_hash: str, state: dic
         if not path.is_dir():
             raise DeploymentError("existing video cache is no longer a directory")
         _require_cache_identity(path, state)
-        os.chmod(path, 0o750)
-        shutil.chown(path, user, group)
+        shutil.chown(path, user, napcat_gid)
+        os.chmod(path, 0o2750)
     _run_as(user, group, ["test", "-w", str(path)])
 
 
@@ -1704,9 +1769,9 @@ def _restore_cache(path: Path, state: dict[str, Any]) -> None:
         path.rmdir() if not entries else shutil.rmtree(path)
         return
     _require_cache_identity(path, state)
-    os.chmod(path, int(state["mode"]))
     if hasattr(os, "chown"):
         os.chown(path, int(state["uid"]), int(state["gid"]))
+    os.chmod(path, int(state["mode"]))
 
 
 def _extract_release(archive: Path, release: Path) -> None:

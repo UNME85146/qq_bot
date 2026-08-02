@@ -848,7 +848,8 @@ def _container_file_path(file_path: str, *, host_root: str, container_root: str)
         relative = host_path.relative_to(Path(host_root).resolve())
     except ValueError as exc:
         raise _VideoSendError("invalid_cache_path", retryable=False) from exc
-    return str(PurePosixPath(container_root) / PurePosixPath(relative.as_posix()))
+    container_path = PurePosixPath(container_root) / PurePosixPath(relative.as_posix())
+    return f"file://{container_path}"
 
 
 def _upload_name(asset: VideoAsset) -> str:

@@ -398,6 +398,16 @@ def adapter_kind(path):
         return "symlink"
     return "regular" if stat.S_ISREG(mode) else "non_regular"
 
+def napcat_identity(container):
+    identities = {
+        (int(parts[0]), int(parts[1]))
+        for line in run("docker", "exec", container, "ps", "-eo", "uid=,gid=,comm=").splitlines()
+        if len(parts := line.split(None, 2)) == 3 and parts[2] == "qq"
+    }
+    if len(identities) != 1:
+        raise SystemExit("NapCat QQ runtime identity is unavailable or ambiguous")
+    return next(iter(identities))
+
 root = Path(os.environ["QQ_BOT_ROOT"]).resolve()
 if not root.is_dir() or str(root) != os.environ["QQ_BOT_ROOT"]:
     raise SystemExit("runtime root identity mismatch")
@@ -414,6 +424,7 @@ if not profile.is_relative_to(root):
 fragment = run("systemctl", "show", os.environ["QQ_BOT_SERVICE"], "--property=FragmentPath", "--value")
 dropins = run("systemctl", "show", os.environ["QQ_BOT_SERVICE"], "--property=DropInPaths", "--value").split()
 napcat = json.loads(run("docker", "inspect", os.environ["QQ_BOT_NAPCAT"]))[0]
+napcat_uid, napcat_gid = napcat_identity(os.environ["QQ_BOT_NAPCAT"])
 tts_fragment = run("systemctl", "show", "qq-bot-tts.service", "--property=FragmentPath", "--value", required=False)
 tts_dropins = run("systemctl", "show", "qq-bot-tts.service", "--property=DropInPaths", "--value", required=False).split()
 tts_runtime_adapter = root / "scripts/server/moss_tts_adapter.py"
@@ -435,6 +446,8 @@ payload = {
     "napcatRestartCount": napcat.get("RestartCount"),
     "napcatStatus": napcat.get("State", {}).get("Status"),
     "napcatRunning": napcat.get("State", {}).get("Running"),
+    "napcatRuntimeUid": napcat_uid,
+    "napcatRuntimeGid": napcat_gid,
     "ttsServiceState": tts_service_state,
     "ttsServiceFragmentSha256": sha(tts_fragment),
     "ttsServiceUnitSha256": unit_sha(tts_fragment, tts_dropins),
