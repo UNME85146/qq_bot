@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from tools.runtime_common import (
     tcp_established_on_local_port,
     tcp_listening,
 )
+from tools.manage_tts_retirement import (
+    TtsRetirementManager,
+    TtsRetirementSpec,
+)
 
 
 def main() -> int:
@@ -25,6 +30,16 @@ def main() -> int:
     parser.add_argument("--config", default="config/config.json")
     parser.add_argument("--db", default="data/bot.db")
     parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print only connection readiness fields; omits ids and runtime records.",
+    )
+    parser.add_argument(
+        "--require-ready",
+        action="store_true",
+        help="Exit non-zero unless the bot listener and OneBot connection are ready.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -41,17 +56,20 @@ def main() -> int:
         "allowedGroups": sorted(config.qq.allowed_group_ids),
         "persona": {
             "mode": config.persona.mode,
-            "sourceUserId": config.persona.style_profile.source_user_id,
+            "updatedAt": config.persona.style_profile.updated_at,
+            "hasCharacterSummary": (
+                config.persona.mode == "history_derived_character"
+                and bool(config.persona.style_profile.character_summary.strip())
+            ),
         },
-        "tts": {
-            "enabled": config.tts.enabled,
-            "privateEnabled": config.tts.private_enabled,
-            "groupEnabled": config.tts.group_enabled,
-            "provider": config.tts.provider,
-            "backend": config.tts.backend,
-            "executionProvider": config.tts.execution_provider,
-            "endpoint": config.tts.endpoint,
-            "defaultVoiceProfileId": config.tts.default_voice_profile_id,
+        "speech": {
+            "enabled": config.speech.enabled,
+            "privateEnabled": config.speech.private_enabled,
+            "groupEnabled": config.speech.group_enabled,
+            "endpoint": _speech_endpoint(config.speech.base_url),
+            "model": config.speech.model,
+            "voice": config.speech.voice,
+            "format": config.speech.format,
         },
         "counts": {},
         "mutedGroups": [],
@@ -60,6 +78,7 @@ def main() -> int:
         "recentQueueAudits": [],
         "recentVisionEvents": [],
         "lastModelFailure": None,
+        **historical_tts_status(),
     }
     if db_path.exists():
         for table in (
@@ -101,8 +120,54 @@ def main() -> int:
             if "vision" in str(row.get("event", ""))
         ][: args.limit]
         data["lastModelFailure"] = last_model_failure(db_path)
-    print_json(data)
-    return 0
+    print_json(runtime_summary(data) if args.summary else data)
+    return 1 if args.require_ready and not runtime_ready(data) else 0
+
+
+def runtime_ready(data: dict[str, object]) -> bool:
+    return bool(data.get("qq_bot_listening")) and bool(
+        data.get("napcat_to_bot_established")
+    )
+
+
+def runtime_summary(data: dict[str, object]) -> dict[str, object]:
+    return {
+        "qq_bot_listening": bool(data.get("qq_bot_listening")),
+        "napcat_webui_listening": bool(data.get("napcat_webui_listening")),
+        "napcat_to_bot_established": bool(data.get("napcat_to_bot_established")),
+        "ready": runtime_ready(data),
+        "historical_tts": data.get("historical_tts", "inspection_unavailable"),
+        "tts_rollback_packages": data.get("tts_rollback_packages", []),
+    }
+
+
+def historical_tts_status() -> dict[str, object]:
+    if not _historical_tts_supported_platform():
+        return {
+            "historical_tts": "not_applicable",
+            "tts_rollback_packages": [],
+        }
+    try:
+        status = TtsRetirementManager(TtsRetirementSpec.production()).status(
+            verify_hashes=False
+        )
+    except Exception:
+        return {
+            "historical_tts": "inspection_failed",
+            "tts_rollback_packages": [],
+        }
+    return {
+        "historical_tts": status["historical_tts"],
+        "tts_rollback_packages": status["rollback_packages"],
+    }
+
+
+def _historical_tts_supported_platform() -> bool:
+    return os.name == "posix"
+
+
+def _speech_endpoint(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/audio/speech" if base_url else "unconfigured"
 
 
 if __name__ == "__main__":

@@ -5,8 +5,11 @@ import os
 import random
 import time
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from nonebot import get_driver, on_message
@@ -19,6 +22,17 @@ from app.features.reminder_service import (
     is_explicit_reminder_request,
     is_reminder_command,
 )
+from app.features.news_service import (
+    NewsCommandService,
+    run_news_subscription_once,
+)
+from app.features.rss_news_provider import RssNewsProvider
+from app.features.market_service import MarketCommandService, run_market_alert_once
+from app.features.market_providers import create_market_providers
+from app.features.search_providers import create_search_provider
+from app.features.search_service import GroupSearchCommandService
+from app.features.video_providers import YtDlpVideoExtractor
+from app.features.video_service import GroupVideoService
 from app.features.repeat_service import is_plus_one_text
 from app.features.runtime_features import (
     create_runtime_feature_hub,
@@ -26,10 +40,11 @@ from app.features.runtime_features import (
     reminder_worker,
 )
 from app.features.sticker_service import is_sticker_media
+from app.features.image_provider import create_image_provider
+from app.features.image_service import ImageGenerationService, parse_image_command
+from app.features.speech_provider import create_speech_provider
+from app.features.speech_service import SpeechService
 from app.features.tts_service import (
-    EXACT_TTS_SEGMENT_MAX_CHARS,
-    TTS_SEGMENT_MAX_CHARS,
-    TTSService,
     extract_explicit_voice_read_text,
     forced_voice_tts_skip_reason,
     record_explicit_voice_selected,
@@ -39,16 +54,17 @@ from app.features.tts_service import (
     tts_enabled_for_scope,
     tts_scope_disabled_reason,
 )
+from app.model.llm_client import create_model_client
 from app.models import MediaItem, NormalizedMessage
 from app.plugins.send_helper import (
     _extract_sent_message_id,
     send_group_image_direct,
     send_group_record_direct,
     send_reply_bubbles,
+    send_structured_information,
 )
 from app.routing.group_mute import (
-    is_group_mute_enable_command,
-    should_group_mute_wake_for_message,
+    parse_group_mute_mode_command,
 )
 from app.routing.group_pending import GroupPendingQuestionService, PendingQuestionTarget
 from app.routing.direct_intent import DirectReplyIntent, parse_direct_reply_intent
@@ -58,11 +74,22 @@ from app.routing.group_trigger import contains_nickname, nickname_probability_pa
 from app.safety.safety_service import SafetyService
 from app.storage.repositories import (
     BotSentMessageRepository,
+    ConversationRepository,
+    ConversationSessionRepository,
+    GroupMemberProfileRepository,
     GroupMuteStateRepository,
+    GroupNewsSubscriptionRepository,
+    StockWatchRepository,
     GroupPendingQuestionRepository,
 )
 
 _config = load_config(os.getenv("QQ_BOT_CONFIG_PATH", "config/config.json"))
+
+
+def _voice_config():
+    return _config.speech
+
+
 _conversation_service = create_conversation_service(_config)
 _feature_hub = create_runtime_feature_hub(_config)
 _permission_service = PermissionService(_config.qq)
@@ -76,14 +103,80 @@ _pending_question_service = GroupPendingQuestionService(
         source_user_id=_config.persona.style_profile.source_user_id,
     ),
 )
+_news_subscription_repository = GroupNewsSubscriptionRepository(
+    _config.storage.database_path
+)
+_news_provider = (
+    RssNewsProvider(
+        feeds=_config.news.feeds,
+        record_system_event=_conversation_service.record_system_event,
+    )
+    if _config.news.enabled and any(_config.news.feeds.values())
+    else None
+)
+_news_command_service = NewsCommandService(
+    provider=_news_provider,
+    repository=_news_subscription_repository,
+    qq_config=_config.qq,
+    default_time=_config.news.default_time,
+    timezone=_config.news.timezone,
+)
+_stock_watch_repository = StockWatchRepository(_config.storage.database_path)
+_market_providers = create_market_providers(
+    _config.markets,
+    record_system_event=_conversation_service.record_system_event,
+)
+_market_command_service = MarketCommandService(
+    repository=_stock_watch_repository,
+    providers=_market_providers,
+    default_alert_threshold_percent=_config.markets.alert_threshold_percent,
+    command_timeout_seconds=_config.markets.command_timeout_seconds,
+)
+_search_command_service = GroupSearchCommandService(
+    search_provider=create_search_provider(
+        _config.search,
+        record_system_event=_conversation_service.record_system_event,
+    ),
+    model_client=create_model_client(_config.model),
+    conversation_repository=ConversationRepository(_config.storage.database_path),
+    session_repository=ConversationSessionRepository(_config.storage.database_path),
+    profile_repository=GroupMemberProfileRepository(_config.storage.database_path),
+    safety_service=SafetyService(
+        identity_disclosure=_config.persona.style_profile.identity_disclosure,
+        source_user_id=_config.persona.style_profile.source_user_id,
+    ),
+)
+_video_extractor = (
+    YtDlpVideoExtractor(
+        _config.video.host_cache_path,
+        http_proxy_env=_config.video.http_proxy_env,
+        socks_proxy_env=_config.video.socks_proxy_env,
+    )
+    if _config.video.enabled
+    else None
+)
+_video_service = GroupVideoService(
+    extractor=_video_extractor,
+    config=_config.video,
+    retry_policy=_config.retry,
+    record_system_event=_conversation_service.record_system_event,
+)
+_image_service = ImageGenerationService(
+    _config.image_generation,
+    provider=create_image_provider(_config.image_generation),
+    retry_policy=_config.retry,
+    record_system_event=_conversation_service.record_system_event,
+)
 _rate_limiter = RateLimiter(
     _config.limits.group_cooldown_seconds,
     private_cooldown_seconds=_config.limits.private_cooldown_seconds,
     max_user_messages_per_minute=_config.limits.max_user_messages_per_minute,
     max_group_messages_per_minute=_config.limits.max_group_messages_per_minute,
 )
-_tts_service = TTSService(
-    _config.tts,
+_tts_service = SpeechService(
+    _config.speech,
+    provider=create_speech_provider(_config.speech),
+    retry_policy=_config.retry,
     record_system_event=_conversation_service.record_system_event,
 )
 _voice_safety_service = SafetyService(
@@ -93,13 +186,13 @@ _voice_safety_service = SafetyService(
 _active_windows: dict[tuple[str, str], float] = {}
 _group_reply_queues: dict[str, asyncio.Queue["GroupReplyTask"]] = {}
 _group_reply_workers: dict[str, asyncio.Task] = {}
+_group_chat_generations: dict[str, int] = {}
 _group_last_sent_at: dict[str, float] = {}
 _group_recent_thread_events: list[dict[str, str | float | int]] = []
 _group_recent_media_by_message_id: OrderedDict[str, tuple[MediaItem, ...]] = OrderedDict()
 _group_recent_direct_actions: dict[tuple[str, str], tuple[str, float]] = {}
 _group_voice_windows: dict[str, "GroupVoiceWindow"] = {}
 _group_voice_counted_outgoing_keys: OrderedDict[tuple[str, str], None] = OrderedDict()
-GROUP_REPLY_INTERVAL_SECONDS = 1.5
 GROUP_INTERJECTION_PROBABILITY = 0.15
 GROUP_RANDOM_VOICE_WINDOW_SIZE = 50
 GROUP_RANDOM_VOICE_SELECTED_COUNT = 3
@@ -126,6 +219,24 @@ BACKFILL_MARKERS = (
     "上面的问题",
 )
 _reminder_worker_started = False
+_runtime_bot: Bot | None = None
+
+
+class _RuntimeBotProxy:
+    @staticmethod
+    def _current() -> Bot:
+        if _runtime_bot is None:
+            raise RuntimeError("OneBot connection is not available")
+        return _runtime_bot
+
+    async def call_api(self, action: str, **kwargs):
+        return await self._current().call_api(action, **kwargs)
+
+    async def send_private_msg(self, **kwargs):
+        return await self._current().send_private_msg(**kwargs)
+
+
+_runtime_bot_proxy = _RuntimeBotProxy()
 
 
 @dataclass(frozen=True)
@@ -136,6 +247,8 @@ class GroupReplyTask:
     thread_key: str
     reason: str
     queued_at: float
+    not_before: float = 0.0
+    mute_generation: int = 0
     include_pending_backfill: bool = False
 
 
@@ -164,15 +277,63 @@ group_chat = on_message(priority=10, block=False)
 
 
 async def _start_reminder_worker(bot: Bot) -> None:
-    global _reminder_worker_started
+    global _reminder_worker_started, _runtime_bot
+    _runtime_bot = bot
     if _reminder_worker_started:
         return
     _reminder_worker_started = True
-    asyncio.create_task(reminder_worker(bot, _feature_hub))
+    asyncio.create_task(reminder_worker(_runtime_bot_proxy, _feature_hub))
+    asyncio.create_task(_runtime_news_subscription_worker(_runtime_bot_proxy))
+    asyncio.create_task(_runtime_market_alert_worker(_runtime_bot_proxy))
+
+
+async def _clear_runtime_bot(bot: Bot) -> None:
+    global _runtime_bot
+    if _runtime_bot is bot:
+        _runtime_bot = None
+
+
+async def _runtime_news_subscription_worker(bot: Bot) -> None:
+    while True:
+        try:
+            zone = ZoneInfo(_config.news.timezone)
+            await run_news_subscription_once(
+                bot,
+                _news_command_service,
+                _news_subscription_repository,
+                now=datetime.now(zone),
+                can_send_group=_scheduled_group_send_allowed,
+            )
+        except Exception:
+            logger.exception("News subscription worker iteration failed")
+        await asyncio.sleep(30.0)
+
+
+async def _runtime_market_alert_worker(bot: Bot) -> None:
+    while True:
+        try:
+            zone = ZoneInfo(_config.news.timezone)
+            await run_market_alert_once(
+                bot,
+                _stock_watch_repository,
+                _market_providers,
+                trading_date=datetime.now(zone).date(),
+                can_send_group=_scheduled_group_send_allowed,
+            )
+        except Exception:
+            logger.exception("Market alert worker iteration failed")
+        await asyncio.sleep(float(_config.markets.poll_interval_seconds))
+
+
+async def _scheduled_group_send_allowed(group_id: str) -> bool:
+    state = await _group_mute_repository.get_by_group_id(group_id)
+    return state is None or state.mode != "all_muted"
 
 
 try:
-    get_driver().on_bot_connect(_start_reminder_worker)
+    driver = get_driver()
+    driver.on_bot_connect(_start_reminder_worker)
+    driver.on_bot_disconnect(_clear_runtime_bot)
 except ValueError:
     pass
 
@@ -182,7 +343,10 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
     normalized = normalize_group_message_event(event)
     if normalized is None:
         return
-    reply_to_bot = await _bot_sent_repository.is_bot_sent_message(
+    referenced_session_id = await _bot_sent_session_id(
+        normalized.reply_to_message_id
+    )
+    reply_to_bot = referenced_session_id is not None or await _bot_sent_repository.is_bot_sent_message(
         normalized.reply_to_message_id
     )
     trigger_reason = _group_trigger_reason(normalized)
@@ -204,6 +368,57 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
 
+    mute_command = parse_group_mute_mode_command(normalized, _config.qq)
+    if mute_command is not None:
+        await _group_mute_repository.set_mode(
+            group_id=normalized.group_id or "",
+            mode=mute_command,
+            updated_by=normalized.user_id,
+            reason=f"group_mute_{mute_command}",
+        )
+        if mute_command != "normal" and normalized.group_id is not None:
+            await _cancel_group_chat_tasks(normalized.group_id)
+        await _conversation_service.record_system_event(
+            level="INFO",
+            event=f"group_mute_{mute_command}",
+            detail=f"group_id={normalized.group_id}; updated_by={normalized.user_id}",
+            trace_id=normalized.trace_id,
+        )
+        return
+
+    mute_state = (
+        await _group_mute_repository.get_by_group_id(normalized.group_id)
+        if normalized.group_id is not None
+        else None
+    )
+    mute_mode = (
+        getattr(
+            mute_state,
+            "mode",
+            "chat_muted" if getattr(mute_state, "muted", False) else "normal",
+        )
+        if mute_state is not None
+        else "normal"
+    )
+    if mute_mode == "all_muted":
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="silence",
+            reason="group_all_muted",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return
+
+    if await _try_handle_group_video_feature(bot, event, normalized):
+        return
+
+    if await _try_handle_group_information_feature(bot, event, normalized):
+        return
+
+    if await _try_handle_group_image_generation_feature(bot, event, normalized):
+        return
+
     _remember_message_media(normalized)
     normalized = _with_referenced_media(normalized)
     sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
@@ -218,12 +433,24 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         trigger_reason = "nickname_trigger"
         normalized = replace(normalized, trigger_reason=trigger_reason)
     direct_intent = _apply_group_followup_intent(normalized, direct_intent)
-    await _feature_hub.repeats.index_group_message(
+    if await _try_send_group_speech_unavailable(
+        bot,
+        event,
         normalized,
-        sticker_asset_id=sticker_asset_id,
-    )
+        direct_intent,
+    ):
+        return
+    if mute_mode == "normal":
+        await _feature_hub.repeats.index_group_message(
+            normalized,
+            sticker_asset_id=sticker_asset_id,
+        )
 
-    pending_question = await _pending_question_service.maybe_enqueue(normalized)
+    pending_question = (
+        await _pending_question_service.maybe_enqueue(normalized)
+        if mute_mode == "normal"
+        else None
+    )
     if pending_question is not None and trigger_reason is None:
         await _conversation_service.record_reply_audit(
             normalized,
@@ -232,62 +459,6 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
             model_called=False,
             safety_blocked=False,
         )
-
-    mute_wake_triggered = False
-    if is_group_mute_enable_command(normalized, _config.qq):
-        await _group_mute_repository.set_muted(
-            group_id=normalized.group_id or "",
-            muted=True,
-            updated_by=normalized.user_id,
-            reason="group_mute_enabled",
-        )
-        await _conversation_service.record_silent_group_message(
-            normalized,
-            reason="group_mute_enabled",
-        )
-        logger.info(
-            "Group muted by controller: group_id={}, user_id={}",
-            normalized.group_id,
-            normalized.user_id,
-        )
-        return
-
-    mute_state = (
-        await _group_mute_repository.get_by_group_id(normalized.group_id)
-        if normalized.group_id is not None
-        else None
-    )
-    if mute_state is not None and mute_state.muted:
-        if should_group_mute_wake_for_message(normalized, _config.qq):
-            await _group_mute_repository.set_muted(
-                group_id=normalized.group_id or "",
-                muted=False,
-                updated_by=normalized.user_id,
-                reason="group_mute_disabled",
-            )
-            await _conversation_service.record_system_event(
-                level="INFO",
-                event="group_mute_disabled",
-                detail=f"group_id={normalized.group_id}; updated_by={normalized.user_id}",
-                trace_id=normalized.trace_id,
-            )
-            mute_wake_triggered = True
-            logger.info(
-                "Group mute disabled by controller: group_id={}, user_id={}",
-                normalized.group_id,
-                normalized.user_id,
-            )
-        else:
-            await _conversation_service.record_silent_group_message(
-                normalized,
-                reason="group_muted",
-            )
-            logger.info(
-                "Group message ignored by mute: group_id={}, user_id={}",
-                normalized.group_id,
-                normalized.user_id,
-            )
-            return
 
     if is_reminder_command(normalized.text):
         await _conversation_service.record_reply_audit(
@@ -366,6 +537,16 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
     ):
         return
 
+    if mute_mode == "chat_muted":
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="silence",
+            reason="group_chat_muted",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return
+
     if _should_try_probabilistic_repeat(
         normalized,
         trigger_reason=trigger_reason,
@@ -431,31 +612,13 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
                 )
             return
 
-    if (
-        not mute_wake_triggered
-        and normalized.group_id is not None
-        and not _rate_limiter.allow_group_minute(normalized.group_id)
-    ):
-        await _conversation_service.record_reply_audit(
-            normalized,
-            action="silence",
-            reason="group_minute_rate_limited",
-            model_called=False,
-            safety_blocked=False,
-        )
-        logger.info("Group message ignored by minute limit: group_id={}", normalized.group_id)
+    prepared = await _prepare_group_chat_session(
+        normalized,
+        referenced_session_id=referenced_session_id,
+    )
+    if prepared is None:
         return
-
-    if not mute_wake_triggered and not _rate_limiter.allow_user_minute(normalized.user_id):
-        await _conversation_service.record_reply_audit(
-            normalized,
-            action="silence",
-            reason="user_minute_rate_limited",
-            model_called=False,
-            safety_blocked=False,
-        )
-        logger.info("Group message ignored by user minute limit: user_id={}", normalized.user_id)
-        return
+    normalized = prepared
 
     await _enqueue_group_reply(
         GroupReplyTask(
@@ -488,6 +651,179 @@ def _group_trigger_reason(normalized) -> str | None:
             return "nickname_trigger"
         return "nickname_probability_skipped"
     return None
+
+
+async def _try_handle_group_information_feature(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+) -> bool:
+    result = await _news_command_service.handle(message)
+    if result is None:
+        result = await _market_command_service.handle(message)
+    if result is None:
+        result = await _search_command_service.handle(message)
+    if result is None:
+        return False
+    send_error = lambda exc, index, bubble: _record_send_error(
+        message.trace_id,
+        exc,
+        index,
+        "send_group_feature_reply_failed",
+    )
+    structured = getattr(result, "structured", None)
+    if structured is not None:
+        await send_structured_information(
+            bot,
+            event,
+            structured.messages,
+            scope_type="group",
+            reply_config=_config.reply,
+            on_send_error=send_error,
+        )
+    else:
+        await send_reply_bubbles(
+            bot,
+            event,
+            result.text,
+            scope_type="group",
+            reply_config=_config.reply,
+            on_send_error=send_error,
+        )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason=result.reason,
+        model_called=bool(getattr(result, "model_called", False)),
+        safety_blocked=False,
+    )
+    return True
+
+
+async def _try_handle_group_image_generation_feature(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+) -> bool:
+    command = parse_image_command(message.text)
+    if command is None:
+        return False
+    if not await _conversation_service.allow_group_feature_request(message):
+        return True
+    if message.group_id is None:
+        return True
+
+    async def send_generated_image(file_path: str):
+        await _wait_group_interval(message.group_id)
+        result = await send_group_image_direct(
+            bot,
+            group_id=message.group_id,
+            file_path=file_path,
+        )
+        await _record_sent_group_voice_message(
+            message,
+            _extract_sent_message_id(result),
+        )
+        _remember_group_non_random_outgoing(message.group_id, message.message_id)
+        _group_last_sent_at[message.group_id] = time.monotonic()
+        return result
+
+    sent = await _image_service.execute(
+        message,
+        command.prompt,
+        edit=command.edit,
+        send=send_generated_image,
+    )
+    if sent is not None:
+        await _conversation_service.record_reply_audit(
+            message,
+            action="reply",
+            reason="group_image_edited" if command.edit else "group_image_generated",
+            model_called=True,
+            safety_blocked=False,
+        )
+        return True
+
+    category = _image_service.failure_category(message.trace_id)
+    if category == "safety_rejected":
+        await _conversation_service.record_reply_audit(
+            message,
+            action="silence",
+            reason="group_image_safety_blocked",
+            model_called=True,
+            safety_blocked=True,
+        )
+        return True
+
+    failure_text = _image_service.failure_message(message.trace_id) or "图片处理失败：未知错误"
+    await send_reply_bubbles(
+        bot,
+        event,
+        failure_text,
+        scope_type="group",
+        reply_config=_config.reply,
+        on_send_error=lambda exc, index, bubble: _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_group_image_status_failed",
+        ),
+    )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason=f"group_image_{category or 'failed'}",
+        model_called=category not in {"unconfigured", "empty_prompt", "no_recent_image", "edit_window_expired"},
+        safety_blocked=False,
+    )
+    return True
+
+
+async def _try_handle_group_video_feature(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+) -> bool:
+    async def send_progress(text: str) -> None:
+        await send_reply_bubbles(
+            bot,
+            event,
+            text,
+            scope_type="group",
+            reply_config=_config.reply,
+            on_send_error=lambda exc, index, bubble: _record_send_error(
+                message.trace_id,
+                exc,
+                index,
+                "send_group_video_progress_failed",
+            ),
+        )
+
+    result = await _video_service.handle(bot, message, on_progress=send_progress)
+    if result is None:
+        return False
+    if result.text:
+        await send_structured_information(
+            bot,
+            event,
+            (result.text,),
+            scope_type="group",
+            reply_config=_config.reply,
+            on_send_error=lambda exc, index, bubble: _record_send_error(
+                message.trace_id,
+                exc,
+                index,
+                "send_group_video_status_failed",
+            ),
+        )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason=result.reason,
+        model_called=False,
+        safety_blocked=False,
+    )
+    return True
 
 
 def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:
@@ -592,10 +928,42 @@ def _apply_reply_thread_trigger(
     return None
 
 
+async def _bot_sent_session_id(message_id: str | None) -> str | None:
+    getter = getattr(_bot_sent_repository, "get_session_id", None)
+    if getter is None:
+        return None
+    return await getter(message_id)
+
+
+async def _prepare_group_chat_session(
+    message: NormalizedMessage,
+    *,
+    referenced_session_id: str | None,
+) -> NormalizedMessage | None:
+    prepare = getattr(_conversation_service, "prepare_chat_message", None)
+    if prepare is None:
+        return message
+    return await prepare(
+        message,
+        referenced_session_id=referenced_session_id,
+    )
+
+
 async def _enqueue_group_reply(task: GroupReplyTask) -> None:
     group_id = task.message.group_id
     if group_id is None:
         return
+    generation = _group_chat_generations.get(group_id, 0)
+    if task.not_before <= 0:
+        delay_seconds = random.uniform(
+            _config.conversation_sessions.chat_delay_min_ms / 1000,
+            _config.conversation_sessions.chat_delay_max_ms / 1000,
+        )
+        task = replace(
+            task,
+            not_before=task.queued_at + delay_seconds,
+            mute_generation=generation,
+        )
     queue = _group_reply_queues.setdefault(group_id, asyncio.Queue())
     await queue.put(task)
     _remember_thread_event(task, queue.qsize())
@@ -609,7 +977,9 @@ async def _group_reply_worker(group_id: str) -> None:
     while True:
         task = await queue.get()
         try:
-            await _wait_group_interval(group_id)
+            await _wait_until_not_before(task.not_before)
+            if not _is_group_chat_task_current(task):
+                continue
             await _process_group_reply_task(task)
         except Exception:
             logger.exception("Group reply worker failed: group_id={}", group_id)
@@ -623,13 +993,50 @@ async def _group_reply_worker(group_id: str) -> None:
             queue.task_done()
 
 
-async def _wait_group_interval(group_id: str) -> None:
-    last_sent_at = _group_last_sent_at.get(group_id)
-    if last_sent_at is None:
-        return
-    wait_seconds = GROUP_REPLY_INTERVAL_SECONDS - (time.monotonic() - last_sent_at)
+async def _wait_until_not_before(not_before: float) -> None:
+    wait_seconds = not_before - time.monotonic()
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
+
+
+def _is_group_chat_task_current(task: GroupReplyTask) -> bool:
+    group_id = task.message.group_id
+    return group_id is not None and task.mute_generation == _group_chat_generations.get(
+        group_id,
+        0,
+    )
+
+
+async def _cancel_group_chat_tasks(group_id: str) -> int:
+    generation = _group_chat_generations.get(group_id, 0) + 1
+    _group_chat_generations[group_id] = generation
+
+    queue = _group_reply_queues.pop(group_id, None)
+    if queue is not None:
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                queue.task_done()
+
+    worker = _group_reply_workers.pop(group_id, None)
+    if worker is not None and not worker.done() and worker is not asyncio.current_task():
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+    suspend = getattr(_conversation_service, "suspend_group_sessions", None)
+    if suspend is not None:
+        try:
+            await suspend(group_id)
+        except Exception:
+            logger.exception("Failed to suspend group sessions: group_id={}", group_id)
+    return generation
+
+
+async def _wait_group_interval(group_id: str) -> None:
+    return None
 
 
 async def _process_group_reply_task(task: GroupReplyTask) -> None:
@@ -663,6 +1070,7 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             reply = await _conversation_service.handle_group_image_message(
                 target_message,
                 reason=task.reason,
+                can_commit=lambda: _is_group_chat_task_current(task),
             )
         else:
             reply = await _conversation_service.handle_group_question(
@@ -673,7 +1081,17 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
                 prompt_question_text=model_question_text
                 if force_voice_reply
                 else None,
+                can_commit=lambda: _is_group_chat_task_current(task),
             )
+        if not _is_group_chat_task_current(task):
+            await _conversation_service.record_reply_audit(
+                message,
+                action="silence",
+                reason="group_reply_cancelled_by_mute",
+                model_called=reply is not None,
+                safety_blocked=False,
+            )
+            return
         if reply is None:
             logger.info(
                 "Group queued reply produced no message: group_id={}, user_id={}, message_id={}",
@@ -703,14 +1121,15 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
                 await _wait_group_interval(message.group_id)
             continue
 
+        reply_to_message_id, at_user_id = _group_reply_addressing(task, target)
         await send_reply_bubbles(
             task.bot,
             task.event,
             reply.text,
             scope_type="group",
             reply_config=_config.reply,
-            group_reply_to_message_id=target.message_id,
-            group_at_user_id=target.user_id,
+            group_reply_to_message_id=reply_to_message_id,
+            group_at_user_id=at_user_id,
             reply_mode=reply.reply_mode,
             on_send_error=lambda exc, index, bubble: _record_send_error(
                 message.trace_id,
@@ -724,6 +1143,7 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
                 target,
                 sent_message_id,
                 index,
+                target_message.session_id,
             ),
         )
         if message.group_id is not None:
@@ -736,6 +1156,12 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
         await _pending_question_service.mark_answered(target)
         if target is not targets[-1] and message.group_id is not None:
             await _wait_group_interval(message.group_id)
+
+
+def _group_reply_addressing(task: GroupReplyTask, target) -> tuple[str | None, str | None]:
+    if task.include_pending_backfill:
+        return target.message_id, target.user_id
+    return None, None
 
 
 async def _targets_for_task(task: GroupReplyTask):
@@ -767,7 +1193,7 @@ async def _maybe_send_group_voice_reply(
     *,
     force: bool = False,
 ) -> bool:
-    disabled_reason = tts_scope_disabled_reason(_config.tts, message.scope_type)
+    disabled_reason = tts_scope_disabled_reason(_voice_config(), message.scope_type)
     if disabled_reason is not None:
         if force:
             await record_tts_fallback_text_sent(
@@ -781,7 +1207,7 @@ async def _maybe_send_group_voice_reply(
         return False
     if force:
         skip_reason = forced_voice_tts_skip_reason(
-            _config.tts,
+            _voice_config(),
             reply,
             scope_type=message.scope_type,
         )
@@ -804,7 +1230,7 @@ async def _maybe_send_group_voice_reply(
             )
         await record_explicit_voice_selected(
             message,
-            config=_config.tts,
+            config=_voice_config(),
             chars=len(reply.text),
             record_system_event=_conversation_service.record_system_event,
         )
@@ -815,6 +1241,10 @@ async def _maybe_send_group_voice_reply(
             ignore_cooldown=True,
         )
         if sent:
+            return True
+        failure_text = _current_speech_failure(message.trace_id)
+        if failure_text and message.group_id:
+            await bot.send_group_msg(group_id=int(message.group_id), message=failure_text)
             return True
         await record_tts_fallback_text_sent(
             message,
@@ -839,7 +1269,7 @@ async def _maybe_send_group_voice_reply(
         return False
     speech_text = prepare_tts_speech_text(reply.text)
     skip_reason = tts_candidate_skip_reason(
-        _config.tts,
+        _voice_config(),
         reply,
         scope_type=message.scope_type,
     )
@@ -897,6 +1327,7 @@ async def _maybe_send_group_tts_text(
     single_request: bool = False,
     count_voice_window: bool = True,
 ) -> bool:
+    del single_request
     if message.group_id is None:
         return False
     result = await _tts_service.generate_for_text(
@@ -904,19 +1335,33 @@ async def _maybe_send_group_tts_text(
         text,
         exact_short=exact_short,
         ignore_cooldown=ignore_cooldown,
-        segment_max_chars=_tts_segment_max_chars()
-        if not single_request and (exact_short or ignore_cooldown)
-        else None,
     )
     if result is None:
         return False
-    try:
-        await _wait_group_interval(message.group_id)
-        send_result = await send_group_record_direct(
+    await _wait_group_interval(message.group_id)
+
+    async def send_record():
+        return await send_group_record_direct(
             bot,
             group_id=message.group_id,
             file_path=result.audio_path,
         )
+
+    send_with_cleanup = getattr(_tts_service, "send_and_cleanup", None)
+    if send_with_cleanup is not None:
+        send_result = await send_with_cleanup(message, result, send_record)
+        if send_result is None:
+            return False
+        await _record_sent_group_voice_message(
+            message,
+            _extract_sent_message_id(send_result),
+        )
+        if count_voice_window:
+            _remember_group_non_random_outgoing(message.group_id, message.message_id)
+        _group_last_sent_at[message.group_id] = time.monotonic()
+        return True
+    try:
+        send_result = await send_record()
         await _record_sent_group_voice_message(
             message,
             _extract_sent_message_id(send_result),
@@ -933,14 +1378,6 @@ async def _maybe_send_group_tts_text(
         )
         return False
     return True
-
-
-def _tts_segment_max_chars() -> int:
-    configured_max = max(1, int(getattr(_config.tts, "max_chars", TTS_SEGMENT_MAX_CHARS)))
-    return min(
-        configured_max,
-        EXACT_TTS_SEGMENT_MAX_CHARS,
-    )
 
 
 async def _pending_backfill_targets(message: NormalizedMessage) -> list[PendingQuestionTarget]:
@@ -1124,8 +1561,7 @@ async def _record_group_random_voice_decision(
     window_id: int,
     window_index: int,
 ) -> None:
-    profile = _config.tts.current_profile()
-    profile_id = profile.id if profile is not None else _config.tts.default_voice_profile_id
+    profile_id = _voice_config().voice or "unconfigured"
     await _conversation_service.record_system_event(
         level="INFO",
         event="tts_selected_random" if selected else "tts_skipped_random",
@@ -1174,7 +1610,7 @@ async def _try_send_group_explicit_voice(
 ) -> bool:
     if not message.is_at_self:
         return False
-    if not tts_enabled_for_scope(_config.tts, message.scope_type):
+    if not tts_enabled_for_scope(_voice_config(), message.scope_type):
         return False
     if explicit_text is None:
         explicit_text = extract_explicit_voice_read_text(message)
@@ -1185,7 +1621,7 @@ async def _try_send_group_explicit_voice(
         return False
     await record_explicit_voice_selected(
         message,
-        config=_config.tts,
+        config=_voice_config(),
         chars=len(explicit_text),
         record_system_event=_conversation_service.record_system_event,
     )
@@ -1226,7 +1662,7 @@ async def _try_send_group_explicit_voice(
     await send_reply_bubbles(
         bot,
         event,
-        explicit_text,
+        _speech_failure_text(message.trace_id, fallback=explicit_text),
         scope_type="group",
         reply_config=_config.reply,
         group_reply_to_message_id=message.message_id,
@@ -1247,6 +1683,61 @@ async def _try_send_group_explicit_voice(
         safety_blocked=False,
     )
     return True
+
+
+async def _try_send_group_speech_unavailable(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+    direct_intent: DirectReplyIntent,
+) -> bool:
+    if not (
+        direct_intent.voice_read_text is not None
+        or direct_intent.voice_reply_requested
+    ):
+        return False
+    if tts_enabled_for_scope(_voice_config(), message.scope_type):
+        return False
+    await send_reply_bubbles(
+        bot,
+        event,
+        _speech_failure_text(message.trace_id),
+        scope_type="group",
+        reply_config=_config.reply,
+        on_send_error=lambda exc, index, bubble: _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_group_speech_status_failed",
+        ),
+    )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason="speech_unconfigured",
+        model_called=False,
+        safety_blocked=False,
+    )
+    return True
+
+
+def _speech_failure_text(trace_id: str, *, fallback: str | None = None) -> str:
+    failure_message = getattr(_tts_service, "failure_message", None)
+    if failure_message is not None:
+        text = failure_message(trace_id)
+        if text:
+            return text
+    if fallback:
+        return fallback
+    return (
+        "当前配置不支持语音：请管理员配置支持 /v1/audio/speech "
+        "的语音模型和 API Key"
+    )
+
+
+def _current_speech_failure(trace_id: str) -> str | None:
+    failure_message = getattr(_tts_service, "failure_message", None)
+    return failure_message(trace_id) if failure_message is not None else None
 
 
 async def _try_repeat_from_plus_one_text(bot: Bot, message: NormalizedMessage) -> bool:
@@ -1539,16 +2030,20 @@ async def _record_sent_group_message(
     target,
     sent_message_id: str | None,
     index: int,
+    session_id: str | None = None,
 ) -> None:
     if sent_message_id is None or group_id is None:
         return
-    await _bot_sent_repository.save_group_message(
+    values = dict(
         message_id=sent_message_id,
         trace_id=trace_id,
         group_id=group_id,
         user_id=self_id,
         original_message_id=target.message_id,
     )
+    if session_id is not None:
+        values["session_id"] = session_id
+    await _bot_sent_repository.save_group_message(**values)
 
 
 async def _record_sent_group_voice_message(
@@ -1557,10 +2052,13 @@ async def _record_sent_group_voice_message(
 ) -> None:
     if sent_message_id is None or message.group_id is None:
         return
-    await _bot_sent_repository.save_group_message(
+    values = dict(
         message_id=sent_message_id,
         trace_id=message.trace_id,
         group_id=message.group_id,
         user_id=message.self_id,
         original_message_id=message.message_id,
     )
+    if message.session_id is not None:
+        values["session_id"] = message.session_id
+    await _bot_sent_repository.save_group_message(**values)

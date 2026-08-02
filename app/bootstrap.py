@@ -4,7 +4,11 @@ from app.conversation.conversation_service import ConversationService
 from app.conversation.model_context_service import ModelContextService
 from app.conversation.prompt_builder import PromptBuilder
 from app.conversation.reply_formatter import ReplyFormatter
+from app.conversation.session_service import ConversationSessionService
+from app.conversation.session_service import ModelSessionRelationClassifier
+from app.conversation.session_memory_service import SessionMemoryService
 from app.memory.group_context_service import GroupContextService
+from app.memory.group_member_profile_service import GroupMemberProfileService
 from app.memory.memory_service import MemoryService
 from app.model.llm_client import create_model_client
 from app.model.resilience import ModelResilienceService
@@ -13,14 +17,18 @@ from app.models import AppConfig
 from app.persona.persona_state_service import PersonaStateService
 from app.routing.permission_service import PermissionService
 from app.safety.safety_service import SafetyService
+from app.safety.contextual_safety import ModelGroupSafetyClassifier
 from app.storage.repositories import (
     AuditRepository,
     ConversationRepository,
+    ConversationSessionRepository,
     GroupMessageIndexRepository,
+    GroupMemberProfileRepository,
     GroupContextRepository,
     GroupSemanticTermRepository,
     MemoryProfileRepository,
     PersonaStateRepository,
+    SessionMemoryRepository,
     StickerAssetAnalysisRepository,
 )
 
@@ -48,6 +56,11 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         qq_config=config.qq,
         safety_service=safety_service,
     )
+    group_member_profile_service = GroupMemberProfileService(
+        repository=GroupMemberProfileRepository(config.storage.database_path),
+        qq_config=config.qq,
+        safety_service=safety_service,
+    )
     model_context_service = ModelContextService(
         conversation_repository=conversation_repository,
         safety_service=safety_service,
@@ -62,10 +75,25 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         sticker_analysis_repository=StickerAssetAnalysisRepository(
             config.storage.database_path
         ),
+        group_member_profile_service=group_member_profile_service,
+    )
+    session_memory_repository = SessionMemoryRepository(config.storage.database_path)
+    session_memory_service = SessionMemoryService(
+        session_memory_repository,
+        safety_service=safety_service,
+    )
+    conversation_session_service = ConversationSessionService(
+        ConversationSessionRepository(config.storage.database_path),
+        inactivity_seconds=config.conversation_sessions.inactivity_seconds,
+        relation_classifier=ModelSessionRelationClassifier(
+            model_client=model_client,
+            conversation_repository=conversation_repository,
+            session_memory_repository=session_memory_repository,
+        ),
     )
     return ConversationService(
         permission_service=PermissionService(config.qq),
-        prompt_builder=PromptBuilder(config.persona, config.tts),
+        prompt_builder=PromptBuilder(config.persona, config.speech),
         model_client=model_client,
         conversation_repository=conversation_repository,
         persona_state_service=PersonaStateService(
@@ -82,4 +110,10 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
             model_resilience_service=model_resilience_service,
         ),
         model_context_service=model_context_service,
+        conversation_session_service=conversation_session_service,
+        session_memory_service=session_memory_service,
+        group_member_profile_service=group_member_profile_service,
+        group_safety_classifier=(
+            None if config.model.use_mock else ModelGroupSafetyClassifier(model_client)
+        ),
     )

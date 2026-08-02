@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Callable
+from dataclasses import replace
 
 from app.conversation.prompt_builder import PromptBuilder
+from app.conversation.session_service import ConversationSessionService
+from app.conversation.session_memory_service import SessionMemoryService
 from app.conversation.reply_formatter import ReplyFormatter, parse_model_reply
+from app.conversation.model_context_service import looks_like_long_text_request
 from app.memory.group_context_service import NullGroupContextService
 from app.memory.memory_service import NullMemoryService
 from app.model.llm_client import LlmClient
@@ -45,6 +50,10 @@ class ConversationService:
         model_resilience_service: ModelResilienceService | None = None,
         image_understanding_service: ImageUnderstandingService | None = None,
         model_context_service: object | None = None,
+        conversation_session_service: ConversationSessionService | None = None,
+        session_memory_service: SessionMemoryService | None = None,
+        group_member_profile_service: object | None = None,
+        group_safety_classifier: object | None = None,
     ) -> None:
         self._permission_service = permission_service
         self._prompt_builder = prompt_builder
@@ -60,11 +69,110 @@ class ConversationService:
         self._model_resilience_service = model_resilience_service
         self._image_understanding_service = image_understanding_service
         self._model_context_service = model_context_service
+        self._conversation_session_service = conversation_session_service
+        self._session_memory_service = session_memory_service
+        self._group_member_profile_service = group_member_profile_service
+        self._group_safety_classifier = group_safety_classifier
         self._fallback_counters: dict[str, int] = {}
 
     @property
     def model_client(self) -> LlmClient:
         return self._model_client
+
+    async def allow_group_feature_request(self, message: NormalizedMessage) -> bool:
+        if message.scope_type != "group":
+            return True
+        started_at = time.monotonic()
+        input_safety = self._safety_service.check_input(
+            message.text,
+            scope_type=message.scope_type,
+        )
+        if input_safety.action == "block":
+            await self._audit(
+                message,
+                action="silence",
+                reason="group_high_risk_silence",
+                model_called=False,
+                safety_blocked=True,
+                started_at=started_at,
+            )
+            return False
+        if self._group_safety_classifier is None:
+            return True
+        try:
+            safety_decision = await self._group_safety_classifier.classify(message)
+        except Exception as exc:
+            await self._system_event(
+                "ERROR",
+                "group_contextual_safety_failed",
+                f"{type(exc).__name__}: {str(exc)[:120]}",
+                message.trace_id,
+            )
+            await self._audit(
+                message,
+                action="silence",
+                reason="group_contextual_safety_failed",
+                model_called=True,
+                safety_blocked=True,
+                started_at=started_at,
+            )
+            return False
+        if safety_decision in {"allow_ordinary", "allow_factual_case_query"}:
+            return True
+        await self._audit(
+            message,
+            action="silence",
+            reason=(
+                "group_sensitive_topic_silence"
+                if safety_decision == "silent_sensitive_discussion"
+                else "group_contextual_safety_uncertain"
+            ),
+            model_called=True,
+            safety_blocked=True,
+            started_at=started_at,
+        )
+        return False
+
+    async def prepare_chat_message(
+        self,
+        message: NormalizedMessage,
+        *,
+        referenced_session_id: str | None = None,
+    ) -> NormalizedMessage | None:
+        if self._conversation_session_service is None:
+            return message
+        started_at = time.monotonic()
+        if message.scope_type == "group" and not await self.allow_group_feature_request(
+            message
+        ):
+            return None
+        try:
+            session = await self._conversation_session_service.resolve(
+                message,
+                referenced_session_id=referenced_session_id,
+            )
+        except Exception as exc:
+            await self._system_event(
+                "ERROR",
+                "conversation_session_resolve_failed",
+                f"{type(exc).__name__}: {str(exc)[:120]}",
+                message.trace_id,
+            )
+            await self._audit(
+                message,
+                action="silence",
+                reason="conversation_session_resolve_failed",
+                model_called=False,
+                safety_blocked=False,
+                started_at=started_at,
+            )
+            return None
+        return replace(message, session_id=session.session_id)
+
+    async def suspend_group_sessions(self, group_id: str) -> int:
+        if self._conversation_session_service is None:
+            return 0
+        return await self._conversation_session_service.suspend_group(group_id)
 
     async def handle_private_message(
         self,
@@ -171,6 +279,7 @@ class ConversationService:
         message: NormalizedMessage,
         *,
         prompt_user_text: str | None = None,
+        can_commit: Callable[[], bool] | None = None,
     ) -> GeneratedReply | None:
         started_at = time.monotonic()
         if message.group_id is None:
@@ -217,7 +326,6 @@ class ConversationService:
 
         input_safety = self._safety_service.check_input(message.text, scope_type=message.scope_type)
         if input_safety.action == "block" and message.scope_type == "group":
-            await self._save_user_message(message)
             await self._audit(
                 message,
                 action="silence",
@@ -235,6 +343,8 @@ class ConversationService:
                 finish_reason=input_safety.reason,
                 safety_level=input_safety.safety_level,
             )
+            if can_commit is not None and not can_commit():
+                return None
             await self._save_user_message(message)
             await self._save_assistant_message(message, reply)
             await self._audit(
@@ -258,11 +368,21 @@ class ConversationService:
             model_context=model_context.prompt_block,
         )
 
-        await self._save_user_message(message)
         model_result = await self._generate_reply(prompt, message)
         reply = model_result.reply
 
         reply, output_safety = self._parse_and_format_reply(reply, message, unlimited=False)
+        if can_commit is not None and not can_commit():
+            await self._audit(
+                message,
+                action="silence",
+                reason="group_reply_cancelled_before_commit",
+                model_called=model_result.model_called,
+                safety_blocked=False,
+                started_at=started_at,
+            )
+            return None
+        await self._save_user_message(message)
         await self._save_assistant_message(message, reply)
         await self._persona_state_service.record_successful_reply(
             message.scope_type,
@@ -360,6 +480,7 @@ class ConversationService:
         message: NormalizedMessage,
         *,
         reason: str | None = None,
+        can_commit: Callable[[], bool] | None = None,
     ) -> GeneratedReply | None:
         started_at = time.monotonic()
         if message.group_id is None:
@@ -392,13 +513,15 @@ class ConversationService:
             group_context=model_context.group_context,
             model_context=model_context.prompt_block,
         )
-        await self._save_user_message(message)
         analysis = await self._analyze_image_message(
             message,
             style_system_prompt=style_system_prompt,
             started_at=started_at,
         )
         if analysis is None:
+            if can_commit is not None and not can_commit():
+                return None
+            await self._save_user_message(message)
             return await self._image_unavailable_reply(
                 message,
                 reason="image_url_missing",
@@ -416,6 +539,9 @@ class ConversationService:
             )
             return None
 
+        if can_commit is not None and not can_commit():
+            return None
+        await self._save_user_message(message)
         await self._group_context_service.record_group_message(
             group_id=message.group_id,
             message_id=message.message_id,
@@ -544,6 +670,7 @@ class ConversationService:
         question_user_name: str | None = None,
         reason: str | None = None,
         prompt_question_text: str | None = None,
+        can_commit: Callable[[], bool] | None = None,
     ) -> GeneratedReply | None:
         question_message = message
         if question_text != message.text or question_user_name:
@@ -558,6 +685,7 @@ class ConversationService:
         return await self.handle_group_message(
             question_message,
             prompt_user_text=prompt_question_text,
+            can_commit=can_commit,
         )
 
     async def record_silent_group_message(
@@ -609,6 +737,7 @@ class ConversationService:
             message.scope_type,
             message.scope_id,
             limit=20,
+            session_id=message.session_id,
         )
         persona_state = await self._persona_state_service.get_or_create(
             message.scope_type,
@@ -620,6 +749,7 @@ class ConversationService:
                     message,
                     recent_context=recent_context,
                 )
+                model_context = await self._with_session_memory(message, model_context)
                 return recent_context, persona_state, model_context
             except Exception as exc:
                 await self._system_event(
@@ -636,11 +766,38 @@ class ConversationService:
         )
         from app.conversation.model_context_service import ModelContext
 
+        model_context = ModelContext(
+            long_term_memory=long_term_memory,
+            group_context=group_context,
+        )
+        model_context = await self._with_session_memory(message, model_context)
         return (
             recent_context,
             persona_state,
-            ModelContext(long_term_memory=long_term_memory, group_context=group_context),
+            model_context,
         )
+
+    async def _with_session_memory(self, message: NormalizedMessage, model_context):
+        if self._session_memory_service is None or not message.session_id:
+            return model_context
+        try:
+            session_context = await self._session_memory_service.get_prompt_context(
+                message.session_id
+            )
+        except Exception as exc:
+            await self._system_event(
+                "ERROR",
+                "session_memory_read_failed",
+                f"{type(exc).__name__}: {str(exc)[:120]}",
+                message.trace_id,
+            )
+            return model_context
+        if not session_context:
+            return model_context
+        prompt_block = "\n".join(
+            item for item in (model_context.prompt_block, session_context) if item
+        )
+        return replace(model_context, prompt_block=prompt_block)
 
     async def _remember_group_terms(self, message: NormalizedMessage) -> None:
         if self._model_context_service is None:
@@ -663,18 +820,21 @@ class ConversationService:
         unlimited: bool,
     ) -> tuple[GeneratedReply, object]:
         parsed = parse_model_reply(reply.text)
+        reply_mode = parsed.reply_mode
+        if reply_mode == "short" and looks_like_long_text_request(message.text):
+            reply_mode = "long_text"
         output_safety = self._safety_service.check_output(
             parsed.text,
             scope_type=message.scope_type,
         )
         reply_text = output_safety.replacement_text if output_safety.replacement_text else parsed.text
-        formatted_text = (
-            self._reply_formatter.format_unlimited(reply_text)
-            if unlimited
-            else self._reply_formatter.format(reply_text)
-        )
-        if parsed.reply_mode in {"long_text", "code_block"} and not unlimited:
-            formatted_text = self._reply_formatter.format_unlimited(reply_text)
+        if unlimited or reply_mode in {"long_text", "code_block"}:
+            formatted_text = self._reply_formatter.format_unlimited(
+                reply_text,
+                reply_mode=reply_mode,
+            )
+        else:
+            formatted_text = self._reply_formatter.format(reply_text)
         formatted_reply = GeneratedReply(
             text=formatted_text,
             raw_model_text=reply.raw_model_text,
@@ -685,7 +845,7 @@ class ConversationService:
             else reply.safety_level,
             prompt_tokens=reply.prompt_tokens,
             completion_tokens=reply.completion_tokens,
-            reply_mode=parsed.reply_mode,
+            reply_mode=reply_mode,
             send_sticker=parsed.send_sticker and _is_explicit_sticker_context(message.text),
             sticker_intent=parsed.sticker_intent,
         )
@@ -812,6 +972,7 @@ class ConversationService:
             role="user",
             content=user_content,
             message_id=message.message_id,
+            session_id=message.session_id,
         )
 
     async def _save_assistant_message(
@@ -829,7 +990,38 @@ class ConversationService:
             role="assistant",
             content=raw_model_text,
             message_id=None,
+            session_id=message.session_id,
         )
+        if self._session_memory_service is not None and message.session_id:
+            try:
+                await self._session_memory_service.record_exchange(message, reply.text)
+            except Exception as exc:
+                await self._system_event(
+                    "ERROR",
+                    "session_memory_update_failed",
+                    f"{type(exc).__name__}: {str(exc)[:120]}",
+                    message.trace_id,
+                )
+        if self._group_member_profile_service is not None and message.scope_type == "group":
+            try:
+                await self._group_member_profile_service.record_message(message)
+            except Exception as exc:
+                await self._system_event(
+                    "ERROR",
+                    "group_member_profile_update_failed",
+                    f"{type(exc).__name__}: {str(exc)[:120]}",
+                    message.trace_id,
+                )
+        if self._conversation_session_service is not None and message.session_id:
+            try:
+                await self._conversation_session_service.touch(message.session_id)
+            except Exception as exc:
+                await self._system_event(
+                    "ERROR",
+                    "conversation_session_touch_failed",
+                    f"{type(exc).__name__}: {str(exc)[:120]}",
+                    message.trace_id,
+                )
 
     async def _audit(
         self,

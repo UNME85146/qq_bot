@@ -14,26 +14,25 @@ from tools.runtime_common import print_json
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Inspect a fixed style profile for safety.")
+    parser = argparse.ArgumentParser(description="Inspect a history-derived conversation character for safety.")
     parser.add_argument("profile")
     args = parser.parse_args()
 
     profile = json.loads(Path(args.profile).read_text(encoding="utf-8"))
     source_user_id = str(profile.get("sourceUserId") or "")
-    rendered = json.dumps(
-        {
-            key: value
-            for key, value in profile.items()
-            if key not in {"sourceUserId", "avoidRules"}
-        },
-        ensure_ascii=False,
-    )
+    visible_profile = {
+        key: value
+        for key, value in profile.items()
+        if key not in {"sourceUserId", "avoidRules"}
+    }
+    rendered = json.dumps(_all_strings(visible_profile), ensure_ascii=False)
     if source_user_id:
         rendered = rendered.replace(source_user_id, "")
-    values = _all_strings(profile)
     data = {
         "sourceUserId": source_user_id,
         "updatedAt": profile.get("updatedAt"),
+        "metrics": profile.get("metrics"),
+        "characterSummary": profile.get("characterSummary"),
         "styleSummary": profile.get("styleSummary"),
         "lexicon": profile.get("lexicon", []),
         "fewShotExamples": profile.get("fewShotExamples", []),

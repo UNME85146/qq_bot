@@ -40,6 +40,7 @@ def normalize_private_message_event(
         mentioned_user_ids=[],
         received_at=datetime.fromtimestamp(event.time, UTC).isoformat(),
         media_items=media_items,
+        group_role="unknown",
     )
 
 
@@ -74,7 +75,17 @@ def normalize_group_message_event(
         received_at=datetime.fromtimestamp(event.time, UTC).isoformat(),
         reply_to_message_id=_extract_reply_to_message_id(event.message, event.raw_message),
         media_items=media_items,
+        group_role=_group_role_from_event(event),
     )
+
+
+def _group_role_from_event(event: GroupMessageEvent) -> str:
+    try:
+        role = getattr(event.sender, "role", None)
+        normalized = str(role).strip().lower()
+    except Exception:
+        return "unknown"
+    return normalized if normalized in {"owner", "admin", "member"} else "unknown"
 
 
 def _extract_mentioned_user_ids(message: Message, raw_message: str) -> list[str]:

@@ -20,6 +20,11 @@ MUTE_DISABLE_KEYWORDS = (
     "恢复",
     "回来",
 )
+MUTE_ALL_KEYWORDS = (
+    "彻底关机",
+    "完全关机",
+    "全部静默",
+)
 
 
 def is_group_mute_controller(user_id: str, qq_config: QQConfig) -> bool:
@@ -28,27 +33,33 @@ def is_group_mute_controller(user_id: str, qq_config: QQConfig) -> bool:
 
 
 def is_group_mute_enable_command(message: NormalizedMessage, qq_config: QQConfig) -> bool:
-    return (
-        message.is_at_self
-        and is_group_mute_controller(message.user_id, qq_config)
-        and _contains_any(message.text, MUTE_ENABLE_KEYWORDS)
-    )
+    return parse_group_mute_mode_command(message, qq_config) in {
+        "chat_muted",
+        "all_muted",
+    }
 
 
 def is_group_mute_disable_command(message: NormalizedMessage, qq_config: QQConfig) -> bool:
-    return (
-        message.is_at_self
-        and is_group_mute_controller(message.user_id, qq_config)
-        and _contains_any(message.text, MUTE_DISABLE_KEYWORDS)
-    )
+    return parse_group_mute_mode_command(message, qq_config) == "normal"
 
 
 def should_group_mute_wake_for_message(message: NormalizedMessage, qq_config: QQConfig) -> bool:
-    return (
-        message.is_at_self
-        and is_group_mute_controller(message.user_id, qq_config)
-        and not is_group_mute_enable_command(message, qq_config)
-    )
+    return is_group_mute_disable_command(message, qq_config)
+
+
+def parse_group_mute_mode_command(
+    message: NormalizedMessage,
+    qq_config: QQConfig,
+) -> str | None:
+    if not message.is_at_self or not is_group_mute_controller(message.user_id, qq_config):
+        return None
+    if _contains_any(message.text, MUTE_DISABLE_KEYWORDS):
+        return "normal"
+    if _contains_any(message.text, MUTE_ALL_KEYWORDS):
+        return "all_muted"
+    if _contains_any(message.text, MUTE_ENABLE_KEYWORDS):
+        return "chat_muted"
+    return None
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:

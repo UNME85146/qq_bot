@@ -10,10 +10,15 @@ from typing import Any
 from nonebot.adapters.onebot.v11 import Bot, Event, Message, MessageSegment
 
 from app.conversation.reply_formatter import split_reply_messages, truncate_naturally
+from app.features.structured_reply import STRUCTURED_INFORMATION_MAX_CHARS
 from app.models import ReplyConfig
 
 
 GROUP_BUBBLE_INTERVAL_SECONDS = 1.5
+TRUNCATED_MARKER = "内容已截断"
+STRUCTURED_OVERSIZE_FALLBACK = (
+    "结构化内容过长，未发送\n内容已截断；下一页：请缩小查询范围后重试"
+)
 
 
 def build_reply_bubbles(
@@ -22,27 +27,52 @@ def build_reply_bubbles(
     scope_type: str,
     max_length: int,
     reply_mode: str = "short",
+    long_text_max_length: int | None = None,
+    long_text_max_bubbles: int | None = None,
 ) -> list[str]:
     if scope_type == "private":
         return _non_empty_bubbles(split_reply_messages(text, reply_mode=reply_mode))
 
-    limit = 3 if reply_mode == "short" else 6
+    is_long_mode = reply_mode in {"long_text", "code_block"}
+    limit = 3 if not is_long_mode else (long_text_max_bubbles or 8)
     effective_max_length = max_length
-    if reply_mode in {"long_text", "code_block"}:
-        effective_max_length = max(max_length * 4, 1200)
-    text = truncate_naturally(text, effective_max_length, reply_mode=reply_mode)
+    if is_long_mode:
+        effective_max_length = long_text_max_length or max(max_length * 4, 1200)
     bubbles = _non_empty_bubbles(split_reply_messages(text, reply_mode=reply_mode))
     selected: list[str] = []
     total = 0
+    truncated = False
     for bubble in bubbles:
         extra = len(bubble) + (1 if selected else 0)
         if total + extra > effective_max_length:
+            truncated = True
             break
         selected.append(bubble)
         total += extra
         if len(selected) >= limit:
+            truncated = len(selected) < len(bubbles)
             break
-    return selected or bubbles[:limit]
+    if not truncated:
+        return selected or bubbles[:limit]
+
+    while selected and (
+        len(selected) >= limit
+        or sum(len(item) for item in selected) + max(0, len(selected) - 1)
+        + len(TRUNCATED_MARKER) + 1
+        > effective_max_length
+    ):
+        selected.pop()
+    if not selected:
+        prefix_limit = effective_max_length - len(TRUNCATED_MARKER) - 1
+        if prefix_limit > 0 and bubbles:
+            prefix = truncate_naturally(
+                bubbles[0],
+                prefix_limit,
+                reply_mode=reply_mode,
+            ).strip()
+            if prefix:
+                selected.append(prefix)
+    return [*selected, TRUNCATED_MARKER]
 
 
 async def send_reply_bubbles(
@@ -63,6 +93,8 @@ async def send_reply_bubbles(
         scope_type=scope_type,
         max_length=reply_config.max_reply_length,
         reply_mode=reply_mode,
+        long_text_max_length=reply_config.long_text_max_length,
+        long_text_max_bubbles=reply_config.long_text_max_bubbles,
     )
     if not bubbles:
         return
@@ -82,6 +114,47 @@ async def send_reply_bubbles(
                 await on_sent(index, bubble, _extract_sent_message_id(result))
         except Exception as exc:
             await on_send_error(exc, index, bubble)
+
+
+async def send_structured_information(
+    bot: Bot,
+    event: Event,
+    messages: tuple[str, ...] | list[str],
+    *,
+    scope_type: str,
+    reply_config: ReplyConfig,
+    on_send_error,
+) -> None:
+    bubbles = build_structured_information_messages(messages)
+    for index, bubble in enumerate(bubbles):
+        if index > 0:
+            await asyncio.sleep(_message_delay_seconds(reply_config, scope_type=scope_type))
+        try:
+            await bot.send(
+                event,
+                _build_outgoing_message(
+                    bubble,
+                    scope_type=scope_type,
+                    index=index,
+                    group_reply_to_message_id=None,
+                    group_at_user_id=None,
+                ),
+            )
+        except Exception as exc:
+            await on_send_error(exc, index, bubble)
+
+
+def build_structured_information_messages(
+    messages: tuple[str, ...] | list[str],
+) -> list[str]:
+    return [
+        (
+            bubble
+            if len(bubble) <= STRUCTURED_INFORMATION_MAX_CHARS
+            else STRUCTURED_OVERSIZE_FALLBACK
+        )
+        for bubble in _non_empty_bubbles(list(messages))
+    ]
 
 
 async def send_group_image_direct(

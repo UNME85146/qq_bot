@@ -67,17 +67,20 @@ def build_health_report(
         "allowedGroups": sorted(config.qq.allowed_group_ids),
         "persona": {
             "mode": config.persona.mode,
-            "sourceUserId": config.persona.style_profile.source_user_id,
+            "updatedAt": config.persona.style_profile.updated_at,
+            "hasCharacterSummary": (
+                config.persona.mode == "history_derived_character"
+                and bool(config.persona.style_profile.character_summary.strip())
+            ),
         },
-        "tts": {
-            "enabled": config.tts.enabled,
-            "privateEnabled": config.tts.private_enabled,
-            "groupEnabled": config.tts.group_enabled,
-            "provider": config.tts.provider,
-            "backend": config.tts.backend,
-            "executionProvider": config.tts.execution_provider,
-            "endpoint": config.tts.endpoint,
-            "defaultVoiceProfileId": config.tts.default_voice_profile_id,
+        "speech": {
+            "enabled": config.speech.enabled,
+            "privateEnabled": config.speech.private_enabled,
+            "groupEnabled": config.speech.group_enabled,
+            "endpoint": _speech_endpoint(config.speech.base_url),
+            "model": config.speech.model,
+            "voice": config.speech.voice,
+            "format": config.speech.format,
         },
         "db": _db_health(db_path, recent_event_limit),
         "logs": _log_health(log_dir),
@@ -99,6 +102,10 @@ def build_health_report(
     if not qq_bot_listening:
         report["status"] = "down"
     return report
+
+
+def _speech_endpoint(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/audio/speech" if base_url else "unconfigured"
 
 
 def _db_health(db_path: Path, recent_event_limit: int) -> dict[str, Any]:

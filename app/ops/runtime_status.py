@@ -22,14 +22,17 @@ def build_owner_status_text(config) -> str:
         f"selfId={config.qq.self_id}",
         f"bot={'on' if bot_listening else 'off'} napcat={'on' if napcat_webui else 'off'} ws={'on' if napcat_ws else 'off'}",
         f"model={config.model.provider}/{config.model.name}",
-        f"persona={config.persona.mode}/{config.persona.style_profile.source_user_id}",
         (
-            f"tts={'on' if config.tts.enabled else 'off'} "
-            f"private={'on' if config.tts.private_enabled else 'off'} "
-            f"group={'on' if config.tts.group_enabled else 'off'} "
-            f"provider={config.tts.provider}/{config.tts.backend}/"
-            f"{config.tts.execution_provider} "
-            f"profile={config.tts.default_voice_profile_id}"
+            f"persona={config.persona.mode}/"
+            f"updated={config.persona.style_profile.updated_at or 'not_built'}"
+        ),
+        (
+            f"speech={'on' if config.speech.enabled else 'off'} "
+            f"private={'on' if config.speech.private_enabled else 'off'} "
+            f"group={'on' if config.speech.group_enabled else 'off'} "
+            f"endpoint={_speech_endpoint(config.speech.base_url)} "
+            f"model={config.speech.model or 'unconfigured'} "
+            f"voice={config.speech.voice or 'unconfigured'}"
         ),
         f"private={_short_join(config.qq.allowed_private_user_ids)}",
         f"groups={_short_join(config.qq.allowed_group_ids)}",
@@ -103,6 +106,10 @@ def _short_join(values: set[str], *, limit: int = 6) -> str:
         return ",".join(sorted_values) or "-"
     visible = ",".join(sorted_values[:limit])
     return f"{visible},+{len(sorted_values) - limit}"
+
+
+def _speech_endpoint(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/audio/speech" if base_url else "unconfigured"
 
 
 def _group_queue_text() -> str:

@@ -18,62 +18,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.safety.safety_service import SafetyService
-
-
-STYLE_SUMMARY = (
-    "短句、直接、群聊即时反应，常用一两句回复；少用中文句号，常见无标点；"
-    "会夹杂技术词、英文缩写、数字梗和轻微吐槽；整体像熟人群里随手接话，"
-    "不像客服或说明书。"
+from app.persona.history_character import (
+    HistoryCharacterMetrics,
+    build_behavior_profile,
+    build_character_summary,
+    build_reply_rules,
+    build_style_summary,
+    build_tone_rules,
 )
 
-TONE_RULES = [
-    "短、快、直接",
-    "可以轻微调侃",
-    "少解释",
-    "不主动长篇分析",
-    "遇到技术问题可以简短判断",
-    "不主动列表化",
-]
-
-TOPIC_BIASES = [
-    "编程、AI、API、Codex、JSON",
-    "工作和加班",
-    "游戏和群活动",
-    "设备体验",
-    "群友梗",
-    "日常吐槽",
-]
-
-REPLY_RULES = [
-    "回复尽量控制在 1-2 句",
-    "像 QQ 好友即时聊天，不要客服腔",
-    "能短就短，优先自然接话",
-    "不要主动编造真实身份或经历",
-    "聊天记录画像只是风格参考，不是必须使用的词库或固定台词",
-    "根据当前语境自然选用表达，不要为了模仿而硬塞口头禅、数字梗、技术词或示例句",
-]
-
-AVOID_RULES = [
-    "不要自称真实本人",
-    "不要编造 SOURCE_QQ 的真实学校、公司、住址、手机号、财务和身份信息",
-    "不要复述完整聊天记录",
-    "不要过度攻击或辱骂",
-    "不要客服腔",
-]
-
-CANDIDATE_LEXICON = [
-    "6",
-    "牛逼",
-    "舒服",
-    "神了",
-    "点不了一点",
-    "肯定是调用apikey啊",
-    "自己训练也太麻烦了",
-    "那就不知道还有谁了",
-    "羡慕",
-    "爽局",
-    "幽默",
-]
 
 ATTACHMENT_ONLY_PATTERN = re.compile(
     r"^(?:\[(?:图片|表情\d*|视频|转发消息|语音|文件|动画表情|JSON消息)\]\s*)+$"
@@ -175,7 +128,7 @@ HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Build a local fixed QQ chat style profile from readable QQ history exports."
+        description="Build a bot-owned conversation character from readable QQ history exports."
     )
     parser.add_argument(
         "--input-dir",
@@ -316,10 +269,15 @@ def build_style_profile(
     stats["validLowSensitiveTexts"] = len(valid_texts)
     stats["sourceCoverage"] = _make_source_coverage(export_sources)
     stats["behaviorStats"] = _make_behavior_stats_summary(behavior_stats)
+    if not valid_texts:
+        raise ValueError(
+            "No valid low-sensitive text found for the requested source user; "
+            "the existing profile was not changed."
+        )
+    metrics = _make_character_metrics(behavior_stats)
     profile = _make_profile(
         source_user_id=source_user_id,
-        valid_texts=valid_texts,
-        behavior_profile=_make_behavior_profile(behavior_stats),
+        metrics=metrics,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -335,42 +293,61 @@ def build_style_profile(
 def _make_profile(
     *,
     source_user_id: str,
-    valid_texts: list[str],
-    behavior_profile: dict[str, list[str]],
+    metrics: HistoryCharacterMetrics,
 ) -> dict[str, Any]:
-    lexicon = _select_lexicon(valid_texts)
-    few_shot_examples = lexicon[:7]
     return {
         "sourceUserId": source_user_id,
-        "identityDisclosure": f"我是基于 {source_user_id} 的聊天风格调出来的测试号，不是本人。",
-        "styleSummary": STYLE_SUMMARY,
-        "toneRules": TONE_RULES,
-        "topicBiases": TOPIC_BIASES,
-        "lexicon": lexicon,
-        "replyRules": REPLY_RULES,
-        "avoidRules": AVOID_RULES,
-        "fewShotExamples": few_shot_examples,
-        "behaviorProfile": behavior_profile,
+        "identityDisclosure": "我是小黄，一个从过往聊天习惯中形成自己说话方式的 QQ 聊天机器人。",
+        "metrics": metrics.to_payload(),
+        "characterSummary": build_character_summary(metrics),
+        "styleSummary": build_style_summary(metrics),
+        "toneRules": build_tone_rules(metrics),
+        "topicBiases": [],
+        "lexicon": [],
+        "replyRules": build_reply_rules(metrics),
+        "avoidRules": [
+            "不要冒充历史记录中的任何人",
+            "不要编造真实学校、公司、住址、手机号、财务和身份信息",
+            "不要复述完整聊天记录",
+            "不要过度攻击或辱骂",
+            "不要客服腔",
+        ],
+        "fewShotExamples": [],
+        "behaviorProfile": build_behavior_profile(metrics),
         "updatedAt": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
 
-def _select_lexicon(valid_texts: list[str]) -> list[str]:
-    counts = Counter(valid_texts)
-    selected: list[str] = []
-    for phrase in CANDIDATE_LEXICON:
-        if counts[phrase] > 0 or any(phrase in text for text in valid_texts):
-            selected.append(phrase)
-
-    for text, _count in counts.most_common():
-        if len(selected) >= 12:
-            break
-        if text in selected:
-            continue
-        if _is_short_style_phrase(text):
-            selected.append(text)
-
-    return selected or CANDIDATE_LEXICON[:7]
+def _make_character_metrics(stats: dict[str, Any]) -> HistoryCharacterMetrics:
+    lengths: list[int] = stats["validLengths"]
+    media_records = int(stats["mediaRecords"])
+    metrics = HistoryCharacterMetrics(
+        valid_text_count=len(lengths),
+        average_text_length=round(sum(lengths) / len(lengths), 1) if lengths else 0,
+        short_text_ratio=_ratio(sum(1 for length in lengths if length <= 12), len(lengths)),
+        medium_text_ratio=_ratio(
+            sum(1 for length in lengths if 13 <= length <= 40),
+            len(lengths),
+        ),
+        question_ratio=_ratio(stats["questionTexts"], len(lengths)),
+        punctuation_ratio=_ratio(stats["textsWithPunctuation"], len(lengths)),
+        media_ratio=_ratio(media_records, media_records + len(lengths)),
+        sticker_ratio=_ratio(int(stats["stickerRecords"]), media_records or 1),
+        continuation_replies=int(stats["continuationReplies"]),
+        thread_bursts=int(stats["threadBursts"]),
+        at_mentions=int(stats["atMentions"]),
+        reply_markers=int(stats["replyMarkers"]),
+        sticker_intent_count=sum(
+            count
+            for text, count in stats["stickerIntentTexts"].items()
+            if _is_sticker_intent_phrase(text)
+        ),
+        repeated_short_expression_count=sum(
+            1 for _text, count in stats["shortTexts"].items() if count >= 2
+        ),
+    )
+    metrics.validate()
+    return metrics
 
 
 def _consume_records(
@@ -1040,116 +1017,6 @@ def _is_sticker_intent_phrase(text: str) -> bool:
     return _is_short_style_phrase(text)
 
 
-def _make_behavior_profile(stats: dict[str, Any]) -> dict[str, list[str]]:
-    lengths: list[int] = stats["validLengths"]
-    avg_length = round(sum(lengths) / len(lengths), 1) if lengths else 0
-    short_ratio = _ratio(sum(1 for length in lengths if length <= 12), len(lengths))
-    medium_ratio = _ratio(sum(1 for length in lengths if 13 <= length <= 40), len(lengths))
-    question_ratio = _ratio(stats["questionTexts"], len(lengths))
-    punctuation_ratio = _ratio(stats["textsWithPunctuation"], len(lengths))
-    media_records = int(stats["mediaRecords"])
-    sticker_records = int(stats["stickerRecords"])
-    media_ratio = _ratio(media_records, media_records + len(lengths))
-    sticker_ratio = _ratio(sticker_records, media_records or 1)
-    media_types = stats["mediaTypes"]
-    runtime_media_types = stats["runtimeMediaTypes"]
-    sticker_intents = [
-        text for text, _count in stats["stickerIntentTexts"].most_common(5)
-        if _is_sticker_intent_phrase(text)
-    ]
-    runtime_groups = stats["runtimeGroups"].most_common(3)
-    top_punctuation = [
-        mark for mark, _count in stats["punctuationMarks"].most_common(4)
-    ]
-    top_short_texts = [
-        text for text, _count in stats["shortTexts"].most_common(6)
-    ]
-    active_hours = _top_counter_labels(stats["activeHours"], _format_hour_range, limit=3)
-    active_weekdays = _top_counter_labels(
-        stats["activeWeekdays"],
-        lambda value: WEEKDAY_NAMES[int(value)] if 0 <= int(value) < len(WEEKDAY_NAMES) else str(value),
-        limit=3,
-    )
-    reply_latency_summary = _summarize_latencies(stats["replyLatencies"])
-
-    reply_cadence = [
-        f"历史低敏文本平均长度约 {avg_length} 字，短句占比约 {short_ratio:.0%}，中短句占比约 {medium_ratio:.0%}",
-        "多数场景优先一句话接住，除非用户明确要步骤、代码或长解释",
-    ]
-    if active_hours:
-        reply_cadence.append("历史活跃时段更偏 " + "、".join(active_hours))
-    if active_weekdays:
-        reply_cadence.append("样本里更常出现的星期分布：" + "、".join(active_weekdays))
-    if reply_latency_summary:
-        reply_cadence.append(reply_latency_summary)
-    if question_ratio >= 0.25:
-        reply_cadence.append(
-            f"提问/追问式短句较多（约 {question_ratio:.0%}），可以自然用反问或追问接话"
-        )
-    else:
-        reply_cadence.append("不要为了显得活跃而频繁反问，先顺着当前话题回")
-
-    punctuation_profile = [
-        f"带明显标点的低敏文本占比约 {punctuation_ratio:.0%}",
-        "群聊短回复可以少用句号，允许无标点收尾",
-    ]
-    if top_punctuation:
-        punctuation_profile.append("常见标点：" + " ".join(top_punctuation))
-
-    interaction_habits = [
-        f"历史记录中 @/提及痕迹约 {int(stats['atMentions'])} 次，引用/回复痕迹约 {int(stats['replyMarkers'])} 次",
-        "被 @、被引用、被戳时可以短促回应，不要每次都认真解释",
-    ]
-    if int(stats["threadBursts"]):
-        interaction_habits.append(
-            f"连续补充同一话题的短间隔发言约 {int(stats['threadBursts'])} 次，适合偶尔分两小句追补"
-        )
-    if int(stats["continuationReplies"]):
-        interaction_habits.append(
-            f"紧跟别人消息接话约 {int(stats['continuationReplies'])} 次，优先像群友插话而不是正式答题"
-        )
-    if top_short_texts:
-        interaction_habits.append(
-            "高频短表达只学节奏，不硬塞原句：" + "、".join(top_short_texts)
-        )
-
-    chat_action_rules = [
-        f"图片/表情类记录占可观测消息约 {media_ratio:.0%}，其中表情标记占图片/表情记录约 {sticker_ratio:.0%}",
-        "能用真实表情包链路时优先发图，不用文字假装发图",
-        "戳一戳、+1、复读和斗图属于群聊动作，适合短促、低频、看气氛触发",
-        "看图/看表情后先回应图里情绪或梗，再决定是否补一句文字",
-    ]
-    if media_types:
-        chat_action_rules.append(
-            "可观测媒体类型分布：" + "、".join(
-                f"{media_type} {count}次" for media_type, count in media_types.most_common(4)
-            )
-        )
-    if runtime_media_types:
-        chat_action_rules.append(
-            "最近运行流里的媒体动作：" + "、".join(
-                f"{media_type} {count}次" for media_type, count in runtime_media_types.most_common(4)
-            )
-        )
-    if sticker_intents:
-        chat_action_rules.append(
-            "明确表情/斗图请求常见短语只当意图识别参考：" + "、".join(sticker_intents)
-        )
-    if runtime_groups:
-        chat_action_rules.append(
-            "源用户最近运行流主要来自：" + "、".join(
-                f"{group_id}({count}条)" for group_id, count in runtime_groups
-            )
-        )
-
-    return {
-        "replyCadence": reply_cadence,
-        "punctuationProfile": punctuation_profile,
-        "interactionHabits": interaction_habits,
-        "chatActionRules": chat_action_rules,
-    }
-
-
 def _observe_behavior_record(
     record: dict[str, Any],
     text: str,
@@ -1307,28 +1174,6 @@ def _make_behavior_stats_summary(stats: dict[str, Any]) -> dict[str, Any]:
 
 def _counter_summary(counter: Counter[int], *, limit: int) -> list[dict[str, int]]:
     return [{"value": int(value), "count": count} for value, count in counter.most_common(limit)]
-
-
-def _top_counter_labels(
-    counter: Counter[int],
-    formatter,
-    *,
-    limit: int,
-) -> list[str]:
-    return [formatter(value) for value, _count in counter.most_common(limit)]
-
-
-def _format_hour_range(hour: int) -> str:
-    start = int(hour)
-    return f"{start:02d}:00-{(start + 1) % 24:02d}:00"
-
-
-def _summarize_latencies(latencies: list[int]) -> str:
-    if not latencies:
-        return ""
-    median = _percentile(latencies, 0.5)
-    p75 = _percentile(latencies, 0.75)
-    return f"紧跟上下文接话的样本中位间隔约 {median} 秒，75 分位约 {p75} 秒，适合快接但不要刷屏"
 
 
 def _percentile(values: list[int], percentile: float) -> int:

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models import PersonaConfig, PersonaState, TTSConfig
+from app.models import PersonaConfig, PersonaState, SpeechConfig
 
 
 class PromptBuilder:
-    def __init__(self, persona: PersonaConfig, tts: TTSConfig | None = None) -> None:
+    def __init__(self, persona: PersonaConfig, tts: SpeechConfig | None = None) -> None:
         self._persona = persona
         self._tts = tts
 
@@ -21,28 +21,47 @@ class PromptBuilder:
         voice_scope_type: str | None = "private",
     ) -> list[dict[str, Any]]:
         profile = self._persona.style_profile
-        system_parts = [
-            f"你是 QQ 机器人账号，不是 {profile.source_user_id} 本人。",
-            f"你的目标是模仿 {profile.source_user_id} 的聊天风格，而不是冒充其身份。",
-            "你的名字固定叫小黄；被问名字、身份、真人、本人、是不是机器人时，只回答：小黄。",
-            "不要解释自己是机器人、测试号、AI、bot，也不要提来源账号或训练/模仿过程。",
-            f"固定聊天风格摘要：{profile.style_summary}",
-            "聊天记录画像只是风格参考，不是必须使用的词库或固定台词。",
-            "优先根据当前语境自然回答；不要为了模仿而硬塞口头禅、数字梗、技术词或示例句。",
-            "只有语境自然匹配时，才少量借用短表达、话题倾向或示例里的节奏。",
+        if self._persona.mode == "history_derived_character":
+            persona_parts = [
+                "你是一个有自己说话方式的 QQ 聊天机器人，不扮演预设人物，也不冒充真人。",
+                "你的对话角色来自历史低敏聊天记录的聚合统计；它属于你自己，不属于任何历史发言者。",
+                f"自己的对话角色：{profile.character_summary}",
+                f"历史统计风格摘要：{profile.style_summary}",
+                "历史低敏聊天记录只用于提炼整体表达习惯，不是词库、剧本或固定台词。",
+                "不要模仿、复述或冒充历史记录中的任何人，也不要提来源账号编号。",
+                "优先根据当前语境自然回答；不要为了表现角色而硬塞口头禅、数字梗、技术词或示例句。",
+                "只有语境自然匹配时，才体现画像里的短句节奏、标点和互动习惯。",
+            ]
+        else:
+            persona_parts = [
+                "你是 QQ 聊天机器人，不扮演预设人物，也不冒充真人。",
+                "当前未加载历史提炼的对话角色；不要声称自己的表达来自历史聊天统计。",
+                f"兼容对话配置摘要：{profile.style_summary}",
+            ]
+
+        system_parts = persona_parts + [
             "长期记忆、群名片、群内语义词和旧梗只作背景；当前问题无关时不要主动带入。",
             "普通寒暄要像正常 QQ 对话，不要把称呼、问候和无关动词硬拼在一起。",
             "如果用户要表情包、图片、语音、读一句或念一句，前置逻辑会处理；你不要用文字假装发送媒体。",
             "不要输出“（发送一个表情包）”“正在语音回复中”“念给你听”“读完了”这类动作说明。",
-            "除非用户明确追问实现细节，不要主动提模型、prompt、本地加载、硬件、TTS 机制或来源账号编号；身份问题只回答小黄。",
+            "除非用户明确追问实现细节，不要主动提模型、prompt、本地加载、硬件或 TTS 机制。",
             "遇到代码、调试、技术步骤请求时，优先正确清晰；不要夹带无关玩梗或旧聊天梗。",
             _format_section("语气规则", profile.tone_rules),
-            _format_section("可参考的话题倾向，按当前语境取用", profile.topic_biases),
-            _format_section("语境合适时可参考的短表达，不要强行使用", profile.lexicon),
             _format_section("回复规则", profile.reply_rules),
             _format_section("禁止事项", profile.avoid_rules),
-            _format_section("少量风格示例，只学节奏和语气，不要复述原句", profile.few_shot_examples),
             "回复要像 QQ 好友即时聊天，大多数回复 1-2 句，短一点，自然一点。",
+            (
+                "Length override: default to short QQ replies, but when the user explicitly asks "
+                "for an essay, story, joke, long text, more detail, continuation, or a concrete "
+                "word/character count, ignore the 1-2 sentence habit and write enough content to "
+                "match the requested length. For those requests you may return reply_mode=long_text."
+            ),
+            (
+                "Long-form formatting: do not use Markdown headings, standalone bold titles, or "
+                "separate outline-title lines in essays, stories, jokes, or detailed replies. Write "
+                "natural QQ paragraphs. If you use labels such as 一、二、 or 1., keep each label "
+                "in the same paragraph as its content."
+            ),
             "非技术闲聊不要总结用户问题，不要复述“你是在问/你想让我”，直接接话。",
             "不要主动列表化回答，除非用户明确要求。",
             "如需代码块，保持完整 Markdown 代码块；不要输出孤立的 ```；代码块开头不要写 cpp/python 等语言名。",
@@ -80,7 +99,11 @@ class PromptBuilder:
         messages.append(
             {
                 "role": "user",
-                "content": f"当前用户：{user_name}\n用户本次消息：{user_text}\n请直接给出 QQ 风格短回复。",
+                "content": (
+                    f"当前用户：{user_name}\n"
+                    f"用户本次消息：{user_text}\n"
+                    "请直接给出 QQ 风格回复。默认短回复；如果本次消息明确要求作文、故事、笑话、长一点、详细展开或指定字数，请按要求生成长文本。"
+                ),
             }
         )
         return messages
@@ -116,6 +139,11 @@ class PromptBuilder:
             "被骂或被吐槽时可以轻轻接梗，但不要认领侮辱性身份。"
         )
         messages[0]["content"] += (
+            "\nGroup long-form exception: keep normal group chat short, but if the current @/quoted "
+            "message explicitly asks for an essay, story, joke, long text, more detail, continuation, "
+            "or a concrete word/character count, answer that request in reply_mode=long_text."
+        )
+        messages[0]["content"] += (
             "\nGroup rule: answer only the current pending question in this model call. "
             "Do not answer several unrelated questions in one reply. "
             "Do not automatically answer earlier pending questions unless the current user explicitly asks to fill in earlier questions. "
@@ -137,8 +165,8 @@ class PromptBuilder:
         if scope_type == "group" and not self._tts.group_enabled:
             return None
         return (
-            "当前会话已开启本地 TTS 语音追加：你只负责生成正常聊天回复文本，"
-            "系统会把最终回复文本交给本地语音服务朗读。"
+            "当前会话已开启远程语音生成：你只负责生成正常聊天回复文本，"
+            "系统会把最终回复文本交给 /v1/audio/speech 兼容接口朗读。"
             "用户要求语音、念一下、读出来时，直接给出要表达或要朗读的内容；"
             "不要说自己没有语音功能、不能发语音、发不出语音、让用户脑补、"
             "文字代替语音、念完了，也不要输出音频标记、SSML 或解释 TTS 机制。"

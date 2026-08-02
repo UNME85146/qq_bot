@@ -33,6 +33,7 @@ class ModelContextService:
         group_semantic_term_repository: GroupSemanticTermRepository | None = None,
         group_message_index_repository: GroupMessageIndexRepository | None = None,
         sticker_analysis_repository: StickerAssetAnalysisRepository | None = None,
+        group_member_profile_service: object | None = None,
         max_block_chars: int = 900,
     ) -> None:
         self._conversation_repository = conversation_repository
@@ -42,6 +43,7 @@ class ModelContextService:
         self._semantic_terms = group_semantic_term_repository
         self._group_messages = group_message_index_repository
         self._sticker_analysis = sticker_analysis_repository
+        self._group_member_profiles = group_member_profile_service
         self._max_block_chars = max_block_chars
 
     async def build(
@@ -57,6 +59,7 @@ class ModelContextService:
         referenced_message = None
         semantic_lines: list[str] = []
         sticker_analyses: list[StickerAssetAnalysis] = []
+        member_profile_context = ""
         if message.group_id:
             await self.remember_group_terms(message)
             group_context = await self._safe_get_group_context(message.group_id)
@@ -67,6 +70,10 @@ class ModelContextService:
                 current_indexed_message,
                 referenced_message,
             )
+            member_profile_context = await self._get_group_member_profile_context(
+                message.group_id,
+                message.user_id,
+            )
 
         intent = _restate_current_message(message, referenced_message, image_intent)
         parts = ["当前语境增强：", f"- 当前消息重述：{intent}"]
@@ -74,6 +81,8 @@ class ModelContextService:
             parts.append("- 相关长期记忆：\n" + _shorten(long_term_memory.strip(), 260))
         if group_context.strip():
             parts.append("- 群上下文摘要：\n" + _shorten(group_context.strip(), 220))
+        if member_profile_context.strip():
+            parts.append("- 当前成员低敏画像：\n" + _shorten(member_profile_context.strip(), 180))
         if referenced_message is not None:
             ref = _sanitize_prompt_text(referenced_message.text)
             if ref:
@@ -205,6 +214,18 @@ class ModelContextService:
                 analyses.append(analysis)
         return analyses
 
+    async def _get_group_member_profile_context(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> str:
+        if self._group_member_profiles is None:
+            return ""
+        try:
+            return await self._group_member_profiles.get_prompt_context(group_id, user_id)
+        except Exception:
+            return ""
+
 
 def _extract_group_term_candidates(message: NormalizedMessage) -> list[tuple[str, str, float]]:
     candidates: list[tuple[str, str, float]] = []
@@ -310,14 +331,25 @@ def _analysis_lines(
 
 def _reply_mode_hint(message: NormalizedMessage) -> str:
     compact = "".join(message.text.split())
-    if _looks_like_long_text_request(compact):
-        return "- 回复模式建议：用户需要详细说明/步骤/代码时可以用长文本或代码块；否则保持短回复。"
+    if looks_like_long_text_request(compact):
+        return (
+            "- Reply mode hint: this is an explicit long-form request. "
+            "Use reply_mode=long_text and satisfy the requested length; "
+            "do not compress it into a short QQ reply."
+        )
     if message.scope_type == "group":
         return "- 回复模式建议：群聊只回答当前被 @/引用的这一问，不主动打包回答历史无关问题。"
     return "- 回复模式建议：私聊可以完整解释，不需要项目层截短。"
 
 
+def looks_like_long_text_request(text: str) -> bool:
+    return _looks_like_long_text_request(text)
+
+
 def _looks_like_long_text_request(text: str) -> bool:
+    normalized = "".join(str(text or "").split()).lower()
+    if re.search(r"\d{2,5}(?:字|words?|characters?)", normalized, re.IGNORECASE):
+        return True
     markers = (
         "详细",
         "展开",
@@ -329,8 +361,33 @@ def _looks_like_long_text_request(text: str) -> bool:
         "调试",
         "完整",
         "教程",
+        "长文本",
+        "长文",
+        "作文",
+        "故事",
+        "讲故事",
+        "笑话",
+        "段子",
+        "写一篇",
+        "写篇",
+        "续写",
+        "长一点",
+        "长点",
+        "多写点",
+        "多写一点",
+        "不少于",
+        "至少",
+        "几百字",
+        "一千字",
+        "两千字",
+        "800字",
+        "essay",
+        "story",
+        "joke",
+        "longform",
+        "long-form",
     )
-    return any(marker in text for marker in markers)
+    return any(marker.lower() in normalized for marker in markers)
 
 
 def _sanitize_prompt_text(text: str) -> str:

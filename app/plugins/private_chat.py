@@ -14,6 +14,8 @@ from app.adapters.onebot_event_adapter import normalize_private_message_event
 from app.bootstrap import create_conversation_service
 from app.config import load_config
 from app.conversation.reply_formatter import ReplyFormatter
+from app.features.market_providers import create_market_providers
+from app.features.market_service import MarketCommandService
 from app.features.reminder_service import (
     format_reminder_tasks,
     is_explicit_reminder_request,
@@ -24,10 +26,11 @@ from app.features.reminder_service import (
 )
 from app.features.runtime_features import create_runtime_feature_hub, maybe_save_sticker
 from app.features.sticker_service import is_sticker_save_request
+from app.features.image_provider import cleanup_stale_image_cache, create_image_provider
+from app.features.image_service import ImageGenerationService, parse_image_command
+from app.features.speech_provider import create_speech_provider
+from app.features.speech_service import SpeechService
 from app.features.tts_service import (
-    EXACT_TTS_SEGMENT_MAX_CHARS,
-    TTS_SEGMENT_MAX_CHARS,
-    TTSService,
     extract_explicit_voice_read_text,
     forced_voice_tts_skip_reason,
     prepare_tts_speech_text,
@@ -42,28 +45,59 @@ from app.plugins.send_helper import (
     send_private_image_direct,
     send_private_record_direct,
     send_reply_bubbles,
+    send_structured_information,
 )
 from app.routing.direct_intent import DirectReplyIntent, parse_direct_reply_intent
 from app.routing.permission_service import PermissionService
 from app.routing.rate_limiter import RateLimiter
 from app.safety.safety_service import SafetyService
 from app.storage.database import init_database
+from app.storage.repositories import StockWatchRepository
 
 _config = load_config(os.getenv("QQ_BOT_CONFIG_PATH", "config/config.json"))
+
+
+def _voice_config():
+    return _config.speech
+
+
 _conversation_service = create_conversation_service(_config)
 _feature_hub = create_runtime_feature_hub(_config)
 _permission_service = PermissionService(_config.qq)
+_stock_watch_repository = StockWatchRepository(_config.storage.database_path)
+_market_providers = create_market_providers(
+    _config.markets,
+    record_system_event=_conversation_service.record_system_event,
+)
+_market_command_service = MarketCommandService(
+    repository=_stock_watch_repository,
+    providers=_market_providers,
+    default_alert_threshold_percent=_config.markets.alert_threshold_percent,
+    command_timeout_seconds=_config.markets.command_timeout_seconds,
+)
+_image_service = ImageGenerationService(
+    _config.image_generation,
+    provider=create_image_provider(_config.image_generation),
+    retry_policy=_config.retry,
+    record_system_event=_conversation_service.record_system_event,
+)
 _rate_limiter = RateLimiter(
     _config.limits.group_cooldown_seconds,
     private_cooldown_seconds=_config.limits.private_cooldown_seconds,
     max_user_messages_per_minute=_config.limits.max_user_messages_per_minute,
     max_group_messages_per_minute=_config.limits.max_group_messages_per_minute,
 )
-_tts_service = TTSService(
-    _config.tts,
+_tts_service = SpeechService(
+    _config.speech,
+    provider=create_speech_provider(_config.speech),
+    retry_policy=_config.retry,
     record_system_event=_conversation_service.record_system_event,
 )
 _voice_safety_service = SafetyService(
+    identity_disclosure=_config.persona.style_profile.identity_disclosure,
+    source_user_id=_config.persona.style_profile.source_user_id,
+)
+_image_safety_service = SafetyService(
     identity_disclosure=_config.persona.style_profile.identity_disclosure,
     source_user_id=_config.persona.style_profile.source_user_id,
 )
@@ -97,8 +131,14 @@ private_chat = on_message(priority=10, block=False)
 
 @get_driver().on_startup
 async def _init_storage() -> None:
-    await init_database(_config.storage.database_path)
+    await init_database(
+        _config.storage.database_path,
+        backup_dir=_config.storage.backup_dir,
+    )
     logger.info("SQLite storage initialized: {}", _config.storage.database_path)
+    removed_images = cleanup_stale_image_cache(_config.image_generation)
+    if removed_images:
+        logger.info("Removed {} stale image cache files", removed_images)
 
 
 @private_chat.handle()
@@ -128,6 +168,10 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
     saved_sticker_asset_id: str | None = None
     direct_intent = None
     if _permission_service.is_private_user_allowed(normalized.user_id):
+        if await _try_handle_private_market_feature(bot, event, normalized):
+            return
+        if await _try_handle_private_image_generation_feature(bot, event, normalized):
+            return
         saved_sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
         direct_intent = parse_direct_reply_intent(normalized)
         direct_intent = _apply_private_followup_intent(
@@ -135,6 +179,13 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
             normalized.text,
             direct_intent,
         )
+        if await _try_send_private_speech_unavailable(
+            bot,
+            event,
+            normalized,
+            direct_intent,
+        ):
+            return
         if saved_sticker_asset_id is not None:
             _recent_private_sticker_assets[normalized.user_id] = saved_sticker_asset_id
         if is_sticker_save_request(normalized.text):
@@ -331,6 +382,10 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
     force_voice_reply = (
         direct_intent.voice_reply_requested if direct_intent is not None else False
     )
+    prepared = await _prepare_private_chat_session(normalized)
+    if prepared is None:
+        return
+    normalized = prepared
     if force_voice_reply:
         reply = await _conversation_service.handle_private_message(
             normalized,
@@ -382,6 +437,140 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
             _remember_private_non_random_outgoing(normalized.user_id)
 
 
+async def _try_handle_private_market_feature(
+    bot: Bot,
+    event: PrivateMessageEvent,
+    message,
+) -> bool:
+    result = await _market_command_service.handle(message)
+    if result is None:
+        return False
+    send_error = lambda exc, index, bubble: _record_send_error(
+        message.trace_id,
+        exc,
+        index,
+        "send_private_feature_reply_failed",
+    )
+    structured = getattr(result, "structured", None)
+    if structured is not None:
+        await send_structured_information(
+            bot,
+            event,
+            structured.messages,
+            scope_type="private",
+            reply_config=_config.reply,
+            on_send_error=send_error,
+        )
+    else:
+        await send_reply_bubbles(
+            bot,
+            event,
+            result.text,
+            scope_type="private",
+            reply_config=_config.reply,
+            on_send_error=send_error,
+        )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason=result.reason,
+        model_called=False,
+        safety_blocked=False,
+    )
+    return True
+
+
+async def _try_handle_private_image_generation_feature(
+    bot: Bot,
+    event: PrivateMessageEvent,
+    message: NormalizedMessage,
+) -> bool:
+    command = parse_image_command(message.text)
+    if command is None:
+        return False
+    safety = _image_safety_service.check_input(
+        command.prompt,
+        scope_type=message.scope_type,
+    )
+    if safety.action != "allow":
+        await send_reply_bubbles(
+            bot,
+            event,
+            safety.replacement_text or "这个图片请求不能处理",
+            scope_type="private",
+            reply_config=_config.reply,
+            on_send_error=lambda exc, index, bubble: _record_send_error(
+                message.trace_id,
+                exc,
+                index,
+                "send_private_image_safety_failed",
+            ),
+        )
+        await _conversation_service.record_reply_audit(
+            message,
+            action="refuse",
+            reason="private_image_safety_blocked",
+            model_called=False,
+            safety_blocked=True,
+        )
+        return True
+
+    sent = await _image_service.execute(
+        message,
+        command.prompt,
+        edit=command.edit,
+        send=lambda file_path: send_private_image_direct(
+            bot,
+            user_id=message.user_id,
+            file_path=file_path,
+        ),
+    )
+    if sent is not None:
+        _remember_private_non_random_outgoing(message.user_id, message.message_id)
+        await _conversation_service.record_reply_audit(
+            message,
+            action="reply",
+            reason="private_image_edited" if command.edit else "private_image_generated",
+            model_called=True,
+            safety_blocked=False,
+        )
+        return True
+
+    failure_text = _image_service.failure_message(message.trace_id) or "图片处理失败：未知错误"
+    await send_reply_bubbles(
+        bot,
+        event,
+        failure_text,
+        scope_type="private",
+        reply_config=_config.reply,
+        on_send_error=lambda exc, index, bubble: _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_private_image_status_failed",
+        ),
+    )
+    _remember_private_non_random_outgoing(message.user_id, message.message_id)
+    category = _image_service.failure_category(message.trace_id)
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason=f"private_image_{category or 'failed'}",
+        model_called=category not in {"unconfigured", "empty_prompt", "no_recent_image", "edit_window_expired"},
+        safety_blocked=category == "safety_rejected",
+    )
+    return True
+
+
+async def _prepare_private_chat_session(
+    message: NormalizedMessage,
+) -> NormalizedMessage | None:
+    prepare = getattr(_conversation_service, "prepare_chat_message", None)
+    if prepare is None:
+        return message
+    return await prepare(message)
+
+
 _REMINDER_CREATE_HELP_TEXT = "要提醒什么？比如：十分钟后提醒我喝水"
 
 
@@ -391,18 +580,18 @@ async def _try_send_private_explicit_voice(
     normalized,
     explicit_text: str | None = None,
 ) -> bool:
-    if not tts_enabled_for_scope(_config.tts, normalized.scope_type):
-        return False
     if explicit_text is None:
         explicit_text = extract_explicit_voice_read_text(normalized)
     if explicit_text is None:
+        return False
+    if not tts_enabled_for_scope(_voice_config(), normalized.scope_type):
         return False
     safety = _voice_safety_service.check_input(explicit_text, scope_type=normalized.scope_type)
     if safety.action != "allow":
         return False
     await record_explicit_voice_selected(
         normalized,
-        config=_config.tts,
+        config=_voice_config(),
         chars=len(explicit_text),
         record_system_event=_conversation_service.record_system_event,
     )
@@ -431,7 +620,7 @@ async def _try_send_private_explicit_voice(
     await send_reply_bubbles(
         bot,
         event,
-        explicit_text,
+        _speech_failure_text(normalized.trace_id, fallback=explicit_text),
         scope_type="private",
         reply_config=_config.reply,
         on_send_error=lambda exc, index, bubble: _record_send_error(
@@ -459,7 +648,7 @@ async def _maybe_send_private_voice_reply(
     *,
     force: bool = False,
 ) -> bool:
-    disabled_reason = tts_scope_disabled_reason(_config.tts, normalized.scope_type)
+    disabled_reason = tts_scope_disabled_reason(_voice_config(), normalized.scope_type)
     if disabled_reason is not None:
         if force:
             await record_tts_fallback_text_sent(
@@ -473,7 +662,7 @@ async def _maybe_send_private_voice_reply(
         return False
     if force:
         skip_reason = forced_voice_tts_skip_reason(
-            _config.tts,
+            _voice_config(),
             reply,
             scope_type=normalized.scope_type,
         )
@@ -496,7 +685,7 @@ async def _maybe_send_private_voice_reply(
             )
         await record_explicit_voice_selected(
             normalized,
-            config=_config.tts,
+            config=_voice_config(),
             chars=len(reply.text),
             record_system_event=_conversation_service.record_system_event,
         )
@@ -507,6 +696,13 @@ async def _maybe_send_private_voice_reply(
             ignore_cooldown=True,
         )
         if sent:
+            return True
+        failure_text = _current_speech_failure(normalized.trace_id)
+        if failure_text:
+            await bot.send_private_msg(
+                user_id=int(normalized.user_id),
+                message=failure_text,
+            )
             return True
         await record_tts_fallback_text_sent(
             normalized,
@@ -530,7 +726,7 @@ async def _maybe_send_private_voice_reply(
         )
         return False
     skip_reason = tts_candidate_skip_reason(
-        _config.tts,
+        _voice_config(),
         reply,
         scope_type=normalized.scope_type,
     )
@@ -583,23 +779,31 @@ async def _maybe_send_private_tts_text(
     ignore_cooldown: bool = False,
     single_request: bool = False,
 ) -> bool:
+    del single_request
     result = await _tts_service.generate_for_text(
         normalized,
         text,
         exact_short=exact_short,
         ignore_cooldown=ignore_cooldown,
-        segment_max_chars=_tts_segment_max_chars()
-        if not single_request and (exact_short or ignore_cooldown)
-        else None,
     )
     if result is None:
         return False
-    try:
-        await send_private_record_direct(
+    async def send_record():
+        return await send_private_record_direct(
             bot,
             user_id=normalized.user_id,
             file_path=result.audio_path,
         )
+
+    send_with_cleanup = getattr(_tts_service, "send_and_cleanup", None)
+    if send_with_cleanup is not None:
+        sent_result = await send_with_cleanup(normalized, result, send_record)
+        if sent_result is None:
+            return False
+        _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
+        return True
+    try:
+        await send_record()
         _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
     except Exception as exc:
         await _conversation_service.record_system_event(
@@ -610,6 +814,61 @@ async def _maybe_send_private_tts_text(
         )
         return False
     return True
+
+
+async def _try_send_private_speech_unavailable(
+    bot: Bot,
+    event: PrivateMessageEvent,
+    message,
+    direct_intent: DirectReplyIntent,
+) -> bool:
+    if not (
+        direct_intent.voice_read_text is not None
+        or direct_intent.voice_reply_requested
+    ):
+        return False
+    if tts_enabled_for_scope(_voice_config(), message.scope_type):
+        return False
+    await send_reply_bubbles(
+        bot,
+        event,
+        _speech_failure_text(message.trace_id),
+        scope_type="private",
+        reply_config=_config.reply,
+        on_send_error=lambda exc, index, bubble: _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_private_speech_status_failed",
+        ),
+    )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason="speech_unconfigured",
+        model_called=False,
+        safety_blocked=False,
+    )
+    return True
+
+
+def _speech_failure_text(trace_id: str, *, fallback: str | None = None) -> str:
+    failure_message = getattr(_tts_service, "failure_message", None)
+    if failure_message is not None:
+        text = failure_message(trace_id)
+        if text:
+            return text
+    if fallback:
+        return fallback
+    return (
+        "当前配置不支持语音：请管理员配置支持 /v1/audio/speech "
+        "的语音模型和 API Key"
+    )
+
+
+def _current_speech_failure(trace_id: str) -> str | None:
+    failure_message = getattr(_tts_service, "failure_message", None)
+    return failure_message(trace_id) if failure_message is not None else None
 
 
 def _next_private_random_voice_decision(normalized) -> PrivateRandomVoiceDecision | None:
@@ -683,8 +942,7 @@ async def _record_private_random_voice_decision(
     window_id: int,
     window_index: int,
 ) -> None:
-    profile = _config.tts.current_profile()
-    profile_id = profile.id if profile is not None else _config.tts.default_voice_profile_id
+    profile_id = _voice_config().voice or "unconfigured"
     await _conversation_service.record_system_event(
         level="INFO",
         event="tts_selected_random" if selected else "tts_skipped_random",
@@ -693,14 +951,6 @@ async def _record_private_random_voice_decision(
             f"profile={profile_id}; chars={chars}; reason={reason}"
         ),
         trace_id=normalized.trace_id,
-    )
-
-
-def _tts_segment_max_chars() -> int:
-    configured_max = max(1, int(getattr(_config.tts, "max_chars", TTS_SEGMENT_MAX_CHARS)))
-    return min(
-        configured_max,
-        EXACT_TTS_SEGMENT_MAX_CHARS,
     )
 
 

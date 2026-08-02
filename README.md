@@ -1,79 +1,90 @@
-﻿# QQ Bot
+# QQ Bot
 
-A QQ chat bot built with NoneBot2, OneBot V11, SQLite, and an OpenAI-compatible chat model API.
+A NoneBot2 and OneBot v11 QQ bot with permission-aware chat, structured information delivery, provider resilience, media workflows, reminders, memory, and audit tooling.
 
-This repository is a sanitized public export. It intentionally excludes private runtime configuration, databases, logs, QR codes, QQ login state, local design documents, acceptance records, and any real credentials or account IDs.
+This GitHub repository is a sanitized public export. The private development tree, tests, local design and acceptance documents, credentials, QQ identifiers, runtime databases, logs, login state, and rollback packages are not mirrored here.
 
-## Features
+## Highlights
 
-- Private chat and allowlisted group chat.
-- Root/owner permission model with dynamic allowlist commands.
-- Owner private commands including `/help`, `/status`, `/memory`, `/audit last`, `/ping model`, `/allow ...`, `/owner ...`, and `/mute ...`.
-- Private-only scheduled reminders with `/remind`.
-- Group threaded replies using `reply + @ + text` on the first bubble.
-- Per-group outbound queue with at least 1.5 seconds between same-group reply tasks.
-- Group mute switch, pending question tracking, and low-risk group context summaries.
-- Model failure retry, classification, and breaker behavior.
-- Shared model-context enhancement before model calls: long-term memory, group context, quoted message, semantic terms, sticker/image analysis, and reply-mode hints.
-- Optional image understanding via the configured OpenAI-compatible model, with safe fallback when unsupported.
-- Global sticker asset pool with content-hash deduplication, semantic analysis, matching, probability repeat behavior, and a 3500 asset cap.
-- Direct sticker requests such as "send a sticker", "change sticker", or "send another one" use the local sticker pool before model chat; the model is not allowed to fake media actions in text.
-- Text repeat only after the same low-risk short text appears consecutively in the same group.
-- Optional local MOSS-TTS-Nano voice replies through an independent HTTP TTS service. When enabled, 8-12 of every 80 eligible short model replies are randomly sent as QQ voice records; successful voice replies do not also send text, while TTS or record failures fall back to text.
-- Explicit read-aloud requests are supported in private chat and in group chat only when the bot is mentioned, either by a real OneBot/CQ @ segment or by a configured nickname in text. Long read-aloud text may be generated in internal chunks, but the bot merges the chunks and sends one QQ voice record; `tts.maxChars` still limits normal/random model voice candidates, not user-provided read-aloud text. Generic requests such as "send a voice reply" do not read the user's raw message; they generate a short model reply and then force a QQ voice record. Follow-up phrases like "change one" can continue the previous voice action in private chat.
-- SQLite audit/runtime inspection, backup, export, and vacuum tools.
+- Stable bot-owned persona derived from validated, low-sensitivity aggregate metrics. Raw chat text, source QQ identifiers, free-text profiles, and group identifiers are not prompt inputs.
+- Root and owner permissions, private/group allowlists, group mute controls, per-group FIFO chat queues, reminders, memory, image understanding, stickers, and audited administration commands.
+- Dedicated structured reply mode for help, news, market, and search results. Truncation is explicit and pagination keeps titles, metadata, summaries, and URLs together.
+- News feeds are isolated per feed and publish redacted health telemetry. Scheduled news uses resumable at-least-once delivery checkpoints.
+- A-share provider fallback with closed/open/half-open circuit recovery. US indices are fetched concurrently under a command deadline. Provider telemetry records redacted category, stage, attempt count, and latency.
+- Video egress preflight covers DNS, TCP, TLS, and HTTP. HTTP/SOCKS proxies are read only from configured environment variables. Supported short URLs are canonicalized once and cached.
+- Long video work emits one progress notice and one final result. NapCat `upload_group_file` capability is checked before download, and a root-only plan/apply flow supports controlled small-video acceptance.
+- OpenAI-compatible speech and image endpoints are optional. The historical local TTS service is not shipped; existing deployments can manage retirement and rollback packages with the transactional tool in `tools/`.
+
+## Requirements
+
+- Python 3.12 or 3.13
+- NoneBot2 with the OneBot v11 adapter
+- A OneBot implementation such as NapCat using reverse WebSocket
+- `ffmpeg` for video download/upload workflows
+- Optional market dependencies: AkShare and yfinance
+- Optional video dependencies: yt-dlp and socksio
 
 ## Quick Start
 
+Windows PowerShell:
+
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
-pip install -e .[dev]
+python -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -e ".[market,video]"
 Copy-Item .env.example .env
-Copy-Item config\config.example.json config\config.json
-Copy-Item config\persona_profile.example.json config\persona_profile.local.json
+Copy-Item config/config.example.json config/config.json
 ```
 
-Fill `.env` with private values:
+Linux:
 
-```env
-QQ_BOT_MODEL_API_KEY=
-QQ_BOT_ONEBOT_TOKEN=
-QQ_BOT_CONFIG_PATH=config/config.json
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e '.[market,video]'
+cp .env.example .env
+cp config/config.example.json config/config.json
 ```
 
-Edit `config/config.json` for your bot QQ, root/owner IDs, allowlists, model base URL, and model name. Do not commit private config files.
+Configure placeholders in `config/config.json`:
+
+- `BOT_QQ`, `ROOT_QQ`, `OWNER_QQ`, and `ALLOWED_GROUP_ID`
+- `model.baseUrl`, `model.name`, and the API-key environment variable name
+- OneBot reverse WebSocket host, port, and token environment variable
+- Optional news feeds, market providers, search provider, speech, image, and video settings
+
+Set secrets only in `.env` or your service manager. Do not put literal credentials in JSON templates, scripts, shell history, logs, or commits.
+
+`config/persona_profile.example.json` contains numeric demonstration metrics only so the public example can be validated. For a real deployment, generate your own ignored `persona_profile.local.json`, point `persona.profilePath` to it, and keep source identifiers and raw history out of version control. Runtime has no automatic example-profile fallback.
 
 Start the bot:
 
 ```powershell
-python bot.py
+.\.venv\Scripts\python bot.py
 ```
 
-Inspect runtime state:
-
-```powershell
-python tools\inspect_runtime_status.py --limit 5
-```
-
-## NapCat
-
-Configure NapCat OneBot V11 reverse WebSocket to point at the bot:
-
-```text
-ws://YOUR_SERVER_IP:8080/onebot/v11/ws
-```
-
-If NapCat and QQ_bot run on the same server, use:
+The default reverse WebSocket target is:
 
 ```text
 ws://127.0.0.1:8080/onebot/v11/ws
 ```
 
-## Management Commands
+## User Commands
 
-Owner/root private commands:
+Group information entry points:
+
+```text
+/help [page]
+#政事 [page]  #财经 [page]  #科技 [page]  #金融 [page]
+#A股          #美股
+#chat 查一下 <query> [--page N]
+#画图 <prompt>  #改图 <instruction>
+#新闻订阅 [HH:MM]  #新闻订阅状态  #新闻退订
+```
+
+The group `/help` response is two pages and covers all eight feature lines. News blocks keep title, source, time, and URL together. Search blocks keep title, summary, and URL together. When a result cannot fit safely, the bot sends `内容已截断` and a `下一页` instruction instead of silently dropping content.
+
+Owner/root private commands include:
 
 ```text
 /help
@@ -83,97 +94,63 @@ Owner/root private commands:
 /audit last
 /reload profile
 /ping model
-/remind <natural-language reminder>
-/remind list
-/remind cancel <id>
-/allow private add <qq>
-/allow private remove <qq>
-/allow private list
-/allow group add <group_id>
-/allow group remove <group_id>
-/allow group list
-/mute status
-/mute clear
-/mute clear <group_id>
-/voice status
-/voice on
-/voice off
-/voice private on|off
-/voice group on|off
-/voice profile list
-/voice profile set <profile_id>
-/voice gender male|female|neutral
-/voice language <code>
+/allow ...
+/mute ...
+/voice ...
 ```
 
-Root-only commands:
+Only root users can manage `/owner ...` and execute the `/video upload plan|apply ...` acceptance flow.
 
-```text
-/owner add <qq>
-/owner remove <qq>
-/owner list
-```
+## Operations Tools
 
-## Optional Voice Replies
-
-Voice replies use a separate local MOSS-TTS-Nano adapter service. The bot process only calls the stable local HTTP API and does not install MOSS, PyTorch, ONNX Runtime, or audio dependencies into the bot virtual environment.
-
-Default public-safe service values:
-
-```text
-Bot root: /opt/qq_bot
-TTS root: /opt/moss_tts_nano
-Endpoint: http://127.0.0.1:18100/tts
-Service: qq-bot-tts.service
-Output cache: /opt/qq_bot/data/tts/cache
-```
-
-Install and start the adapter on Linux:
-
-```bash
-cd /opt/qq_bot
-bash scripts/server/install_moss_tts_service.sh
-sudo systemctl start qq-bot-tts.service
-curl http://127.0.0.1:18100/health
-```
-
-Set `tts.enabled=true` plus `tts.privateEnabled` or `tts.groupEnabled` in private config, or use owner/root private commands:
-
-```text
-/voice status
-/voice on|off
-/voice private on|off
-/voice group on|off
-/voice profile list
-/voice profile set <profile_id>
-/voice gender male|female|neutral
-/voice language <code>
-```
-
-`/voice profile list` shows configured local profiles with copyable `id=<profile_id>` values and a safe MOSS built-in voice summary in the form `voice | profile_id=<profile_id> | display_name | group`. It does not expose private `promptAudioPath` values or large `prompt_audio_codes`. Public templates contain only placeholder profiles; add your own enabled profiles to private `config/config.json`, then switch with `/voice profile set <profile_id>`.
-
-There is no `/voice age` command because the current public integration does not rely on a stable age control exposed by the MOSS-TTS-Nano service.
-
-## Tools
+Read the current redacted provider snapshot without external requests:
 
 ```powershell
-python tools\inspect_runtime_status.py --limit 5
-python tools\tail_bot_state.py --once --limit 5
-python tools\backup_db.py --db data\bot.db --backup-dir data\backups
-python tools\export_audits.py --db data\bot.db --output audits.jsonl
-python tools\vacuum_db.py --db data\bot.db --backup-dir data\backups
+.\.venv\Scripts\python tools/check_provider_status.py --snapshot-only
 ```
+
+Actively probe currently configured providers and require a healthy result:
+
+```powershell
+.\.venv\Scripts\python tools/check_provider_status.py --require-healthy
+```
+
+Preflight video-provider egress:
+
+```powershell
+.\.venv\Scripts\python tools/check_video_egress.py --require-ok
+```
+
+Inspect bot, NapCat, OneBot, and historical TTS status:
+
+```powershell
+.\.venv\Scripts\python tools/inspect_runtime_status.py --summary --limit 5
+```
+
+Inspect historical TTS retirement state:
+
+```bash
+.venv/bin/python tools/manage_tts_retirement.py status
+```
+
+`apply`, `rollback`, rehearsal, and deletion are mutating operations. Review the generated plan, preserve rollback material, and use a separately approved operation window.
+
+## Verification
+
+The private repository carries the full test suite. A public-export smoke check can still validate syntax and configuration loading:
+
+```powershell
+.\.venv\Scripts\python -m compileall app bot.py tools
+$env:QQ_BOT_MODEL_API_KEY = "placeholder-for-import-check"
+$env:QQ_BOT_CONFIG_PATH = "config/config.example.json"
+.\.venv\Scripts\python -c "import bot; import nonebot; print(nonebot.get_driver().type)"
+```
+
+Passing local tests or probes does not prove live QQ delivery, provider success, video upload, or recovery behavior. Validate each enabled production path separately.
 
 ## Security
 
-Never commit:
-
-- `.env`
-- `config/config.json`
-- `config/persona_profile.local.json`
-- SQLite databases and backups
-- logs
-- NapCat login state, QR codes, screenshots, or cache
-- API keys, OneBot tokens, NapCat WebUI tokens, server passwords, private QQ IDs, or private group IDs
-
-Use placeholders in public docs and templates.
+- Never commit `.env`, `config/config.json`, local persona profiles, databases, backups, logs, runtime artifacts, QR codes, NapCat cache/login state, tokens, private QQ/group IDs, or server credentials.
+- Provider and video telemetry is intentionally redacted. Keep raw response bodies and secrets out of durable audit records.
+- Public releases must contain only the approved export paths and must pass secret and private-identifier scans before push.
+- Keep dependencies and OneBot/NapCat endpoints private by default; expose only the minimum required network surface.

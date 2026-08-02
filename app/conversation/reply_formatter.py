@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-_SENTENCE_PATTERN = re.compile(r"[^。！？!?\n]+[。！？!?]+|[^。！？!?\n]+")
 _FENCED_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _FENCED_BLOCK_DETAIL_PATTERN = re.compile(
     r"```[ \t]*(?P<label>[A-Za-z0-9_+#.-]*)[ \t]*\n(?P<body>[\s\S]*?)\n?```",
@@ -15,6 +14,23 @@ _CODE_LIKE_PATTERN = re.compile(
     r"\b(def|class|import|from|return|async|await|function|const|let|var|SELECT|INSERT|UPDATE)\b|[{};]",
     re.IGNORECASE,
 )
+_MARKDOWN_HEADING_LINE_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+)?\s*$")
+_WHOLE_LINE_MARKDOWN_WRAPPER_PATTERNS = (
+    re.compile(r"^\s*\*\*(.+?)\*\*\s*$"),
+    re.compile(r"^\s*__(.+?)__\s*$"),
+    re.compile(r"^\s*\*(.+?)\*\s*$"),
+    re.compile(r"^\s*_(.+?)_\s*$"),
+)
+_SECTION_HEADING_MARKER_PATTERN = re.compile(
+    r"^(?:"
+    r"[一二三四五六七八九十百千万零〇两]{1,6}[、.．]"
+    r"|第[一二三四五六七八九十百千万零〇两]{1,6}[章节篇]"
+    r"|[（(][一二三四五六七八九十百千万零〇两0-9]{1,6}[）)]"
+    r"|[0-9]{1,3}[、.．)]"
+    r"|[①②③④⑤⑥⑦⑧⑨⑩]"
+    r")\s*\S+"
+)
+_TITLE_SENTENCE_ENDINGS = "。！？!?；;"
 _FAKE_MEDIA_ACTION_PATTERN = re.compile(
     r"^[（(]\s*"
     r"(?=[^）)]*(?:发送|发|附上|贴|来|整|给你发))"
@@ -77,8 +93,10 @@ class ReplyFormatter:
         cleaned = clean_reply_text(text)
         return truncate_naturally(cleaned, self._max_length)
 
-    def format_unlimited(self, text: str) -> str:
-        return clean_reply_text(text)
+    def format_unlimited(self, text: str, *, reply_mode: str = "short") -> str:
+        if reply_mode == "code_block":
+            return _clean_code_text(text)
+        return _clean_reply_text_for_mode(text, reply_mode=reply_mode)
 
 
 def parse_model_reply(text: str) -> ReplyParseResult:
@@ -101,6 +119,8 @@ def parse_model_reply(text: str) -> ReplyParseResult:
         cleaned = _empty_reply_fallback(original)
     if reply_mode == "short":
         reply_mode = detect_reply_mode(cleaned)
+    if reply_mode == "long_text":
+        cleaned = _clean_reply_text_for_mode(cleaned, reply_mode=reply_mode)
     return ReplyParseResult(
         text=cleaned,
         reply_mode=reply_mode,
@@ -145,8 +165,30 @@ def clean_reply_text(text: str) -> str:
     return cleaned.strip()
 
 
+def _clean_reply_text_for_mode(text: str, *, reply_mode: str) -> str:
+    if reply_mode != "long_text":
+        return clean_reply_text(text)
+    cleaned = str(text or "").strip()
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n[ \t]+", "\n", cleaned)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = _strip_fake_media_actions(cleaned)
+    cleaned = _strip_voice_status_text(cleaned)
+    for prefix in ("作为AI语言模型，", "作为 AI 语言模型，"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned.removeprefix(prefix)
+    cleaned = _normalize_long_text_markdown_structure(cleaned)
+    return cleaned.strip()
+
+
 def split_reply_messages(text: str, *, reply_mode: str = "short") -> list[str]:
-    text = _clean_code_text(text) if reply_mode == "code_block" else clean_reply_text(text)
+    text = (
+        _clean_code_text(text)
+        if reply_mode == "code_block"
+        else _clean_reply_text_for_mode(text, reply_mode=reply_mode)
+    )
     if _is_empty_or_meaningless_reply(text):
         return []
     if reply_mode in {"long_text", "code_block"}:
@@ -156,8 +198,8 @@ def split_reply_messages(text: str, *, reply_mode: str = "short") -> list[str]:
         line = line.strip()
         if not line:
             continue
-        for match in _SENTENCE_PATTERN.findall(line):
-            message = match.strip()
+        for part in _split_short_line(line):
+            message = part.strip()
             if message and message != "```":
                 messages.append(message)
     return messages or [text]
@@ -167,6 +209,17 @@ def truncate_naturally(text: str, max_length: int, *, reply_mode: str = "short")
     if len(text) <= max_length:
         return text
     if reply_mode in {"long_text", "code_block"}:
+        pieces = split_reply_messages(text, reply_mode=reply_mode)
+        selected: list[str] = []
+        total = 0
+        for piece in pieces:
+            extra = len(piece) + (1 if selected else 0)
+            if total + extra > max_length:
+                break
+            selected.append(piece)
+            total += extra
+        if selected:
+            return "\n".join(selected)
         return text[:max_length]
     pieces = split_reply_messages(text)
     selected: list[str] = []
@@ -273,6 +326,142 @@ def _strip_orphan_fences(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _normalize_long_text_markdown_structure(text: str) -> str:
+    if not text:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for match in _FENCED_BLOCK_PATTERN.finditer(text):
+        before = text[cursor : match.start()]
+        if before:
+            normalized_before = _normalize_markdown_prose_block(before)
+            if normalized_before:
+                parts.append(normalized_before)
+        parts.append(match.group(0).strip())
+        cursor = match.end()
+    tail = text[cursor:]
+    if tail:
+        normalized_tail = _normalize_markdown_prose_block(tail)
+        if normalized_tail:
+            parts.append(normalized_tail)
+    return "\n".join(part for part in parts if part.strip()).strip()
+
+
+def _normalize_markdown_prose_block(text: str) -> str:
+    lines = [_strip_markdown_heading_line(line) for line in text.splitlines()]
+    lines = _drop_initial_title_lines(lines)
+    lines = _merge_section_heading_lines(lines)
+    return "\n".join(line for line, _was_markdown_heading in lines if line.strip()).strip()
+
+
+def _strip_markdown_heading_line(line: str) -> tuple[str, bool]:
+    stripped = line.strip()
+    was_markdown_heading = False
+    heading_match = _MARKDOWN_HEADING_LINE_PATTERN.fullmatch(stripped)
+    if heading_match:
+        stripped = heading_match.group(1).strip()
+        was_markdown_heading = True
+    stripped, was_wrapped = _strip_whole_line_markdown_wrappers(stripped)
+    was_markdown_heading = was_markdown_heading or was_wrapped
+    heading_match = _MARKDOWN_HEADING_LINE_PATTERN.fullmatch(stripped)
+    if heading_match:
+        stripped = heading_match.group(1).strip()
+        was_markdown_heading = True
+    return stripped.strip(), was_markdown_heading
+
+
+def _strip_whole_line_markdown_wrappers(text: str) -> tuple[str, bool]:
+    stripped = text.strip()
+    was_wrapped = False
+    changed = True
+    while changed:
+        changed = False
+        for pattern in _WHOLE_LINE_MARKDOWN_WRAPPER_PATTERNS:
+            match = pattern.fullmatch(stripped)
+            if not match:
+                continue
+            inner = match.group(1).strip()
+            if not inner:
+                return "", True
+            stripped = inner
+            changed = True
+            was_wrapped = True
+            break
+    return stripped, was_wrapped
+
+
+def _drop_initial_title_lines(lines: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    result = [(line.strip(), was_markdown_heading) for line, was_markdown_heading in lines if line.strip()]
+    while len(result) >= 2 and _looks_like_drop_only_title(result[0], result[1:]):
+        result.pop(0)
+    return result
+
+
+def _looks_like_drop_only_title(
+    line: tuple[str, bool],
+    following_lines: list[tuple[str, bool]],
+) -> bool:
+    stripped, was_markdown_heading = line
+    if not was_markdown_heading:
+        return False
+    if not stripped or _is_section_heading_line(stripped):
+        return False
+    if _ends_like_sentence(stripped):
+        return False
+    if len(stripped) > 24:
+        return False
+    if not any(next_line.strip() for next_line, _was_markdown_heading in following_lines):
+        return False
+    return True
+
+
+def _merge_section_heading_lines(lines: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    result: list[tuple[str, bool]] = []
+    index = 0
+    while index < len(lines):
+        line, was_markdown_heading = lines[index]
+        line = line.strip()
+        if not line:
+            index += 1
+            continue
+        if _is_section_heading_line(line) and index + 1 < len(lines):
+            next_line, next_was_markdown_heading = lines[index + 1]
+            next_line = next_line.strip()
+            if next_line and not _is_section_heading_line(next_line):
+                result.append((
+                    _join_section_heading_with_body(line, next_line),
+                    was_markdown_heading or next_was_markdown_heading,
+                ))
+                index += 2
+                continue
+        result.append((line, was_markdown_heading))
+        index += 1
+    return result
+
+
+def _is_section_heading_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or _ends_like_sentence(stripped):
+        return False
+    return bool(_SECTION_HEADING_MARKER_PATTERN.match(stripped))
+
+
+def _join_section_heading_with_body(heading: str, body: str) -> str:
+    heading = heading.strip()
+    body = body.strip()
+    if not heading:
+        return body
+    if not body:
+        return heading
+    if heading.endswith(("：", ":")):
+        return f"{heading}{body}"
+    return f"{heading}：{body}"
+
+
+def _ends_like_sentence(text: str) -> bool:
+    return text.rstrip().endswith(tuple(_TITLE_SENTENCE_ENDINGS))
+
+
 def _looks_like_standalone_code(text: str) -> bool:
     if "\n" not in text and len(text) < 80:
         return bool(_CODE_LIKE_PATTERN.search(text)) and not _looks_like_chat_text(text)
@@ -301,10 +490,114 @@ def _split_long_or_code_text(text: str) -> list[str]:
 
 
 def _split_paragraphs(text: str) -> list[str]:
-    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
-    if len(paragraphs) > 1:
-        return paragraphs
-    return [text.strip()]
+    paragraphs = [part.strip() for part in re.split(r"\n+", text) if part.strip()]
+    if not paragraphs:
+        return []
+    parts: list[str] = []
+    for paragraph in paragraphs:
+        parts.extend(_split_long_paragraph(paragraph))
+    return parts
+
+
+def _split_long_paragraph(text: str, max_chars: int = 420) -> list[str]:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text]
+    parts: list[str] = []
+    current = ""
+    for part in _split_short_line(text):
+        sentence = part.strip()
+        if not sentence:
+            continue
+        if len(sentence) > max_chars:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.extend(
+                sentence[index : index + max_chars]
+                for index in range(0, len(sentence), max_chars)
+            )
+            continue
+        if current and len(current) + len(sentence) > max_chars:
+            parts.append(current)
+            current = sentence
+        else:
+            current += sentence
+    if current:
+        parts.append(current)
+    return parts or [text]
+
+
+def _split_short_line(text: str) -> list[str]:
+    protected_separators = _protected_separator_indexes(text)
+    parts: list[str] = []
+    start = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        is_terminal = (
+            char in "。！？!?；;." and index not in protected_separators
+        )
+        if not is_terminal:
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text):
+            next_char = text[end]
+            if (
+                next_char in "。！？!?；;."
+                and end not in protected_separators
+            ):
+                end += 1
+                continue
+            break
+        part = text[start:end].strip()
+        if part:
+            parts.append(part)
+        start = end
+        index = end
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or ([text] if text else [])
+
+
+def _protected_separator_indexes(text: str) -> set[int]:
+    protected: set[int] = set()
+    for match in re.finditer(r"https?://[^\s<>\"']+", text, re.IGNORECASE):
+        protected_end = match.end()
+        while protected_end > match.start() and text[protected_end - 1] in ".!?;,":
+            protected_end -= 1
+        protected.update(
+            index
+            for index in range(match.start(), protected_end)
+            if text[index] in ".!?;"
+        )
+    for match in re.finditer(r"(?:[A-Za-z]\.){2,}", text):
+        protected.update(
+            index
+            for index in range(match.start(), match.end())
+            if text[index] == "."
+        )
+    for match in re.finditer(
+        r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e)\.",
+        text,
+        re.IGNORECASE,
+    ):
+        protected.update(
+            index
+            for index in range(match.start(), match.end())
+            if text[index] == "."
+        )
+    for index, char in enumerate(text):
+        if char != "." or index == 0 or index + 1 >= len(text):
+            continue
+        if text[index - 1].isdigit() and text[index + 1].isdigit():
+            protected.add(index)
+        elif text[index - 1].isascii() and text[index + 1].isascii():
+            if text[index - 1].isalnum() and text[index + 1].isalnum():
+                protected.add(index)
+    return protected
 
 
 def _clean_code_text(text: str) -> str:

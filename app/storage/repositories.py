@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import aiosqlite
 
 from app.models import (
+    ConversationSession,
     GroupContext,
+    GroupNewsDeliveryCheckpoint,
+    GroupMemberProfile,
+    GroupNewsSubscription,
     GroupMessageIndex,
     GroupMuteState,
     GroupPendingQuestion,
@@ -15,9 +22,12 @@ from app.models import (
     MemoryProfile,
     PersonaState,
     ScheduledTask,
+    SessionMemory,
+    StockWatchItem,
     StickerAsset,
     StickerAssetAnalysis,
 )
+from app.storage.database import connect_database
 
 
 class ConversationRepository:
@@ -35,8 +45,9 @@ class ConversationRepository:
         role: str,
         content: str,
         message_id: str | None,
+        session_id: str | None = None,
     ) -> None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO conversations (
@@ -47,8 +58,9 @@ class ConversationRepository:
                   user_name,
                   role,
                   content,
-                  message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  message_id,
+                  session_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
@@ -59,6 +71,7 @@ class ConversationRepository:
                     role,
                     content,
                     message_id,
+                    session_id,
                 ),
             )
             await db.commit()
@@ -69,11 +82,18 @@ class ConversationRepository:
         scope_id: str,
         *,
         limit: int,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        async with aiosqlite.connect(self._database_path) as db:
+        conditions = ["scope_type = ?", "scope_id = ?"]
+        parameters: list[Any] = [scope_type, scope_id]
+        if session_id is not None:
+            conditions.append("session_id = ?")
+            parameters.append(session_id)
+        parameters.append(limit)
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                """
+                f"""
                 SELECT
                   trace_id,
                   scope_type,
@@ -83,16 +103,825 @@ class ConversationRepository:
                   role,
                   content,
                   message_id,
+                  session_id,
                   created_at
                 FROM conversations
-                WHERE scope_type = ? AND scope_id = ?
+                WHERE {' AND '.join(conditions)}
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (scope_type, scope_id, limit),
+                parameters,
             )
             rows = await cursor.fetchall()
         return [dict(row) for row in reversed(rows)]
+
+
+class ConversationSessionRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def create(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        initiator_user_id: str,
+        root_message_id: str | None,
+        now,
+        expires_at,
+    ) -> ConversationSession:
+        session_id = uuid4().hex
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO conversation_sessions (
+                  session_id,
+                  scope_type,
+                  scope_id,
+                  initiator_user_id,
+                  root_message_id,
+                  status,
+                  last_activity_at,
+                  expires_at
+                ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (
+                    session_id,
+                    scope_type,
+                    scope_id,
+                    initiator_user_id,
+                    root_message_id,
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+            await db.commit()
+        session = await self.get(session_id)
+        if session is None:
+            raise RuntimeError("created conversation session was not found")
+        return session
+
+    async def get(self, session_id: str) -> ConversationSession | None:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  session_id,
+                  scope_type,
+                  scope_id,
+                  initiator_user_id,
+                  root_message_id,
+                  status,
+                  last_activity_at,
+                  expires_at,
+                  close_reason,
+                  closed_at,
+                  created_at
+                FROM conversation_sessions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+        return self._to_conversation_session(row) if row is not None else None
+
+    async def get_latest_for_scope(
+        self,
+        scope_type: str,
+        scope_id: str,
+        *,
+        initiator_user_id: str | None = None,
+    ) -> ConversationSession | None:
+        conditions = [
+            "scope_type = ?",
+            "scope_id = ?",
+            "status IN ('active', 'dormant', 'suspended')",
+        ]
+        parameters: list[Any] = [scope_type, scope_id]
+        if initiator_user_id is not None:
+            conditions.append("initiator_user_id = ?")
+            parameters.append(initiator_user_id)
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT
+                  session_id,
+                  scope_type,
+                  scope_id,
+                  initiator_user_id,
+                  root_message_id,
+                  status,
+                  last_activity_at,
+                  expires_at,
+                  close_reason,
+                  closed_at,
+                  created_at
+                FROM conversation_sessions
+                WHERE {' AND '.join(conditions)}
+                ORDER BY last_activity_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                parameters,
+            )
+            row = await cursor.fetchone()
+        return self._to_conversation_session(row) if row is not None else None
+
+    async def activate(
+        self,
+        session_id: str,
+        *,
+        now,
+        expires_at,
+    ) -> ConversationSession:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                UPDATE conversation_sessions
+                SET
+                  status = 'active',
+                  last_activity_at = ?,
+                  expires_at = ?,
+                  close_reason = NULL,
+                  closed_at = NULL
+                WHERE session_id = ?
+                """,
+                (now.isoformat(), expires_at.isoformat(), session_id),
+            )
+            await db.commit()
+        session = await self.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        return session
+
+    async def mark_dormant(self, session_id: str) -> None:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                UPDATE conversation_sessions
+                SET status = 'dormant'
+                WHERE session_id = ? AND status = 'active'
+                """,
+                (session_id,),
+            )
+            await db.commit()
+
+    async def suspend_scope(self, scope_type: str, scope_id: str) -> int:
+        async with connect_database(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                UPDATE conversation_sessions
+                SET status = 'suspended'
+                WHERE scope_type = ?
+                  AND scope_id = ?
+                  AND status IN ('active', 'dormant')
+                """,
+                (scope_type, scope_id),
+            )
+            await db.commit()
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def _to_conversation_session(row: aiosqlite.Row) -> ConversationSession:
+        return ConversationSession(
+            session_id=str(row["session_id"]),
+            scope_type=str(row["scope_type"]),
+            scope_id=str(row["scope_id"]),
+            initiator_user_id=str(row["initiator_user_id"]),
+            root_message_id=row["root_message_id"],
+            status=str(row["status"]),
+            last_activity_at=str(row["last_activity_at"]),
+            expires_at=str(row["expires_at"]),
+            close_reason=row["close_reason"],
+            closed_at=row["closed_at"],
+            created_at=row["created_at"],
+        )
+
+
+class SessionMemoryRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def get(self, session_id: str) -> SessionMemory | None:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT session_id, summary, keywords, sample_count, state, updated_at
+                FROM session_memories
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+        return self._to_session_memory(row) if row is not None else None
+
+    async def upsert(
+        self,
+        *,
+        session_id: str,
+        summary: str,
+        keywords: tuple[str, ...],
+        sample_count: int,
+        state: str = "temporary",
+    ) -> SessionMemory:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO session_memories (
+                  session_id, summary, keywords, sample_count, state, updated_at
+                ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                  summary = excluded.summary,
+                  keywords = excluded.keywords,
+                  sample_count = excluded.sample_count,
+                  state = excluded.state,
+                  updated_at = datetime('now')
+                """,
+                (
+                    session_id,
+                    summary,
+                    json.dumps(list(keywords), ensure_ascii=False),
+                    sample_count,
+                    state,
+                ),
+            )
+            await db.commit()
+        memory = await self.get(session_id)
+        if memory is None:
+            raise RuntimeError("upserted session memory was not found")
+        return memory
+
+    @staticmethod
+    def _to_session_memory(row: aiosqlite.Row) -> SessionMemory:
+        try:
+            keywords = tuple(str(value) for value in json.loads(str(row["keywords"])))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            keywords = tuple(
+                value for value in str(row["keywords"]).split(",") if value
+            )
+        return SessionMemory(
+            session_id=str(row["session_id"]),
+            summary=str(row["summary"]),
+            keywords=keywords,
+            sample_count=int(row["sample_count"]),
+            state=str(row["state"]),
+            updated_at=row["updated_at"],
+        )
+
+
+class GroupMemberProfileRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def get(self, group_id: str, user_id: str) -> GroupMemberProfile | None:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  user_id,
+                  display_name,
+                  summary,
+                  metrics_json,
+                  message_count,
+                  updated_at
+                FROM group_member_profiles
+                WHERE group_id = ? AND user_id = ?
+                """,
+                (group_id, user_id),
+            )
+            row = await cursor.fetchone()
+        return self._to_profile(row) if row is not None else None
+
+    async def upsert(
+        self,
+        *,
+        group_id: str,
+        user_id: str,
+        display_name: str | None,
+        summary: str,
+        metrics: dict[str, int],
+        message_count: int,
+    ) -> GroupMemberProfile:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO group_member_profiles (
+                  group_id,
+                  user_id,
+                  display_name,
+                  summary,
+                  metrics_json,
+                  message_count,
+                  updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(group_id, user_id) DO UPDATE SET
+                  display_name = excluded.display_name,
+                  summary = excluded.summary,
+                  metrics_json = excluded.metrics_json,
+                  message_count = excluded.message_count,
+                  updated_at = datetime('now')
+                """,
+                (
+                    group_id,
+                    user_id,
+                    display_name,
+                    summary,
+                    json.dumps(metrics, ensure_ascii=False, sort_keys=True),
+                    message_count,
+                ),
+            )
+            await db.commit()
+        profile = await self.get(group_id, user_id)
+        if profile is None:
+            raise RuntimeError("updated group member profile was not found")
+        return profile
+
+    @staticmethod
+    def _to_profile(row: aiosqlite.Row) -> GroupMemberProfile:
+        raw_metrics = json.loads(str(row["metrics_json"] or "{}"))
+        metrics = {
+            str(key): int(value)
+            for key, value in raw_metrics.items()
+            if type(value) is int and int(value) >= 0
+        }
+        return GroupMemberProfile(
+            group_id=str(row["group_id"]),
+            user_id=str(row["user_id"]),
+            display_name=row["display_name"],
+            summary=str(row["summary"]),
+            metrics=metrics,
+            message_count=int(row["message_count"]),
+            updated_at=row["updated_at"],
+        )
+
+
+class GroupNewsSubscriptionRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def get(self, group_id: str) -> GroupNewsSubscription | None:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  enabled,
+                  send_time,
+                  timezone,
+                  categories,
+                  last_sent_date,
+                  updated_by,
+                  updated_at
+                FROM group_news_subscriptions
+                WHERE group_id = ?
+                """,
+                (group_id,),
+            )
+            row = await cursor.fetchone()
+        return self._to_subscription(row) if row is not None else None
+
+    async def set_enabled(
+        self,
+        *,
+        group_id: str,
+        enabled: bool,
+        send_time: str,
+        timezone: str,
+        categories: tuple[str, ...],
+        updated_by: str,
+    ) -> GroupNewsSubscription:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO group_news_subscriptions (
+                  group_id,
+                  enabled,
+                  send_time,
+                  timezone,
+                  categories,
+                  updated_by,
+                  updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(group_id) DO UPDATE SET
+                  enabled = excluded.enabled,
+                  send_time = excluded.send_time,
+                  timezone = excluded.timezone,
+                  categories = excluded.categories,
+                  updated_by = excluded.updated_by,
+                  updated_at = datetime('now')
+                """,
+                (
+                    group_id,
+                    int(enabled),
+                    send_time,
+                    timezone,
+                    ",".join(categories),
+                    updated_by,
+                ),
+            )
+            await db.execute(
+                "DELETE FROM group_news_delivery_checkpoints WHERE group_id = ?",
+                (group_id,),
+            )
+            await db.commit()
+        subscription = await self.get(group_id)
+        if subscription is None:
+            raise RuntimeError("updated news subscription was not found")
+        return subscription
+
+    async def list_due(
+        self,
+        *,
+        local_date: date,
+        local_time: str,
+    ) -> list[GroupNewsSubscription]:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  enabled,
+                  send_time,
+                  timezone,
+                  categories,
+                  last_sent_date,
+                  updated_by,
+                  updated_at
+                FROM group_news_subscriptions
+                WHERE enabled = 1
+                  AND send_time <= ?
+                  AND (last_sent_date IS NULL OR last_sent_date <> ?)
+                ORDER BY send_time, group_id
+                """,
+                (local_time, local_date.isoformat()),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_subscription(row) for row in rows]
+
+    async def mark_sent(self, group_id: str, local_date: date) -> None:
+        await self.complete_delivery(group_id, local_date)
+
+    async def get_or_create_delivery_checkpoint(
+        self,
+        *,
+        group_id: str,
+        local_date: date,
+        messages: tuple[str, ...],
+    ) -> GroupNewsDeliveryCheckpoint:
+        serialized = json.dumps(list(messages), ensure_ascii=False, separators=(",", ":"))
+        delivery_date = local_date.isoformat()
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                DELETE FROM group_news_delivery_checkpoints
+                WHERE group_id = ? AND delivery_date < ?
+                """,
+                (group_id, delivery_date),
+            )
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO group_news_delivery_checkpoints (
+                  group_id,
+                  delivery_date,
+                  messages_json,
+                  next_message_index
+                ) VALUES (?, ?, ?, 0)
+                """,
+                (group_id, delivery_date, serialized),
+            )
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  delivery_date,
+                  messages_json,
+                  next_message_index,
+                  created_at,
+                  updated_at
+                FROM group_news_delivery_checkpoints
+                WHERE group_id = ? AND delivery_date = ?
+                """,
+                (group_id, delivery_date),
+            )
+            row = await cursor.fetchone()
+            await db.commit()
+        if row is None:
+            raise RuntimeError("news delivery checkpoint was not created")
+        return self._to_delivery_checkpoint(row)
+
+    async def get_delivery_checkpoint(
+        self,
+        *,
+        group_id: str,
+        local_date: date,
+    ) -> GroupNewsDeliveryCheckpoint | None:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                  group_id,
+                  delivery_date,
+                  messages_json,
+                  next_message_index,
+                  created_at,
+                  updated_at
+                FROM group_news_delivery_checkpoints
+                WHERE group_id = ? AND delivery_date = ?
+                """,
+                (group_id, local_date.isoformat()),
+            )
+            row = await cursor.fetchone()
+        return self._to_delivery_checkpoint(row) if row is not None else None
+
+    async def advance_delivery_checkpoint(
+        self,
+        *,
+        group_id: str,
+        local_date: date,
+        expected_index: int,
+    ) -> None:
+        async with connect_database(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                UPDATE group_news_delivery_checkpoints
+                SET next_message_index = next_message_index + 1,
+                    updated_at = datetime('now')
+                WHERE group_id = ?
+                  AND delivery_date = ?
+                  AND next_message_index = ?
+                """,
+                (group_id, local_date.isoformat(), expected_index),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise RuntimeError("news delivery checkpoint did not advance")
+            await db.commit()
+
+    async def complete_delivery(self, group_id: str, local_date: date) -> None:
+        delivery_date = local_date.isoformat()
+        async with connect_database(self._database_path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                UPDATE group_news_subscriptions
+                SET last_sent_date = ?, updated_at = datetime('now')
+                WHERE group_id = ? AND enabled = 1
+                """,
+                (delivery_date, group_id),
+            )
+            await db.execute(
+                """
+                DELETE FROM group_news_delivery_checkpoints
+                WHERE group_id = ? AND delivery_date = ?
+                """,
+                (group_id, delivery_date),
+            )
+            await db.commit()
+
+    @staticmethod
+    def _to_subscription(row: aiosqlite.Row) -> GroupNewsSubscription:
+        return GroupNewsSubscription(
+            group_id=str(row["group_id"]),
+            enabled=bool(row["enabled"]),
+            send_time=str(row["send_time"]),
+            timezone=str(row["timezone"]),
+            categories=tuple(
+                item for item in str(row["categories"] or "").split(",") if item
+            ),
+            last_sent_date=row["last_sent_date"],
+            updated_by=str(row["updated_by"]),
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _to_delivery_checkpoint(
+        row: aiosqlite.Row,
+    ) -> GroupNewsDeliveryCheckpoint:
+        try:
+            raw_messages = json.loads(str(row["messages_json"]))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("news delivery checkpoint JSON is invalid") from exc
+        if not isinstance(raw_messages, list) or not all(
+            isinstance(item, str) for item in raw_messages
+        ):
+            raise RuntimeError("news delivery checkpoint messages are invalid")
+        next_index = int(row["next_message_index"])
+        if next_index < 0 or next_index > len(raw_messages):
+            raise RuntimeError("news delivery checkpoint cursor is invalid")
+        return GroupNewsDeliveryCheckpoint(
+            group_id=str(row["group_id"]),
+            delivery_date=str(row["delivery_date"]),
+            messages=tuple(raw_messages),
+            next_message_index=next_index,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+class StockWatchRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def upsert(
+        self,
+        *,
+        user_id: str,
+        scope_type: str,
+        scope_id: str,
+        symbol: str,
+        market: str,
+        cost_price: float | None,
+        quantity: float | None,
+        alert_threshold_percent: float,
+    ) -> StockWatchItem:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO stock_watch_items (
+                  user_id,
+                  scope_type,
+                  scope_id,
+                  symbol,
+                  market,
+                  cost_price,
+                  quantity,
+                  alert_threshold_percent,
+                  enabled,
+                  updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+                ON CONFLICT(user_id, scope_type, scope_id, symbol) DO UPDATE SET
+                  market = excluded.market,
+                  cost_price = excluded.cost_price,
+                  quantity = excluded.quantity,
+                  alert_threshold_percent = excluded.alert_threshold_percent,
+                  enabled = 1,
+                  updated_at = datetime('now')
+                """,
+                (
+                    user_id,
+                    scope_type,
+                    scope_id,
+                    symbol,
+                    market,
+                    cost_price,
+                    quantity,
+                    alert_threshold_percent,
+                ),
+            )
+            await db.commit()
+        item = await self.get(user_id, scope_type, scope_id, symbol)
+        if item is None:
+            raise RuntimeError("updated stock watch item was not found")
+        return item
+
+    async def get(
+        self,
+        user_id: str,
+        scope_type: str,
+        scope_id: str,
+        symbol: str,
+    ) -> StockWatchItem | None:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM stock_watch_items
+                WHERE user_id = ? AND scope_type = ? AND scope_id = ? AND symbol = ?
+                """,
+                (user_id, scope_type, scope_id, symbol),
+            )
+            row = await cursor.fetchone()
+        return self._to_watch_item(row) if row is not None else None
+
+    async def delete(
+        self,
+        user_id: str,
+        scope_type: str,
+        scope_id: str,
+        symbol: str,
+    ) -> bool:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                DELETE FROM stock_alert_states
+                WHERE watch_item_id IN (
+                  SELECT id FROM stock_watch_items
+                  WHERE user_id = ? AND scope_type = ? AND scope_id = ? AND symbol = ?
+                )
+                """,
+                (user_id, scope_type, scope_id, symbol),
+            )
+            cursor = await db.execute(
+                """
+                DELETE FROM stock_watch_items
+                WHERE user_id = ? AND scope_type = ? AND scope_id = ? AND symbol = ?
+                """,
+                (user_id, scope_type, scope_id, symbol),
+            )
+            await db.commit()
+        return bool(cursor.rowcount)
+
+    async def list_for_scope(
+        self,
+        user_id: str,
+        scope_type: str,
+        scope_id: str,
+    ) -> list[StockWatchItem]:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM stock_watch_items
+                WHERE user_id = ? AND scope_type = ? AND scope_id = ? AND enabled = 1
+                ORDER BY market, symbol
+                """,
+                (user_id, scope_type, scope_id),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_watch_item(row) for row in rows]
+
+    async def list_enabled(self, *, limit: int = 500) -> list[StockWatchItem]:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM stock_watch_items
+                WHERE enabled = 1
+                ORDER BY id
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_watch_item(row) for row in rows]
+
+    async def record_alert_once(
+        self,
+        *,
+        watch_item_id: int,
+        trading_date: date,
+        direction: str,
+        last_price: float,
+    ) -> bool:
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be up or down")
+        async with connect_database(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO stock_alert_states (
+                  watch_item_id,
+                  trading_date,
+                  direction,
+                  last_price
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (watch_item_id, trading_date.isoformat(), direction, last_price),
+            )
+            await db.commit()
+        return bool(cursor.rowcount)
+
+    async def release_alert(
+        self,
+        *,
+        watch_item_id: int,
+        trading_date: date,
+        direction: str,
+    ) -> None:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                DELETE FROM stock_alert_states
+                WHERE watch_item_id = ? AND trading_date = ? AND direction = ?
+                """,
+                (watch_item_id, trading_date.isoformat(), direction),
+            )
+            await db.commit()
+
+    @staticmethod
+    def _to_watch_item(row: aiosqlite.Row) -> StockWatchItem:
+        return StockWatchItem(
+            id=int(row["id"]),
+            user_id=str(row["user_id"]),
+            scope_type=str(row["scope_type"]),
+            scope_id=str(row["scope_id"]),
+            symbol=str(row["symbol"]),
+            market=str(row["market"]),
+            cost_price=float(row["cost_price"]) if row["cost_price"] is not None else None,
+            quantity=float(row["quantity"]) if row["quantity"] is not None else None,
+            alert_threshold_percent=float(row["alert_threshold_percent"]),
+            enabled=bool(row["enabled"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
 
 class PersonaStateRepository:
@@ -100,7 +929,7 @@ class PersonaStateRepository:
         self._database_path = Path(database_path)
 
     async def get_or_create(self, scope_type: str, scope_id: str) -> PersonaState:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute(
                 """
@@ -135,7 +964,7 @@ class PersonaStateRepository:
         return self._to_persona_state(row)
 
     async def save(self, state: PersonaState) -> PersonaState:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 UPDATE persona_states
@@ -178,7 +1007,7 @@ class MemoryProfileRepository:
         self._database_path = Path(database_path)
 
     async def get_by_user_id(self, user_id: str) -> MemoryProfile | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -214,7 +1043,7 @@ class MemoryProfileRepository:
         important_events: str = "",
         safety_notes: str = "",
     ) -> MemoryProfile:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO memory_profiles (
@@ -256,7 +1085,7 @@ class MemoryProfileRepository:
         return profile
 
     async def clear(self, user_id: str) -> None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute("DELETE FROM memory_profiles WHERE user_id = ?", (user_id,))
             await db.commit()
 
@@ -279,7 +1108,7 @@ class GroupContextRepository:
         self._database_path = Path(database_path)
 
     async def get_by_group_id(self, group_id: str) -> GroupContext | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -309,7 +1138,7 @@ class GroupContextRepository:
         last_message_id: str | None,
         message_count: int,
     ) -> GroupContext:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO group_contexts (
@@ -351,13 +1180,14 @@ class GroupMuteStateRepository:
         self._database_path = Path(database_path)
 
     async def get_by_group_id(self, group_id: str) -> GroupMuteState | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
                 SELECT
                   group_id,
                   muted,
+                  mode,
                   updated_by,
                   reason,
                   updated_at
@@ -379,23 +1209,42 @@ class GroupMuteStateRepository:
         updated_by: str,
         reason: str,
     ) -> GroupMuteState:
-        async with aiosqlite.connect(self._database_path) as db:
+        return await self.set_mode(
+            group_id=group_id,
+            mode="chat_muted" if muted else "normal",
+            updated_by=updated_by,
+            reason=reason,
+        )
+
+    async def set_mode(
+        self,
+        *,
+        group_id: str,
+        mode: str,
+        updated_by: str,
+        reason: str,
+    ) -> GroupMuteState:
+        if mode not in {"normal", "chat_muted", "all_muted"}:
+            raise ValueError(f"unsupported group mute mode: {mode}")
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO group_mute_states (
                   group_id,
                   muted,
+                  mode,
                   updated_by,
                   reason,
                   updated_at
-                ) VALUES (?, ?, ?, ?, datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(group_id) DO UPDATE SET
                   muted = excluded.muted,
+                  mode = excluded.mode,
                   updated_by = excluded.updated_by,
                   reason = excluded.reason,
                   updated_at = datetime('now')
                 """,
-                (group_id, int(muted), updated_by, reason),
+                (group_id, int(mode != "normal"), mode, updated_by, reason),
             )
             await db.commit()
         state = await self.get_by_group_id(group_id)
@@ -404,13 +1253,14 @@ class GroupMuteStateRepository:
         return state
 
     async def list_muted(self, *, limit: int = 20) -> list[GroupMuteState]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
                 SELECT
                   group_id,
                   muted,
+                  mode,
                   updated_by,
                   reason,
                   updated_at
@@ -438,12 +1288,13 @@ class GroupMuteStateRepository:
         else:
             where_clause += " AND group_id = ?"
             params = (updated_by, reason, group_id)
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             cursor = await db.execute(
                 f"""
                 UPDATE group_mute_states
                 SET
                   muted = 0,
+                  mode = 'normal',
                   updated_by = ?,
                   reason = ?,
                   updated_at = datetime('now')
@@ -461,6 +1312,7 @@ class GroupMuteStateRepository:
             updated_by=str(row["updated_by"]),
             reason=str(row["reason"]),
             updated_at=row["updated_at"],
+            mode=str(row["mode"]),
         )
 
 
@@ -476,10 +1328,11 @@ class BotSentMessageRepository:
         group_id: str,
         user_id: str,
         original_message_id: str | None,
+        session_id: str | None = None,
     ) -> None:
         if not message_id:
             return
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO bot_sent_messages (
@@ -488,17 +1341,25 @@ class BotSentMessageRepository:
                   group_id,
                   user_id,
                   original_message_id,
+                  session_id,
                   created_at
-                ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
                 """,
-                (message_id, trace_id, group_id, user_id, original_message_id),
+                (
+                    message_id,
+                    trace_id,
+                    group_id,
+                    user_id,
+                    original_message_id,
+                    session_id,
+                ),
             )
             await db.commit()
 
     async def is_bot_sent_message(self, message_id: str | None) -> bool:
         if not message_id:
             return False
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             cursor = await db.execute(
                 """
                 SELECT 1
@@ -510,6 +1371,24 @@ class BotSentMessageRepository:
             )
             row = await cursor.fetchone()
         return row is not None
+
+    async def get_session_id(self, message_id: str | None) -> str | None:
+        if not message_id:
+            return None
+        async with connect_database(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                SELECT session_id
+                FROM bot_sent_messages
+                WHERE message_id = ?
+                LIMIT 1
+                """,
+                (message_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return str(row[0])
 
 
 class GroupPendingQuestionRepository:
@@ -525,7 +1404,7 @@ class GroupPendingQuestionRepository:
         message_id: str,
         question_text: str,
     ) -> GroupPendingQuestion:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT OR IGNORE INTO group_pending_questions (
@@ -550,7 +1429,7 @@ class GroupPendingQuestionRepository:
         group_id: str,
         message_id: str,
     ) -> GroupPendingQuestion | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -580,7 +1459,7 @@ class GroupPendingQuestionRepository:
         *,
         limit: int = 3,
     ) -> list[GroupPendingQuestion]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -605,7 +1484,7 @@ class GroupPendingQuestionRepository:
         return [self._to_pending_question(row) for row in rows]
 
     async def mark_answered(self, question_id: int) -> None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 UPDATE group_pending_questions
@@ -646,7 +1525,7 @@ class ScheduledTaskRepository:
         message: str,
         due_at: str,
     ) -> ScheduledTask:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO scheduled_tasks (
@@ -670,7 +1549,7 @@ class ScheduledTaskRepository:
         return task
 
     async def get_by_id(self, task_id: int) -> ScheduledTask | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -697,7 +1576,7 @@ class ScheduledTaskRepository:
         return self._to_scheduled_task(row)
 
     async def list_pending_due(self, *, now_iso: str, limit: int = 20) -> list[ScheduledTask]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -736,7 +1615,7 @@ class ScheduledTaskRepository:
             where += " AND user_id = ?"
             params.append(user_id)
         params.append(limit)
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"""
@@ -768,7 +1647,7 @@ class ScheduledTaskRepository:
         if not include_all:
             where += " AND user_id = ?"
             params.append(user_id)
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             cursor = await db.execute(
                 f"""
                 UPDATE scheduled_tasks
@@ -791,7 +1670,7 @@ class ScheduledTaskRepository:
         await self._mark(task_id, "cancelled")
 
     async def _mark(self, task_id: int, status: str) -> None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 UPDATE scheduled_tasks
@@ -838,7 +1717,7 @@ class StickerAssetRepository:
         tags: str,
         risk_level: str = "safe",
     ) -> StickerAsset:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO sticker_assets (
@@ -901,7 +1780,7 @@ class StickerAssetRepository:
         return await self._get_one("asset_id = ?", (asset_id,))
 
     async def count(self) -> int:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             cursor = await db.execute("SELECT COUNT(*) FROM sticker_assets")
             row = await cursor.fetchone()
         return int(row[0]) if row is not None else 0
@@ -912,7 +1791,7 @@ class StickerAssetRepository:
         query_tags: list[str],
         limit: int = 20,
     ) -> list[StickerAsset]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -951,7 +1830,7 @@ class StickerAssetRepository:
         return matched or assets
 
     async def mark_used(self, asset_id: str) -> None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 UPDATE sticker_assets
@@ -968,7 +1847,7 @@ class StickerAssetRepository:
         where: str,
         params: tuple[object, ...],
     ) -> StickerAsset | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"""
@@ -1024,7 +1903,7 @@ class StickerAssetAnalysisRepository:
     async def get(self, asset_id: str | None) -> StickerAssetAnalysis | None:
         if not asset_id:
             return None
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1051,7 +1930,7 @@ class StickerAssetAnalysisRepository:
         return self._to_analysis(row)
 
     async def ensure_pending(self, asset_id: str) -> StickerAssetAnalysis:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT OR IGNORE INTO sticker_asset_analysis (
@@ -1079,7 +1958,7 @@ class StickerAssetAnalysisRepository:
         reply_usage_hint: str,
         safety_category: str,
     ) -> StickerAssetAnalysis:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO sticker_asset_analysis (
@@ -1127,7 +2006,7 @@ class StickerAssetAnalysisRepository:
         asset_id: str,
         safety_category: str = "unknown",
     ) -> StickerAssetAnalysis:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO sticker_asset_analysis (
@@ -1155,7 +2034,7 @@ class StickerAssetAnalysisRepository:
         query_tags: list[str],
         limit: int = 50,
     ) -> list[str]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1201,7 +2080,7 @@ class StickerAssetAnalysisRepository:
         return [asset_id for _, asset_id in scored]
 
     async def list_failed_unknown(self, *, limit: int = 200) -> list[StickerAssetAnalysis]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1259,7 +2138,7 @@ class GroupSemanticTermRepository:
         description = description.strip()
         if not group_id or not term or not description:
             raise ValueError("group_id, term and description are required")
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO group_semantic_terms (
@@ -1297,7 +2176,7 @@ class GroupSemanticTermRepository:
         return term_row
 
     async def get(self, group_id: str, term: str) -> GroupSemanticTerm | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1328,7 +2207,7 @@ class GroupSemanticTermRepository:
     ) -> list[GroupSemanticTerm]:
         if not group_id or not text.strip():
             return []
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1356,7 +2235,7 @@ class GroupSemanticTermRepository:
         return matched[:limit]
 
     async def list_recent(self, group_id: str, *, limit: int = 20) -> list[GroupSemanticTerm]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1406,7 +2285,7 @@ class GroupMessageIndexRepository:
     ) -> None:
         if not group_id or not message_id:
             return
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO group_message_index (
@@ -1450,7 +2329,7 @@ class GroupMessageIndexRepository:
     async def get(self, group_id: str, message_id: str | None) -> GroupMessageIndex | None:
         if not message_id:
             return None
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1476,7 +2355,7 @@ class GroupMessageIndexRepository:
         return self._to_group_message_index(row)
 
     async def recent_repeatable(self, group_id: str) -> GroupMessageIndex | None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1505,7 +2384,7 @@ class GroupMessageIndexRepository:
         return self._to_group_message_index(row)
 
     async def recent_messages(self, group_id: str, *, limit: int = 10) -> list[GroupMessageIndex]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1556,7 +2435,7 @@ class MessageRepeatStateRepository:
         repeated_by: str,
         trigger_user_id: str,
     ) -> bool:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             cursor = await db.execute(
                 """
                 INSERT OR IGNORE INTO message_repeat_states (
@@ -1582,7 +2461,7 @@ class MessageRepeatStateRepository:
         if not source_message_ids:
             return False
         placeholders = ",".join("?" for _ in source_message_ids)
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             cursor = await db.execute(
                 f"""
                 SELECT 1
@@ -1615,7 +2494,7 @@ class AuditRepository:
         safety_blocked: bool,
         elapsed_ms: int | None,
     ) -> None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO reply_audits (
@@ -1652,7 +2531,7 @@ class AuditRepository:
         detail: str | None = None,
         trace_id: str | None = None,
     ) -> None:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             await db.execute(
                 """
                 INSERT INTO system_events (
@@ -1667,7 +2546,7 @@ class AuditRepository:
             await db.commit()
 
     async def get_recent_reply_audits(self, *, limit: int = 20) -> list[dict[str, Any]]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1692,7 +2571,7 @@ class AuditRepository:
         return [dict(row) for row in reversed(rows)]
 
     async def get_recent_system_events(self, *, limit: int = 20) -> list[dict[str, Any]]:
-        async with aiosqlite.connect(self._database_path) as db:
+        async with connect_database(self._database_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """

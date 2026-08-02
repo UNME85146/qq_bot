@@ -6,6 +6,7 @@ param(
     [string]$PasswordEnv = "",
     [string]$SudoPasswordEnv = "",
     [switch]$SkipTests,
+    [switch]$RestartNapCat,
     [switch]$SkipNapCatRestart,
     [switch]$AllowDirty,
     [switch]$DryRun
@@ -34,6 +35,12 @@ if ($SudoPasswordEnv) {
 }
 if ($SkipTests) {
     $argsList += "--skip-tests"
+}
+if ($RestartNapCat -and $SkipNapCatRestart) {
+    throw "RestartNapCat and SkipNapCatRestart cannot be used together."
+}
+if ($RestartNapCat) {
+    $argsList += "--restart-napcat"
 }
 if ($SkipNapCatRestart) {
     $argsList += "--skip-napcat-restart"

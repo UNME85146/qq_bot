@@ -65,6 +65,7 @@ class StyleProfileConfig:
     avoid_rules: list[str]
     few_shot_examples: list[str]
     updated_at: str | None
+    character_summary: str = ""
     behavior_profile: BehaviorProfileConfig = field(default_factory=BehaviorProfileConfig)
 
 
@@ -103,12 +104,87 @@ class GroupContext:
 
 
 @dataclass(frozen=True)
+class GroupMemberProfile:
+    group_id: str
+    user_id: str
+    display_name: str | None
+    summary: str
+    metrics: dict[str, int]
+    message_count: int
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class GroupNewsSubscription:
+    group_id: str
+    enabled: bool
+    send_time: str
+    timezone: str
+    categories: tuple[str, ...]
+    last_sent_date: str | None
+    updated_by: str
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class GroupNewsDeliveryCheckpoint:
+    group_id: str
+    delivery_date: str
+    messages: tuple[str, ...]
+    next_message_index: int
+    created_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class StockWatchItem:
+    id: int
+    user_id: str
+    scope_type: str
+    scope_id: str
+    symbol: str
+    market: str
+    cost_price: float | None
+    quantity: float | None
+    alert_threshold_percent: float
+    enabled: bool
+    created_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class ConversationSession:
+    session_id: str
+    scope_type: str
+    scope_id: str
+    initiator_user_id: str
+    root_message_id: str | None
+    status: str
+    last_activity_at: str
+    expires_at: str
+    close_reason: str | None
+    closed_at: str | None
+    created_at: str | None
+
+
+@dataclass(frozen=True)
+class SessionMemory:
+    session_id: str
+    summary: str
+    keywords: tuple[str, ...]
+    sample_count: int
+    state: str
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
 class GroupMuteState:
     group_id: str
     muted: bool
     updated_by: str
     reason: str
     updated_at: str | None
+    mode: str = "normal"
 
 
 @dataclass(frozen=True)
@@ -220,6 +296,8 @@ class ReplyConfig:
     min_delay_ms: int
     max_delay_ms: int
     max_reply_length: int
+    long_text_max_length: int = 2200
+    long_text_max_bubbles: int = 8
 
 
 @dataclass(frozen=True)
@@ -259,42 +337,116 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
-class TTSVoiceProfileConfig:
-    id: str
-    voice: str
-    language: str
-    gender: str
-    prompt_audio_path: str | None = None
-    enabled: bool = True
+class ConversationSessionsConfig:
+    inactivity_seconds: int = 900
+    chat_delay_min_ms: int = 2000
+    chat_delay_max_ms: int = 3000
 
 
 @dataclass(frozen=True)
-class TTSConfig:
+class RetryConfig:
+    max_attempts: int = 3
+    timeout_multipliers: tuple[float, ...] = (1.0, 2.0, 3.0)
+    backoff_seconds: tuple[float, ...] = (2.0, 5.0)
+
+
+@dataclass(frozen=True)
+class VideoConfig:
     enabled: bool = False
-    provider: str = "moss_tts_nano"
-    backend: str = "onnx"
-    execution_provider: str = "cuda"
-    endpoint: str = "http://127.0.0.1:18100/tts"
-    voice: str = "xiaohuang_default"
-    format: str = "wav"
-    max_chars: int = 160
-    request_timeout_seconds: float = 60.0
-    private_enabled: bool = False
-    group_enabled: bool = False
+    host_cache_path: str = "runtime_artifacts/video-cache"
+    container_cache_path: str = "/path/in/container/qq-bot-media"
+    per_message_concurrency: int = 3
+    global_concurrency: int = 6
+    download_timeout_seconds: float = 300.0
+    send_timeout_seconds: float = 90.0
+    qq_video_max_bytes: int | None = None
+    min_free_bytes: int = 0
+    http_proxy_env: str = "QQ_BOT_VIDEO_HTTP_PROXY"
+    socks_proxy_env: str = "QQ_BOT_VIDEO_SOCKS_PROXY"
+    progress_threshold_seconds: float = 3.0
+    domain_failure_threshold: int = 2
+    domain_recovery_seconds: float = 120.0
+    canonical_url_cache_seconds: float = 3600.0
+    backoff_jitter_seconds: float = 0.5
+
+
+def _default_news_feeds() -> dict[str, tuple[str, ...]]:
+    return {
+        "politics": (),
+        "business": (),
+        "technology": (),
+        "finance": (),
+    }
+
+
+@dataclass(frozen=True)
+class NewsConfig:
+    enabled: bool = False
+    default_time: str = "08:00"
+    timezone: str = "Asia/Shanghai"
+    feeds: dict[str, tuple[str, ...]] = field(default_factory=_default_news_feeds)
+
+
+@dataclass(frozen=True)
+class MarketProviderConfig:
+    provider: str = ""
+    base_url: str = ""
+    api_key_env: str = ""
+
+
+@dataclass(frozen=True)
+class MarketsConfig:
+    enabled: bool = False
+    alert_threshold_percent: float = 3.0
+    poll_interval_seconds: int = 300
+    command_timeout_seconds: float = 20.0
+    provider_timeout_seconds: float = 8.0
+    circuit_failure_threshold: int = 3
+    circuit_recovery_seconds: float = 60.0
+    a_share: MarketProviderConfig = field(default_factory=MarketProviderConfig)
+    a_share_fallbacks: tuple[MarketProviderConfig, ...] = field(
+        default_factory=lambda: (MarketProviderConfig(provider="sina"),)
+    )
+    us_share: MarketProviderConfig = field(default_factory=MarketProviderConfig)
+
+
+@dataclass(frozen=True)
+class SearchConfig:
+    enabled: bool = False
+    provider: str = ""
+    base_url: str = ""
+    api_key_env: str = ""
+
+
+@dataclass(frozen=True)
+class SpeechConfig:
+    enabled: bool = False
+    base_url: str = ""
+    api_key_env: str = ""
+    model: str = ""
+    voice: str = ""
+    format: str = "mp3"
+    timeout_seconds: float = 60.0
+    send_timeout_seconds: float = 60.0
+    cache_dir: str = "runtime_artifacts/speech"
+    max_chars: int = 4096
+    private_enabled: bool = True
+    group_enabled: bool = True
     private_cooldown_seconds: float = 30.0
     group_cooldown_seconds: float = 60.0
-    cache_dir: str = "data/tts/cache"
-    default_voice_profile_id: str = "xiaohuang_default"
-    voice_profiles: tuple[TTSVoiceProfileConfig, ...] = field(default_factory=tuple)
 
-    def current_profile(self) -> TTSVoiceProfileConfig | None:
-        for profile in self.voice_profiles:
-            if profile.id == self.default_voice_profile_id and profile.enabled:
-                return profile
-        for profile in self.voice_profiles:
-            if profile.enabled:
-                return profile
-        return None
+@dataclass(frozen=True)
+class ImageGenerationConfig:
+    enabled: bool = False
+    base_url: str = ""
+    api_key_env: str = ""
+    generation_endpoint: str = "/images/generations"
+    edit_endpoint: str = "/images/edits"
+    model: str = ""
+    timeout_seconds: float = 120.0
+    send_timeout_seconds: float = 60.0
+    cache_dir: str = "runtime_artifacts/image-generation"
+    edit_window_seconds: int = 180
 
 
 @dataclass(frozen=True)
@@ -308,7 +460,16 @@ class AppConfig:
     limits: LimitsConfig
     storage: StorageConfig
     logging: LoggingConfig
-    tts: TTSConfig = field(default_factory=TTSConfig)
+    conversation_sessions: ConversationSessionsConfig = field(
+        default_factory=ConversationSessionsConfig
+    )
+    retry: RetryConfig = field(default_factory=RetryConfig)
+    video: VideoConfig = field(default_factory=VideoConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
+    markets: MarketsConfig = field(default_factory=MarketsConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
+    speech: SpeechConfig = field(default_factory=SpeechConfig)
+    image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)
 
 
 @dataclass(frozen=True)
@@ -330,6 +491,8 @@ class NormalizedMessage:
     trigger_reason: str | None = None
     reply_to_message_id: str | None = None
     media_items: tuple[MediaItem, ...] = field(default_factory=tuple)
+    group_role: str = "unknown"
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
