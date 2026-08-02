@@ -230,12 +230,18 @@ class InstrumentedMarketProvider:
             async with asyncio.timeout(self._attempt_timeout_seconds):
                 quote = await self._provider.quote(market, symbol)
         except Exception as exc:
+            error_category = classify_provider_error(exc)
             await self._record(
                 symbol=symbol,
                 success=False,
                 started=started,
-                error_category=classify_provider_error(exc),
+                error_category=error_category,
             )
+            if isinstance(exc, TimeoutError):
+                raise MarketProviderUnavailableError(
+                    "market provider timed out",
+                    category=error_category,
+                ) from exc
             raise
         await self._record(symbol=symbol, success=True, started=started)
         return quote
