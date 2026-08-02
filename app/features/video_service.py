@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -779,7 +779,9 @@ def _classify_send_error(exc: Exception) -> RetryClassification:
         return RetryClassification("network_timeout", True)
     if isinstance(exc, _VideoSendError):
         return RetryClassification(exc.category, exc.retryable)
-    text = " ".join(str(exc).lower().split())
+    if type(exc).__name__ == "ApiNotAvailable":
+        return RetryClassification("capability_unsupported", False)
+    text = _exception_text(exc)
     if any(
         marker in text
         for marker in ("unsupported action", "action not found", "retcode=1404")
@@ -795,16 +797,24 @@ def _classify_send_error(exc: Exception) -> RetryClassification:
 
 
 def _probe_response_category(response) -> str | None:
-    if not isinstance(response, dict):
+    if not isinstance(response, Mapping):
         return None
     retcode = response.get("retcode")
-    if retcode == 1404:
+    if str(retcode).strip() == "1404":
         return "capability_unsupported"
     return None
 
 
 def _is_expected_probe_validation_error(exc: Exception) -> bool:
-    text = " ".join(str(exc).lower().split())
+    info = getattr(exc, "info", None)
+    if isinstance(info, Mapping):
+        if _probe_response_category(info) == "capability_unsupported":
+            return False
+        status = str(info.get("status") or "").strip().lower()
+        retcode = str(info.get("retcode") or "").strip()
+        if status == "failed" and retcode not in {"", "0"}:
+            return True
+    text = _exception_text(exc)
     return any(
         marker in text
         for marker in (
@@ -818,6 +828,18 @@ def _is_expected_probe_validation_error(exc: Exception) -> bool:
             "参数",
         )
     )
+
+
+def _exception_text(exc: Exception) -> str:
+    parts = [str(exc)]
+    info = getattr(exc, "info", None)
+    if isinstance(info, Mapping):
+        parts.extend(
+            f"{key}={info[key]}"
+            for key in ("retcode", "status", "message", "wording")
+            if key in info and info[key] is not None
+        )
+    return " ".join(" ".join(parts).lower().split())
 
 
 def _container_file_path(file_path: str, *, host_root: str, container_root: str) -> str:
