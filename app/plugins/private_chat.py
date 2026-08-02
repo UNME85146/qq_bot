@@ -457,6 +457,7 @@ async def _try_handle_private_market_feature(
             bot,
             event,
             structured.messages,
+            fallback_messages=structured.fallback_messages,
             scope_type="private",
             reply_config=_config.reply,
             on_send_error=send_error,

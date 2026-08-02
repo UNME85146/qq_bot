@@ -599,6 +599,7 @@ def _reload_group_chat(new_config) -> None:
             qq_config=new_config.qq,
             default_time=new_config.news.default_time,
             timezone=new_config.news.timezone,
+            model_client=create_model_client(new_config.model),
         )
     if hasattr(group_chat, "_market_command_service"):
         from app.features.market_providers import create_market_providers
@@ -621,7 +622,6 @@ def _reload_group_chat(new_config) -> None:
     if hasattr(group_chat, "_search_command_service"):
         from app.features.search_providers import create_search_provider
         from app.features.search_service import GroupSearchCommandService
-        from app.model.llm_client import create_model_client
         from app.safety.safety_service import SafetyService as SearchSafetyService
         from app.storage.repositories import (
             ConversationRepository,

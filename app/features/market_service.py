@@ -5,7 +5,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.features.contracts import MarketDataProvider, MarketQuote, StructuredReply
@@ -14,11 +14,61 @@ from app.models import NormalizedMessage, StockWatchItem
 from app.storage.repositories import StockWatchRepository
 
 
-_OVERVIEW_SYMBOLS = {
-    "a_share": ("000001.SH", "399001.SZ"),
-    "us_share": ("^GSPC", "^IXIC", "^DJI"),
+@dataclass(frozen=True)
+class _SectorSpec:
+    name: str
+    symbol: str
+    company: str
+
+
+_SECTOR_SPECS = {
+    "a_share": (
+        _SectorSpec("白酒", "600519.SH", "贵州茅台"),
+        _SectorSpec("银行", "601398.SH", "工商银行"),
+        _SectorSpec("保险", "601318.SH", "中国平安"),
+        _SectorSpec("证券", "600030.SH", "中信证券"),
+        _SectorSpec("新能源汽车", "002594.SZ", "比亚迪"),
+        _SectorSpec("动力电池", "300750.SZ", "宁德时代"),
+        _SectorSpec("光伏", "601012.SH", "隆基绿能"),
+        _SectorSpec("半导体", "688981.SH", "中芯国际"),
+        _SectorSpec("消费电子", "002475.SZ", "立讯精密"),
+        _SectorSpec("通信", "600941.SH", "中国移动"),
+        _SectorSpec("人工智能", "603019.SH", "中科曙光"),
+        _SectorSpec("软件", "600588.SH", "用友网络"),
+        _SectorSpec("医药", "600276.SH", "恒瑞医药"),
+        _SectorSpec("医疗器械", "300760.SZ", "迈瑞医疗"),
+        _SectorSpec("家电", "000333.SZ", "美的集团"),
+        _SectorSpec("食品饮料", "603288.SH", "海天味业"),
+        _SectorSpec("电力", "600900.SH", "长江电力"),
+        _SectorSpec("煤炭", "601088.SH", "中国神华"),
+        _SectorSpec("有色金属", "601899.SH", "紫金矿业"),
+        _SectorSpec("军工", "600893.SH", "航发动力"),
+    ),
+    "us_share": (
+        _SectorSpec("消费电子", "AAPL", "苹果"),
+        _SectorSpec("软件", "MSFT", "微软"),
+        _SectorSpec("人工智能", "NVDA", "英伟达"),
+        _SectorSpec("互联网", "GOOGL", "谷歌"),
+        _SectorSpec("电子商务", "AMZN", "亚马逊"),
+        _SectorSpec("社交平台", "META", "脸书母公司"),
+        _SectorSpec("银行", "JPM", "摩根大通"),
+        _SectorSpec("支付", "V", "维萨"),
+        _SectorSpec("创新药", "LLY", "礼来"),
+        _SectorSpec("综合制药", "JNJ", "强生"),
+        _SectorSpec("零售", "WMT", "沃尔玛"),
+        _SectorSpec("饮料", "KO", "可口可乐"),
+        _SectorSpec("新能源汽车", "TSLA", "特斯拉"),
+        _SectorSpec("能源", "XOM", "埃克森美孚"),
+        _SectorSpec("工业设备", "CAT", "卡特彼勒"),
+        _SectorSpec("航空制造", "BA", "波音"),
+        _SectorSpec("通信", "TMUS", "美国移动通信"),
+        _SectorSpec("半导体", "AVGO", "博通"),
+        _SectorSpec("物流地产", "PLD", "安博"),
+        _SectorSpec("公用事业", "NEE", "新纪元能源公司"),
+    ),
 }
 _WATCHLIST_PAGE_SIZE = 4
+_BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 
 
 @dataclass(frozen=True)
@@ -76,14 +126,16 @@ class MarketCommandService:
         if provider is None:
             return MarketCommandResult(True, f"{label}行情功能未配置", "market_unconfigured")
         started = time.perf_counter()
+        sectors = _SECTOR_SPECS[market]
         try:
             async with asyncio.timeout(self._command_timeout_seconds):
                 quotes = list(
                     await asyncio.gather(
                         *(
-                            provider.quote(market, symbol)
-                            for symbol in _OVERVIEW_SYMBOLS[market]
-                        )
+                            provider.quote(market, sector.symbol)
+                            for sector in sectors
+                        ),
+                        return_exceptions=True,
                     )
                 )
         except TimeoutError:
@@ -101,11 +153,24 @@ class MarketCommandService:
                 "market_failed",
             )
         elapsed = time.perf_counter() - started
+        successful = [quote for quote in quotes if isinstance(quote, MarketQuote)]
+        if not successful:
+            return MarketCommandResult(
+                True,
+                f"{label}行情获取失败：数据源暂不可用（耗时 {elapsed:.2f} 秒）",
+                "market_failed",
+            )
+        blocks = [
+            _format_sector_report(index, sector, quote)
+            for index, (sector, quote) in enumerate(zip(sectors, quotes, strict=True), start=1)
+        ]
+        observed_at = _latest_observed_at(successful)
         structured = build_structured_reply(
-            header=f"{label}市场概览｜耗时 {elapsed:.2f} 秒",
-            blocks=[_format_quote(quote) for quote in quotes],
-            page_size=len(quotes),
-            footer="数据可能延迟，仅供参考，不用于自动交易",
+            header=f"{label}20板块核心股报｜查询截止 {observed_at}｜耗时 {elapsed:.2f} 秒",
+            blocks=blocks,
+            page_size=len(blocks),
+            footer="共 20 个板块；数据可能延迟，仅供参考，不用于自动交易",
+            fallback_message=_build_market_brief(label, sectors, quotes, elapsed),
         )
         return MarketCommandResult(
             True,
@@ -238,13 +303,68 @@ def _parse_options(parts: list[str]) -> dict[str, float]:
     return result
 
 
-def _format_quote(quote: MarketQuote) -> str:
-    change = _quote_change_percent(quote)
-    change_text = f"，涨跌 {change:+.2f}%" if change is not None else ""
+def _format_sector_report(
+    index: int,
+    sector: _SectorSpec,
+    quote: MarketQuote | BaseException,
+) -> str:
+    if not isinstance(quote, MarketQuote):
+        return f"{index}. {sector.name}：核心股{sector.company}；板块数据暂缺"
     return (
-        f"{quote.symbol}：{quote.price:.2f}{change_text}"
-        f"（{quote.source}，{quote.observed_at or '时间未知'}）"
+        f"{index}. {sector.name}：核心股{sector.company}；板块参考{_sector_tendency(quote)}；"
+        f"数据时间{_format_market_time(quote.observed_at)}\n来源：{quote.source}"
     )
+
+
+def _sector_tendency(quote: MarketQuote) -> str:
+    change = _quote_change_percent(quote)
+    if change is None or abs(change) < 0.5:
+        return "震荡"
+    return "偏强" if change > 0 else "偏弱"
+
+
+def _format_market_time(value: str | None) -> str:
+    parsed = _parse_market_time(value)
+    if parsed is None:
+        return "未知"
+    local = parsed.astimezone(_BEIJING_TIMEZONE)
+    return f"{local.year}年{local.month}月{local.day}日 {local.hour:02d}:{local.minute:02d}（北京时间）"
+
+
+def _latest_observed_at(quotes: list[MarketQuote]) -> str:
+    known = [
+        parsed
+        for quote in quotes
+        if (parsed := _parse_market_time(quote.observed_at)) is not None
+    ]
+    if not known:
+        return "时间未知"
+    return _format_market_time(max(known).isoformat())
+
+
+def _parse_market_time(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _build_market_brief(
+    label: str,
+    sectors: tuple[_SectorSpec, ...],
+    quotes: list[MarketQuote | BaseException],
+    elapsed: float,
+) -> str:
+    lines = [f"{label}板块核心股简报（二次汇总）"]
+    for index, (sector, quote) in enumerate(zip(sectors, quotes, strict=True), start=1):
+        tendency = _sector_tendency(quote) if isinstance(quote, MarketQuote) else "数据暂缺"
+        lines.append(f"{index}. {sector.name}：{sector.company}，{tendency}")
+    lines.append(f"共 20 个板块，耗时 {elapsed:.2f} 秒；完整版本超过平台单次发送上限，已汇总一次。")
+    return "\n".join(lines)
 
 
 def _format_watch_item(

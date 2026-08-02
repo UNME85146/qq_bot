@@ -4,8 +4,12 @@ import re
 from dataclasses import dataclass
 
 from app.features.contracts import SearchProvider, StructuredReply
+from app.features.information_localizer import (
+    InformationLocalizationError,
+    localize_information_fields,
+)
 from app.features.structured_reply import (
-    OVERSIZED_URL_CONTINUATION,
+    build_compact_brief,
     build_structured_reply,
     format_structured_external_url,
 )
@@ -38,7 +42,9 @@ class GroupSearchCommandService:
         session_repository: ConversationSessionRepository,
         profile_repository: GroupMemberProfileRepository,
         safety_service: SafetyService,
-        max_results: int = 5,
+        max_results: int = 40,
+        page_size: int = 20,
+        minimum_results: int = 20,
     ) -> None:
         self._search_provider = search_provider
         self._model_client = model_client
@@ -47,6 +53,8 @@ class GroupSearchCommandService:
         self._profiles = profile_repository
         self._safety = safety_service
         self._max_results = max_results
+        self._page_size = page_size
+        self._minimum_results = minimum_results
 
     async def handle(self, message: NormalizedMessage) -> SearchCommandResult | None:
         if message.scope_type != "group" or not message.group_id:
@@ -104,23 +112,66 @@ class GroupSearchCommandService:
             )
         if not results:
             return SearchCommandResult(True, "没有找到可用资料", "search_empty")
-        blocks = []
-        for index, item in enumerate(results, start=1):
-            title = _clean_external_text(item.title, 120) or "无标题"
+        if len(results) < self._minimum_results:
+            return SearchCommandResult(
+                True,
+                f"可核验资料不足 {self._minimum_results} 条（当前 {len(results)} 条），"
+                "为避免补造，本次不发送不完整结果",
+                "search_insufficient_results",
+            )
+        effective_page_size = self._page_size
+        if len(results) < self._page_size * 2:
+            effective_page_size = len(results)
+        start = (page - 1) * effective_page_size
+        selected_results = results[start : start + effective_page_size]
+        try:
+            localized = await localize_information_fields(
+                self._model_client,
+                [
+                    {
+                        "id": str(start + index),
+                        "title": item.title,
+                        "summary": item.snippet or "暂无摘要",
+                    }
+                    for index, item in enumerate(selected_results, start=1)
+                ],
+            )
+        except InformationLocalizationError:
+            return SearchCommandResult(
+                True,
+                "资料中文化失败：模型暂不可用，本次未发送外文内容",
+                "search_localization_failed",
+                model_called=True,
+            )
+        selected_blocks = []
+        for index, (item, translated) in enumerate(
+            zip(selected_results, localized, strict=True),
+            start=start + 1,
+        ):
+            title = _clean_external_text(translated["title"], 120) or "无标题"
             source = _clean_external_text(item.source, 50) or "未知来源"
             lines = [f"{index}. {title}", f"来源：{source}"]
-            snippet = _clean_external_text(item.snippet, 240) or "暂无摘要"
+            snippet = _clean_external_text(translated["summary"], 240) or "暂无摘要"
             url, url_truncated = format_structured_external_url(item.url)
             lines.extend((f"摘要：{snippet}", f"URL：{url}"))
             if url_truncated:
-                lines.append(OVERSIZED_URL_CONTINUATION)
-            blocks.append("\n".join(lines))
+                lines.append("说明：链接异常过长，未予展示")
+            selected_blocks.append("\n".join(lines))
+        blocks = [""] * len(results)
+        blocks[start : start + len(selected_blocks)] = selected_blocks
+        fallback = _build_search_brief(selected_blocks)
         structured = build_structured_reply(
-            header=f"资料检索：{query}",
+            header="资料检索结果",
             blocks=blocks,
             page=page,
-            page_size=2,
-            next_command=f"#chat 查一下 {query} --page {page + 1}",
+            page_size=effective_page_size,
+            next_command=f"在原查询命令末尾添加 --page {page + 1}",
+            footer=(
+                f"本页 {len(selected_blocks)} 条，共取得 {len(blocks)} 条可核验资料"
+                if selected_blocks
+                else None
+            ),
+            fallback_message=fallback,
         )
         return SearchCommandResult(
             True,
@@ -233,3 +284,11 @@ class GroupSearchCommandService:
 def _clean_external_text(value, limit: int) -> str:
     cleaned = re.sub(r"[\r\n\t]+", " ", str(value or ""))
     return re.sub(r"\s+", " ", cleaned).strip()[:limit]
+
+
+def _build_search_brief(blocks: list[str]) -> str:
+    return build_compact_brief(
+        header="资料检索简报（二次汇总）",
+        blocks=blocks,
+        footer=f"本页共 {len(blocks)} 条；完整版本超过平台单次发送上限，已汇总一次。",
+    )

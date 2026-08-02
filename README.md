@@ -8,9 +8,9 @@ This GitHub repository is a sanitized public export. The private development tre
 
 - Stable bot-owned persona derived from validated, low-sensitivity aggregate metrics. Raw chat text, source QQ identifiers, free-text profiles, and group identifiers are not prompt inputs.
 - Root and owner permissions, private/group allowlists, group mute controls, per-group FIFO chat queues, reminders, memory, image understanding, stickers, and audited administration commands.
-- Dedicated structured reply mode for help, news, market, and search results. Truncation is explicit and pagination keeps titles, metadata, summaries, and URLs together.
+- Dedicated structured reply mode for help, news, market, and search results. Help is one complete eight-line message; full information messages are attempted first and are summarized once only when OneBot explicitly rejects their length.
 - News feeds are isolated per feed and publish redacted health telemetry. Scheduled news uses resumable at-least-once delivery checkpoints.
-- A-share provider fallback with closed/open/half-open circuit recovery. US indices are fetched concurrently under a command deadline. Provider telemetry records redacted category, stage, attempt count, and latency.
+- A-share provider fallback with closed/open/half-open circuit recovery. A-share and US-share reports fetch 20 sector core stocks concurrently under a command deadline without listing per-stock percentage changes. Provider telemetry records redacted category, stage, attempt count, and latency.
 - Video egress preflight covers DNS, TCP, TLS, and HTTP. HTTP/SOCKS proxies are read only from configured environment variables. Supported short URLs are canonicalized once and cached.
 - Long video work emits one progress notice and one final result. NapCat `upload_group_file` capability is checked before download, and a root-only plan/apply flow supports controlled small-video acceptance.
 - OpenAI-compatible speech and image endpoints are optional. The historical local TTS service is not shipped; existing deployments can manage retirement and rollback packages with the transactional tool in `tools/`.
@@ -74,15 +74,15 @@ ws://127.0.0.1:8080/onebot/v11/ws
 Group information entry points:
 
 ```text
-/help [page]
-#政事 [page]  #财经 [page]  #科技 [page]  #金融 [page]
+/help
+#政事  #财经  #科技  #金融
 #A股          #美股
 #chat 查一下 <query> [--page N]
 #画图 <prompt>  #改图 <instruction>
 #新闻订阅 [HH:MM]  #新闻订阅状态  #新闻退订
 ```
 
-The group `/help` response is two pages and covers all eight feature lines. News blocks keep title, source, time, and URL together. Search blocks keep title, summary, and URL together. When a result cannot fit safely, the bot sends `内容已截断` and a `下一页` instruction instead of silently dropping content.
+The group `/help` response is one message containing all eight feature lines. Each news category requires at least 20 verifiable items and keeps title, source, Beijing time, and URL together. Search requires at least 20 results: 20-39 results are delivered together, while 40 results use two complete 20-result pages. Titles, summaries, times, statuses, and explanations are Chinese; source names, URLs, and command syntax may retain their original form. If OneBot explicitly rejects a complete information message as too long, the bot performs one compact-summary retry instead of proactively truncating it.
 
 Owner/root private commands include:
 

@@ -10,15 +10,12 @@ from typing import Any
 from nonebot.adapters.onebot.v11 import Bot, Event, Message, MessageSegment
 
 from app.conversation.reply_formatter import split_reply_messages, truncate_naturally
-from app.features.structured_reply import STRUCTURED_INFORMATION_MAX_CHARS
+from app.features.structured_reply import is_message_too_long_error
 from app.models import ReplyConfig
 
 
 GROUP_BUBBLE_INTERVAL_SECONDS = 1.5
 TRUNCATED_MARKER = "内容已截断"
-STRUCTURED_OVERSIZE_FALLBACK = (
-    "结构化内容过长，未发送\n内容已截断；下一页：请缩小查询范围后重试"
-)
 
 
 def build_reply_bubbles(
@@ -121,11 +118,13 @@ async def send_structured_information(
     event: Event,
     messages: tuple[str, ...] | list[str],
     *,
+    fallback_messages: tuple[str, ...] | list[str] = (),
     scope_type: str,
     reply_config: ReplyConfig,
     on_send_error,
 ) -> None:
     bubbles = build_structured_information_messages(messages)
+    fallbacks = list(fallback_messages)
     for index, bubble in enumerate(bubbles):
         if index > 0:
             await asyncio.sleep(_message_delay_seconds(reply_config, scope_type=scope_type))
@@ -141,20 +140,30 @@ async def send_structured_information(
                 ),
             )
         except Exception as exc:
+            fallback = fallbacks[index].strip() if index < len(fallbacks) else ""
+            if fallback and is_message_too_long_error(exc):
+                try:
+                    await bot.send(
+                        event,
+                        _build_outgoing_message(
+                            fallback,
+                            scope_type=scope_type,
+                            index=index,
+                            group_reply_to_message_id=None,
+                            group_at_user_id=None,
+                        ),
+                    )
+                    continue
+                except Exception as fallback_exc:
+                    await on_send_error(fallback_exc, index, fallback)
+                    continue
             await on_send_error(exc, index, bubble)
 
 
 def build_structured_information_messages(
     messages: tuple[str, ...] | list[str],
 ) -> list[str]:
-    return [
-        (
-            bubble
-            if len(bubble) <= STRUCTURED_INFORMATION_MAX_CHARS
-            else STRUCTURED_OVERSIZE_FALLBACK
-        )
-        for bubble in _non_empty_bubbles(list(messages))
-    ]
+    return _non_empty_bubbles(list(messages))
 
 
 async def send_group_image_direct(

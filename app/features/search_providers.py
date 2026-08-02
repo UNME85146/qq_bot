@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from html import unescape
 import os
 import re
@@ -36,14 +37,38 @@ class SearxngSearchProvider:
             timeout=self._timeout,
             transport=self._transport,
         ) as client:
-            response = await client.get(
-                f"{self._base_url}/search",
-                params={"q": query, "format": "json"},
-                headers={"Accept": "application/json"},
+            responses = await asyncio.gather(
+                *(
+                    client.get(
+                        f"{self._base_url}/search",
+                        params={"q": query, "format": "json", "pageno": page},
+                        headers={"Accept": "application/json"},
+                    )
+                    for page in (1, 2)
+                ),
+                return_exceptions=True,
             )
-            response.raise_for_status()
-            payload = response.json()
-        return _map_searxng_results(payload)
+            successful = []
+            first_error = None
+            for response in responses:
+                if isinstance(response, BaseException):
+                    first_error = first_error or response
+                    continue
+                try:
+                    response.raise_for_status()
+                except Exception as exc:
+                    first_error = first_error or exc
+                    continue
+                successful.append(response)
+            if not successful:
+                if first_error is not None:
+                    raise first_error
+                return []
+        return _deduplicate_results(
+            result
+            for response in successful
+            for result in _map_searxng_results(response.json())
+        )
 
 
 class BraveSearchProvider:
@@ -67,7 +92,7 @@ class BraveSearchProvider:
         ) as client:
             response = await client.get(
                 self._base_url,
-                params={"q": query},
+                params={"q": query, "count": 20},
                 headers={
                     "Accept": "application/json",
                     "X-Subscription-Token": self._api_key,
@@ -103,7 +128,7 @@ class WikipediaSearchProvider:
             if self._core_language is not None:
                 response = await client.get(
                     self._base_url,
-                    params={"q": query, "limit": 10},
+                    params={"q": query, "limit": 20},
                 )
                 response.raise_for_status()
                 return _map_wikimedia_core_results(
@@ -117,7 +142,7 @@ class WikipediaSearchProvider:
                     "generator": "search",
                     "gsrsearch": query,
                     "gsrnamespace": 0,
-                    "gsrlimit": 10,
+                    "gsrlimit": 20,
                     "prop": "extracts|info",
                     "exintro": 1,
                     "explaintext": 1,
@@ -338,3 +363,10 @@ def _clean_html(value: Any, limit: int) -> str:
 def _safe_url(value: Any) -> str:
     url = _clean(value, 1000)
     return url if url.startswith(("http://", "https://")) else ""
+
+
+def _deduplicate_results(results) -> list[SearchResult]:
+    unique: dict[str, SearchResult] = {}
+    for result in results:
+        unique.setdefault(result.url, result)
+    return list(unique.values())

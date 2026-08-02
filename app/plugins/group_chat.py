@@ -120,6 +120,7 @@ _news_command_service = NewsCommandService(
     qq_config=_config.qq,
     default_time=_config.news.default_time,
     timezone=_config.news.timezone,
+    model_client=create_model_client(_config.model),
 )
 _stock_watch_repository = StockWatchRepository(_config.storage.database_path)
 _market_providers = create_market_providers(
@@ -677,6 +678,7 @@ async def _try_handle_group_information_feature(
             bot,
             event,
             structured.messages,
+            fallback_messages=structured.fallback_messages,
             scope_type="group",
             reply_config=_config.reply,
             on_send_error=send_error,

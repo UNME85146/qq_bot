@@ -7,9 +7,7 @@ from urllib.parse import urlsplit
 from app.features.contracts import StructuredReply
 
 
-STRUCTURED_INFORMATION_MAX_CHARS = 1000
-STRUCTURED_EXTERNAL_URL_MAX_CHARS = 240
-OVERSIZED_URL_CONTINUATION = "内容已截断；下一页：请按标题访问来源站点"
+STRUCTURED_EXTERNAL_URL_MAX_CHARS = 2048
 
 
 def format_structured_external_url(value: str | None) -> tuple[str, bool]:
@@ -22,7 +20,7 @@ def format_structured_external_url(value: str | None) -> tuple[str, bool]:
     ):
         return "不可用", False
     if len(raw) > STRUCTURED_EXTERNAL_URL_MAX_CHARS:
-        return "不可用（链接过长）", True
+        return "不可用（链接异常过长）", True
     return raw, False
 
 
@@ -34,6 +32,7 @@ def build_structured_reply(
     page_size: int = 2,
     next_command: str | None = None,
     footer: str | None = None,
+    fallback_message: str | None = None,
 ) -> StructuredReply:
     if page <= 0:
         raise ValueError("page must be positive")
@@ -50,20 +49,51 @@ def build_structured_reply(
 
     start = (page - 1) * page_size
     selected = [block.strip() for block in blocks[start : start + page_size] if block.strip()]
-    messages: list[str] = []
     page_header = f"{header}（第 {page}/{total_pages} 页）" if total_pages > 1 else header
+    message = page_header
     if selected:
-        messages.append(f"{page_header}\n{selected[0]}")
-        messages.extend(selected[1:])
-    else:
-        messages.append(page_header)
+        message = f"{message}\n" + "\n\n".join(selected)
     if footer:
-        messages[-1] = f"{messages[-1]}\n{footer.strip()}"
+        message = f"{message}\n\n{footer.strip()}"
     if page < total_pages:
         command = next_command or "下一页"
-        messages.append(f"内容已截断；下一页：{command}")
+        message = f"{message}\n\n内容已截断；下一页：{command}"
     return StructuredReply(
-        messages=tuple(messages),
+        messages=(message,),
         page=page,
         total_pages=total_pages,
+        fallback_messages=(fallback_message.strip(),) if fallback_message else (),
     )
+
+
+def is_message_too_long_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    markers = (
+        "消息过长",
+        "消息长度",
+        "字数限制",
+        "message too long",
+        "message length",
+        "too many characters",
+        "content too long",
+    )
+    return any(marker in text for marker in markers)
+
+
+def build_compact_brief(
+    *,
+    header: str,
+    blocks: Sequence[str],
+    footer: str,
+) -> str:
+    lines = [header]
+    for block in blocks:
+        block_lines = block.splitlines()
+        title = block_lines[0] if block_lines else "无标题"
+        source = next(
+            (line.removeprefix("来源：") for line in block_lines if line.startswith("来源：")),
+            "未知来源",
+        )
+        lines.append(f"{title}（来源：{source}）")
+    lines.append(footer)
+    return "\n".join(lines)

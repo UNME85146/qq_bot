@@ -9,6 +9,7 @@ class StructuredReply:
     messages: tuple[str, ...]
     page: int = 1
     total_pages: int = 1
+    fallback_messages: tuple[str, ...] = ()
 
     @property
     def truncated(self) -> bool:

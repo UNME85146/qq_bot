@@ -4,16 +4,23 @@ import re
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from app.features.contracts import NewsItem, NewsProvider, StructuredReply
+from app.features.information_localizer import (
+    InformationLocalizationError,
+    localize_information_fields,
+)
 from app.features.structured_reply import (
-    OVERSIZED_URL_CONTINUATION,
+    build_compact_brief,
     build_structured_reply,
     format_structured_external_url,
+    is_message_too_long_error,
 )
+from app.model.llm_client import LlmClient
 from app.models import NormalizedMessage, QQConfig
 from app.storage.repositories import GroupNewsSubscriptionRepository
 
@@ -25,6 +32,7 @@ _CATEGORY_COMMANDS = {
     "#金融": ("finance", "金融"),
 }
 _DEFAULT_CATEGORIES = ("politics", "business", "technology", "finance")
+_BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 _GROUP_HELP_ENTRIES = (
     "抖音/B站链接 - 自动下载并发送视频文件",
     "#政事 / #财经 / #科技 / #金融 - 今日分类新闻",
@@ -55,10 +63,11 @@ class _NewsDigest:
 def group_help_reply(page: int = 1) -> StructuredReply:
     return build_structured_reply(
         header="群聊功能",
-        blocks=_GROUP_HELP_ENTRIES,
-        page=page,
-        page_size=4,
-        next_command=f"/help {page + 1}",
+        blocks=tuple(
+            f"{index}. {entry}"
+            for index, entry in enumerate(_GROUP_HELP_ENTRIES, start=1)
+        ),
+        page_size=len(_GROUP_HELP_ENTRIES),
     )
 
 
@@ -75,7 +84,9 @@ class NewsCommandService:
         qq_config: QQConfig,
         default_time: str = "08:00",
         timezone: str = "Asia/Shanghai",
-        max_items: int = 8,
+        max_items: int = 20,
+        minimum_items: int = 20,
+        model_client: LlmClient | None = None,
     ) -> None:
         self._provider = provider
         self._repository = repository
@@ -83,6 +94,8 @@ class NewsCommandService:
         self._default_time = default_time
         self._timezone = timezone
         self._max_items = max_items
+        self._minimum_items = minimum_items
+        self._model_client = model_client
 
     async def handle(self, message: NormalizedMessage) -> NewsCommandResult | None:
         text = " ".join(message.text.strip().split())
@@ -154,9 +167,13 @@ class NewsCommandService:
                 sections.append(error.text)
                 messages.append(error.text)
                 continue
-            category_messages = [f"{label}新闻\n{block}" for block in blocks]
-            sections.append("\n\n".join(category_messages))
-            messages.extend(category_messages)
+            structured = _build_news_structured_reply(
+                label,
+                blocks,
+                minimum_items=self._minimum_items,
+            )
+            sections.append(structured.text)
+            messages.extend(structured.messages)
         return _NewsDigest(
             text="\n\n".join(sections),
             complete=complete,
@@ -174,12 +191,10 @@ class NewsCommandService:
         blocks, error = await self._load_news_blocks(category, label)
         if error is not None:
             return error
-        structured = build_structured_reply(
-            header=f"{label}新闻",
-            blocks=blocks,
-            page=page,
-            page_size=2,
-            next_command=f"{command or '#新闻'} {page + 1}",
+        structured = _build_news_structured_reply(
+            label,
+            blocks,
+            minimum_items=self._minimum_items,
         )
         return NewsCommandResult(
             True,
@@ -207,11 +222,36 @@ class NewsCommandService:
             return [], NewsCommandResult(
                 True, f"{label}今日暂无可用新闻", "news_empty"
             )
+        if len(items) < self._minimum_items:
+            return [], NewsCommandResult(
+                True,
+                f"{label}可核验新闻不足 {self._minimum_items} 条（当前 {len(items)} 条），"
+                "为避免补造，本次不发送不完整简报",
+                "news_insufficient_items",
+            )
+        try:
+            localized = await localize_information_fields(
+                self._model_client,
+                [
+                    {
+                        "id": str(index),
+                        "title": item.title,
+                        "summary": "",
+                    }
+                    for index, item in enumerate(items, start=1)
+                ],
+            )
+        except InformationLocalizationError:
+            return [], NewsCommandResult(
+                True,
+                f"{label}新闻中文化失败：模型暂不可用，本次未发送外文内容",
+                "news_localization_failed",
+            )
         blocks = []
-        for index, item in enumerate(items, start=1):
-            title = _clean_external_text(item.title, 100)
+        for index, (item, translated) in enumerate(zip(items, localized, strict=True), start=1):
+            title = _clean_external_text(translated["title"], 100)
             source = _clean_external_text(item.source, 40) or "未知来源"
-            published = _clean_external_text(item.published_at or "时间未知", 40)
+            published = _format_chinese_time(item.published_at)
             lines = [
                 f"{index}. {title}",
                 f"来源：{source}",
@@ -220,7 +260,7 @@ class NewsCommandService:
             url, url_truncated = format_structured_external_url(item.url)
             lines.append(f"URL：{url}")
             if url_truncated:
-                lines.append(OVERSIZED_URL_CONTINUATION)
+                lines.append("说明：链接异常过长，未予展示")
             blocks.append("\n".join(lines))
         return blocks, None
 
@@ -292,6 +332,73 @@ def _clean_external_text(value: str, limit: int) -> str:
     return cleaned[:limit]
 
 
+def _build_news_structured_reply(
+    label: str,
+    blocks: Sequence[str],
+    *,
+    minimum_items: int,
+) -> StructuredReply:
+    count = len(blocks)
+    footer = f"本次共 {count} 条"
+    if count < minimum_items:
+        footer += f"；上游仅返回 {count} 条可核验内容，未补造条目"
+    return build_structured_reply(
+        header=f"{label}新闻",
+        blocks=blocks,
+        page_size=max(1, count),
+        footer=footer,
+        fallback_message=_build_news_brief(label, blocks),
+    )
+
+
+def _build_news_brief(label: str, blocks: Sequence[str]) -> str:
+    return build_compact_brief(
+        header=f"{label}新闻简报（二次汇总）",
+        blocks=blocks,
+        footer=f"共 {len(blocks)} 条；完整版本超过平台单次发送上限，已汇总一次。",
+    )
+
+
+def _format_chinese_time(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "时间未知"
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            return "时间未知"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    local = parsed.astimezone(_BEIJING_TIMEZONE)
+    return (
+        f"{local.year}年{local.month}月{local.day}日 "
+        f"{local.hour:02d}:{local.minute:02d}（北京时间）"
+    )
+
+
+def _brief_news_message(message: str) -> str:
+    lines = message.splitlines()
+    if not lines:
+        return "新闻简报：暂无可用内容"
+    label = lines[0].removesuffix("新闻")
+    blocks = []
+    current = []
+    for line in lines[1:]:
+        if re.match(r"^\d+\. ", line):
+            if current:
+                blocks.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return _build_news_brief(label, blocks)
+
+
 async def run_news_subscription_once(
     bot,
     service: NewsCommandService,
@@ -328,11 +435,21 @@ async def run_news_subscription_once(
                 checkpoint.next_message_index,
                 len(checkpoint.messages),
             ):
-                await bot.call_api(
-                    "send_group_msg",
-                    group_id=int(subscription.group_id),
-                    message=checkpoint.messages[index],
-                )
+                message = checkpoint.messages[index]
+                try:
+                    await bot.call_api(
+                        "send_group_msg",
+                        group_id=int(subscription.group_id),
+                        message=message,
+                    )
+                except Exception as exc:
+                    if not is_message_too_long_error(exc):
+                        raise
+                    await bot.call_api(
+                        "send_group_msg",
+                        group_id=int(subscription.group_id),
+                        message=_brief_news_message(message),
+                    )
                 await repository.advance_delivery_checkpoint(
                     group_id=subscription.group_id,
                     local_date=now.date(),
