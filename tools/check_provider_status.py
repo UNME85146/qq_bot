@@ -25,6 +25,7 @@ from app.features.market_providers import (
     SinaMarketProvider,
 )
 from app.features.provider_health import (
+    DEFAULT_PROVIDER_STATUS_PATH,
     ProviderHealthRegistry,
     classify_provider_error,
     sanitize_provider_target,
@@ -423,7 +424,7 @@ def main() -> int:
         "--path",
         default=os.getenv(
             "QQ_BOT_PROVIDER_STATUS_PATH",
-            "runtime_artifacts/provider-status.json",
+            DEFAULT_PROVIDER_STATUS_PATH,
         ),
     )
     parser.add_argument("--timeout", type=float, default=8.0)

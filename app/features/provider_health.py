@@ -17,6 +17,7 @@ import httpx
 
 
 SystemEventRecorder = Callable[..., Awaitable[None]]
+DEFAULT_PROVIDER_STATUS_PATH = "run/provider-status.json"
 
 
 class CircuitOpenError(RuntimeError):
@@ -86,7 +87,7 @@ class ProviderHealthRegistry:
             path
             or os.getenv(
                 "QQ_BOT_PROVIDER_STATUS_PATH",
-                "runtime_artifacts/provider-status.json",
+                DEFAULT_PROVIDER_STATUS_PATH,
             )
         )
         self._lock = threading.Lock()

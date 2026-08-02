@@ -19,6 +19,7 @@ data/backups/
 data/tts/cache/
 data/tts/reference_audio/
 logs/
+run/
 
 AGENTS.md
 runtime_artifacts/
