@@ -160,6 +160,15 @@ class MarketCommandService:
                 f"{label}行情获取失败：数据源暂不可用（耗时 {elapsed:.2f} 秒）",
                 "market_failed",
             )
+        if len(successful) < len(sectors):
+            return MarketCommandResult(
+                True,
+                (
+                    f"{label}行情数据不完整：仅获取 {len(successful)}/{len(sectors)} 个板块，"
+                    f"本次不发送不完整股报（耗时 {elapsed:.2f} 秒）"
+                ),
+                "market_incomplete",
+            )
         blocks = [
             _format_sector_report(index, sector, quote)
             for index, (sector, quote) in enumerate(zip(sectors, quotes, strict=True), start=1)
