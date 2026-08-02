@@ -290,6 +290,10 @@ class FailoverMarketProvider:
             )
             for name, _target, _provider in providers
         }
+        self._provider_gates = {
+            name: asyncio.Semaphore(failure_threshold)
+            for name, _target, _provider in providers
+        }
         self._health = health_registry
         self._attempt_timeout_seconds = attempt_timeout_seconds
         self._record_system_event = record_system_event
@@ -298,55 +302,56 @@ class FailoverMarketProvider:
         last_error: Exception | None = None
         for index, (name, target, provider) in enumerate(self._providers):
             breaker = self._breakers[name]
-            if not breaker.allow_request():
+            async with self._provider_gates[name]:
+                if not breaker.allow_request():
+                    await self._health.record_attempt(
+                        kind="market",
+                        provider=name,
+                        target=target,
+                        stage="quote",
+                        success=False,
+                        attempts=1,
+                        duration_ms=0,
+                        error_category="circuit_open",
+                        circuit_state=breaker.state,
+                        record_system_event=self._record_system_event,
+                    )
+                    continue
+                started = time.perf_counter()
+                try:
+                    async with asyncio.timeout(self._attempt_timeout_seconds):
+                        quote = await provider.quote(market, symbol)
+                except Exception as exc:
+                    last_error = exc
+                    breaker.record_failure()
+                    await self._health.record_attempt(
+                        kind="market",
+                        provider=name,
+                        target=target,
+                        stage="quote",
+                        success=False,
+                        attempts=1,
+                        duration_ms=round((time.perf_counter() - started) * 1000),
+                        error_category=classify_provider_error(exc),
+                        circuit_state=breaker.state,
+                        record_system_event=self._record_system_event,
+                    )
+                    continue
+                breaker.record_success()
                 await self._health.record_attempt(
                     kind="market",
                     provider=name,
                     target=target,
                     stage="quote",
-                    success=False,
-                    attempts=1,
-                    duration_ms=0,
-                    error_category="circuit_open",
-                    circuit_state=breaker.state,
-                    record_system_event=self._record_system_event,
-                )
-                continue
-            started = time.perf_counter()
-            try:
-                async with asyncio.timeout(self._attempt_timeout_seconds):
-                    quote = await provider.quote(market, symbol)
-            except Exception as exc:
-                last_error = exc
-                breaker.record_failure()
-                await self._health.record_attempt(
-                    kind="market",
-                    provider=name,
-                    target=target,
-                    stage="quote",
-                    success=False,
+                    success=True,
                     attempts=1,
                     duration_ms=round((time.perf_counter() - started) * 1000),
-                    error_category=classify_provider_error(exc),
                     circuit_state=breaker.state,
                     record_system_event=self._record_system_event,
                 )
-                continue
-            breaker.record_success()
-            await self._health.record_attempt(
-                kind="market",
-                provider=name,
-                target=target,
-                stage="quote",
-                success=True,
-                attempts=1,
-                duration_ms=round((time.perf_counter() - started) * 1000),
-                circuit_state=breaker.state,
-                record_system_event=self._record_system_event,
-            )
-            if index > 0:
-                quote = replace(quote, source=f"{quote.source}（备用源）")
-            return quote
+                if index > 0:
+                    quote = replace(quote, source=f"{quote.source}（备用源）")
+                return quote
         raise MarketProviderUnavailableError("all configured market providers failed") from last_error
 
     def circuit_state(self, provider_name: str) -> str:
