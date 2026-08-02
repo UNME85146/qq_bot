@@ -754,7 +754,9 @@ def _runtime_adapter_kind(root: Path) -> str:
 
 
 def _napcat_state(container: str) -> dict[str, Any]:
-    payload = json.loads(_run(["docker", "inspect", container]).stdout)[0]
+    payload = json.loads(
+        _run(["docker", "inspect", container], quiet=True).stdout
+    )[0]
     return {
         "id": payload.get("Id"),
         "startedAt": _object(payload.get("State")).get("StartedAt"),
@@ -832,7 +834,9 @@ def _validate_cache_mount(
         raise DeploymentError("video cache path must not be a symlink")
     host_parent = str(host_path.parent)
     container_parent = str(Path(container_path).parent).replace("\\", "/")
-    payload = json.loads(_run(["docker", "inspect", container]).stdout)[0]
+    payload = json.loads(
+        _run(["docker", "inspect", container], quiet=True).stdout
+    )[0]
     mounts = payload.get("Mounts") if isinstance(payload.get("Mounts"), list) else []
     matched = any(
         item.get("Source") == host_parent
