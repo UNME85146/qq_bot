@@ -103,6 +103,17 @@ def _probe_endpoint(
             "category": "verified_by_routed_http",
             "duration_ms": stages["http"]["duration_ms"],
         }
+    if stages["http"]["ok"]:
+        for stage_name in ("dns", "tcp"):
+            stages[stage_name] = _verified_by_http(
+                stages[stage_name],
+                duration_ms=stages["http"]["duration_ms"],
+            )
+        if parsed.scheme == "https":
+            stages["tls"] = _verified_by_http(
+                stages["tls"],
+                duration_ms=stages["http"]["duration_ms"],
+            )
     required = [stages["dns"], stages["tcp"], stages["http"]]
     if stages["tls"]["ok"] is not None:
         required.append(stages["tls"])
@@ -131,6 +142,21 @@ def _timed_stage(operation) -> dict[str, Any]:
     if isinstance(detail, dict):
         result.update(detail)
     return result
+
+
+def _verified_by_http(
+    stage: dict[str, Any],
+    *,
+    duration_ms: int,
+) -> dict[str, Any]:
+    if stage.get("ok") is not False:
+        return stage
+    return {
+        "ok": True,
+        "category": "verified_by_http",
+        "duration_ms": duration_ms,
+        "independent_probe": stage,
+    }
 
 
 def _resolve_host(host: str) -> None:
