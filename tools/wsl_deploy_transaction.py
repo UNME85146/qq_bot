@@ -600,6 +600,9 @@ def _prestage_and_test(
 ) -> None:
     _run_as(service_user, service_group, ["python3", "-m", "venv", str(versioned_venv)])
     python = versioned_venv / "bin/python"
+    pytest_basetemp = versioned_venv / ".deployment-pytest-tmp"
+    if pytest_basetemp.exists() or pytest_basetemp.is_symlink():
+        raise DeploymentError("candidate pytest basetemp already exists")
     _run_as(
         service_user,
         service_group,
@@ -629,12 +632,16 @@ def _prestage_and_test(
         _run_as(
             service_user,
             service_group,
-            [str(python), "-m", "pytest", "-q"],
+            [str(python), "-m", "pytest", "-q", "--basetemp", str(pytest_basetemp)],
             cwd=release,
             env=environment,
         )
     finally:
         staged_profile.unlink(missing_ok=True)
+        if pytest_basetemp.is_symlink():
+            pytest_basetemp.unlink()
+        elif pytest_basetemp.exists():
+            shutil.rmtree(pytest_basetemp)
     _run_as(
         service_user,
         service_group,
