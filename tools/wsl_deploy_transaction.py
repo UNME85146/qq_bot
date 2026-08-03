@@ -56,10 +56,10 @@ COMPLETED_JOURNAL_STATUSES = {"success", "rolled_back"}
 PLAN_VALIDITY_MINUTES = 30
 AUTHORIZED_TARGET = {
     "distro": "Ubuntu-24.04",
-    "root": "/home/maintain/qq_bot",
+    "root": "/opt/qq_bot",
     "service": "qq-bot.service",
     "napcatContainer": "napcat",
-    "videoCacheHost": "/home/maintain/napcat/cache/qq-bot-media",
+    "videoCacheHost": "/opt/napcat/cache/qq-bot-media",
     "videoCacheContainer": "/app/napcat/cache/qq-bot-media",
 }
 
