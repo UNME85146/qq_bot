@@ -5,8 +5,9 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +38,8 @@ class YtDlpVideoExtractor:
         *,
         http_proxy_env: str = "QQ_BOT_VIDEO_HTTP_PROXY",
         socks_proxy_env: str = "QQ_BOT_VIDEO_SOCKS_PROXY",
-        environ: dict[str, str] | None = None,
+        cookie_file_env: str = "QQ_BOT_VIDEO_COOKIE_FILE",
+        environ: Mapping[str, str] | None = None,
         redirect_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._cache_dir = Path(cache_dir)
@@ -46,6 +48,10 @@ class YtDlpVideoExtractor:
         self._proxy_url = load_video_proxy(
             http_proxy_env=http_proxy_env,
             socks_proxy_env=socks_proxy_env,
+            environ=environ,
+        )
+        self._cookie_file = load_video_cookie_file(
+            cookie_file_env=cookie_file_env,
             environ=environ,
         )
         self._redirect_transport = redirect_transport
@@ -86,6 +92,8 @@ class YtDlpVideoExtractor:
                 "-m",
                 "yt_dlp",
                 *_proxy_arguments(self._proxy_url),
+                *_cookie_arguments(self._cookie_file),
+                *_impersonation_arguments(source_url),
                 "--no-playlist",
                 "--no-progress",
                 "--no-warnings",
@@ -161,6 +169,8 @@ class YtDlpVideoExtractor:
             "-m",
             "yt_dlp",
             *_proxy_arguments(self._proxy_url),
+            *_cookie_arguments(self._cookie_file),
+            *_impersonation_arguments(source_url),
             "--simulate",
             "--no-warnings",
             "--socket-timeout",
@@ -208,6 +218,13 @@ def _map_process_error(stderr: str) -> VideoExtractorError:
         return VideoExtractorError("dependency_missing", retryable=False)
     if "unsupported url" in normalized:
         return VideoExtractorError("unsupported", retryable=False)
+    cookie_markers = (
+        "fresh cookies",
+        "cookies are needed",
+        "cookies are required",
+    )
+    if any(marker in normalized for marker in cookie_markers):
+        return VideoExtractorError("cookies_required", retryable=False)
     timeout_markers = (
         "timed out",
         "timeout",
@@ -258,6 +275,38 @@ def load_video_proxy(
     return selected
 
 
+def load_video_cookie_file(
+    *,
+    cookie_file_env: str,
+    environ: Mapping[str, str] | None = None,
+) -> Path | None:
+    values = os.environ if environ is None else environ
+    configured = str(values.get(cookie_file_env, "") or "").strip()
+    if not configured:
+        return None
+
+    try:
+        candidate = Path(configured).expanduser()
+        metadata = candidate.lstat()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            "video cookie file must be a readable private regular file"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("video cookie file must be a readable private regular file")
+    if os.name == "posix" and not _is_private_cookie_mode(metadata.st_mode):
+        raise ValueError("video cookie file must be a readable private regular file")
+    if not os.access(candidate, os.R_OK):
+        raise ValueError("video cookie file must be a readable private regular file")
+    return candidate
+
+
+def _is_private_cookie_mode(mode: int) -> bool:
+    return bool(mode & stat.S_IRUSR) and not bool(
+        mode & (stat.S_IRWXG | stat.S_IRWXO)
+    )
+
+
 def video_proxy_route(proxy_url: str | None) -> str:
     if not proxy_url:
         return "direct"
@@ -266,6 +315,20 @@ def video_proxy_route(proxy_url: str | None) -> str:
 
 def _proxy_arguments(proxy_url: str | None) -> tuple[str, ...]:
     return ("--proxy", proxy_url) if proxy_url else ()
+
+
+def _cookie_arguments(cookie_file: Path | None) -> tuple[str, ...]:
+    return ("--cookies", os.fspath(cookie_file)) if cookie_file else ()
+
+
+def _impersonation_arguments(source_url: str) -> tuple[str, ...]:
+    hostname = (urlsplit(source_url).hostname or "").lower()
+    douyin_hosts = ("douyin.com", "iesdouyin.com")
+    if any(
+        hostname == host or hostname.endswith(f".{host}") for host in douyin_hosts
+    ):
+        return ("--impersonate", "chrome")
+    return ()
 
 
 def _user_agent_for(source_url: str) -> str:

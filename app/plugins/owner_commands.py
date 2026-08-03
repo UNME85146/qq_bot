@@ -567,6 +567,7 @@ def _reload_group_chat(new_config) -> None:
                 new_config.video.host_cache_path,
                 http_proxy_env=new_config.video.http_proxy_env,
                 socks_proxy_env=new_config.video.socks_proxy_env,
+                cookie_file_env=new_config.video.cookie_file_env,
             )
             if new_config.video.enabled
             else None

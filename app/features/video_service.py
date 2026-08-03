@@ -899,6 +899,7 @@ def _format_failure(
         "dependency_missing": "下载器未安装",
         "unsupported": "链接或内容不受支持",
         "access_denied": "内容需要登录、付费或访问权限",
+        "cookies_required": "需要更新私有Cookie文件",
         "file_too_large": "文件超过QQ上传上限",
         "file_missing": "本地视频文件不存在",
         "invalid_cache_path": "视频不在NapCat共享缓存目录",

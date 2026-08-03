@@ -235,6 +235,9 @@ def _load_video_config(raw: dict[str, Any]) -> VideoConfig:
         socks_proxy_env=str(
             raw.get("socksProxyEnv", "QQ_BOT_VIDEO_SOCKS_PROXY")
         ).strip(),
+        cookie_file_env=str(
+            raw.get("cookieFileEnv", "QQ_BOT_VIDEO_COOKIE_FILE")
+        ).strip(),
         progress_threshold_seconds=float(raw.get("progressThresholdSeconds", 3.0)),
         domain_failure_threshold=int(raw.get("domainFailureThreshold", 2)),
         domain_recovery_seconds=float(raw.get("domainRecoverySeconds", 120.0)),
@@ -253,8 +256,10 @@ def _load_video_config(raw: dict[str, Any]) -> VideoConfig:
         raise ValueError("video.qqVideoMaxBytes must be positive when configured")
     if config.min_free_bytes < 0:
         raise ValueError("video.minFreeBytes must be non-negative")
-    if not config.http_proxy_env or not config.socks_proxy_env:
-        raise ValueError("video proxy environment variable names must not be empty")
+    if not all(
+        (config.http_proxy_env, config.socks_proxy_env, config.cookie_file_env)
+    ):
+        raise ValueError("video environment variable names must not be empty")
     if config.progress_threshold_seconds < 0:
         raise ValueError("video.progressThresholdSeconds must be non-negative")
     if config.domain_failure_threshold <= 0:

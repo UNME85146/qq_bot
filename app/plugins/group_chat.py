@@ -152,6 +152,7 @@ _video_extractor = (
         _config.video.host_cache_path,
         http_proxy_env=_config.video.http_proxy_env,
         socks_proxy_env=_config.video.socks_proxy_env,
+        cookie_file_env=_config.video.cookie_file_env,
     )
     if _config.video.enabled
     else None

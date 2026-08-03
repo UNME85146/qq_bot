@@ -23,6 +23,7 @@ from app.features.video_providers import load_video_proxy, video_proxy_route
 
 DEFAULT_VIDEO_URLS = (
     "https://v.douyin.com/",
+    "https://www.douyin.com/",
     "https://www.iesdouyin.com/",
     "https://www.bilibili.com/",
     "https://b23.tv/",

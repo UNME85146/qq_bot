@@ -363,6 +363,7 @@ class VideoConfig:
     min_free_bytes: int = 0
     http_proxy_env: str = "QQ_BOT_VIDEO_HTTP_PROXY"
     socks_proxy_env: str = "QQ_BOT_VIDEO_SOCKS_PROXY"
+    cookie_file_env: str = "QQ_BOT_VIDEO_COOKIE_FILE"
     progress_threshold_seconds: float = 3.0
     domain_failure_threshold: int = 2
     domain_recovery_seconds: float = 120.0

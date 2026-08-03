@@ -68,6 +68,7 @@ def migrate_runtime_config(
             "minFreeBytes": 0,
             "httpProxyEnv": "QQ_BOT_VIDEO_HTTP_PROXY",
             "socksProxyEnv": "QQ_BOT_VIDEO_SOCKS_PROXY",
+            "cookieFileEnv": "QQ_BOT_VIDEO_COOKIE_FILE",
             "progressThresholdSeconds": 3,
             "domainFailureThreshold": 2,
             "domainRecoverySeconds": 120,

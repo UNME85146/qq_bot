@@ -40,6 +40,7 @@ from app.features.video_providers import load_video_proxy
 
 DEFAULT_VIDEO_TARGETS = (
     "https://v.douyin.com/",
+    "https://www.douyin.com/",
     "https://www.iesdouyin.com/",
     "https://www.bilibili.com/",
     "https://b23.tv/",
