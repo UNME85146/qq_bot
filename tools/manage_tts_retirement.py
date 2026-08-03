@@ -719,7 +719,11 @@ def inspect_path(path: Path, *, include_hash: bool) -> dict[str, Any]:
         if entry.is_symlink():
             target = os.readlink(entry)
             resolved = (entry.parent / target).resolve()
-            if path.is_dir() and path.resolve() not in (resolved, *resolved.parents):
+            if (
+                path.is_dir()
+                and path.resolve() not in (resolved, *resolved.parents)
+                and not _is_allowed_external_symlink(path, entry, target)
+            ):
                 raise TtsRetirementError("retirement tree contains an escaping symlink")
             digest.update(f"L|{relative}|{mode:o}|{target}\n".encode())
             files += 1
@@ -741,6 +745,17 @@ def inspect_path(path: Path, *, include_hash: bool) -> dict[str, Any]:
         "files": files,
         "sha256": digest.hexdigest() if include_hash else None,
     }
+
+
+def _is_allowed_external_symlink(root: Path, entry: Path, target: str) -> bool:
+    try:
+        relative = entry.relative_to(root).as_posix()
+    except ValueError:
+        return False
+    return bool(
+        re.fullmatch(r"\.venv/bin/python(?:3(?:\.\d+)?)?", relative)
+        and re.fullmatch(r"/usr/bin/python3(?:\.\d+)?", target)
+    )
 
 
 def copy_with_hardlinks(source: Path, target: Path) -> None:
