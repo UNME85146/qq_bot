@@ -748,14 +748,23 @@ def inspect_path(path: Path, *, include_hash: bool) -> dict[str, Any]:
 
 
 def _is_allowed_external_symlink(root: Path, entry: Path, target: str) -> bool:
-    try:
-        relative = entry.relative_to(root).as_posix()
-    except ValueError:
-        return False
-    return bool(
-        re.fullmatch(r"\.venv/bin/python(?:3(?:\.\d+)?)?", relative)
-        and re.fullmatch(r"/usr/bin/python3(?:\.\d+)?", target)
-    )
+    visited: set[Path] = set()
+    while True:
+        try:
+            relative = entry.relative_to(root).as_posix()
+        except ValueError:
+            return False
+        if re.fullmatch(r"\.venv/bin/python(?:3(?:\.\d+)?)?", relative) is None:
+            return False
+        if re.fullmatch(r"/usr/bin/python3(?:\.\d+)?", target):
+            return True
+        if re.fullmatch(r"python(?:3(?:\.\d+)?)?", target) is None:
+            return False
+        entry = entry.parent / target
+        if entry in visited or not entry.is_symlink():
+            return False
+        visited.add(entry)
+        target = os.readlink(entry)
 
 
 def copy_with_hardlinks(source: Path, target: Path) -> None:
