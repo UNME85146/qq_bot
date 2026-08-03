@@ -9,7 +9,6 @@ import shutil
 import socket
 import stat
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -589,19 +588,25 @@ class TtsRetirementManager:
     def _runtime_ready(self) -> bool:
         if self._runtime_ready_override is not None:
             return bool(self._runtime_ready_override())
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(self.spec.root / "tools/inspect_runtime_status.py"),
-                "--summary",
-                "--require-ready",
-            ],
-            cwd=self.spec.root,
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
+        runtime_python = self.spec.root / ".venv" / "bin" / "python"
+        if not runtime_python.is_file():
+            return False
+        try:
+            result = subprocess.run(
+                [
+                    str(runtime_python),
+                    str(self.spec.root / "tools/inspect_runtime_status.py"),
+                    "--summary",
+                    "--require-ready",
+                ],
+                cwd=self.spec.root,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
         return result.returncode == 0
 
     def _restore_moved(
