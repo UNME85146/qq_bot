@@ -9,6 +9,9 @@ from app.model.llm_client import LlmClient
 
 
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_LOCALIZATION_BATCH_SIZE = 5
+_LOCALIZATION_MAX_TOKENS = 6_000
+_LOCALIZATION_REASONING_EFFORT = "low"
 
 
 class InformationLocalizationError(RuntimeError):
@@ -32,7 +35,7 @@ async def localize_information_fields(
 
     localized = None
     if model_client is not None:
-        localized = await _localize_with_model(model_client, normalized)
+        localized = await _localize_in_batches(model_client, normalized)
     if localized is None:
         raise InformationLocalizationError("information localization unavailable")
     result = [
@@ -43,6 +46,28 @@ async def localize_information_fields(
         }
         for original, candidate in zip(normalized, localized, strict=True)
     ]
+    repair_indexes = [
+        index
+        for index, item in enumerate(result)
+        if _contains_non_chinese_text(item["title"] + item["summary"])
+    ]
+    if repair_indexes and model_client is not None:
+        repaired = await _localize_in_batches(
+            model_client,
+            [result[index] for index in repair_indexes],
+            repair=True,
+        )
+        if repaired is not None:
+            for result_index, candidate in zip(
+                repair_indexes,
+                repaired,
+                strict=True,
+            ):
+                result[result_index] = {
+                    "id": result[result_index]["id"],
+                    "title": _clean(candidate.get("title"), 160),
+                    "summary": _clean(candidate.get("summary"), 320),
+                }
     if any(
         _contains_non_chinese_text(item["title"] + item["summary"])
         for item in result
@@ -51,16 +76,52 @@ async def localize_information_fields(
     return result
 
 
+async def _localize_in_batches(
+    model_client: LlmClient,
+    items: list[dict[str, str]],
+    *,
+    repair: bool = False,
+) -> list[dict[str, str]] | None:
+    localized: list[dict[str, str]] = []
+    for start in range(0, len(items), _LOCALIZATION_BATCH_SIZE):
+        batch = items[start : start + _LOCALIZATION_BATCH_SIZE]
+        result = await _localize_with_model(
+            model_client,
+            batch,
+            repair=repair,
+        )
+        if result is None:
+            return None
+        localized.extend(result)
+    return localized
+
+
 async def _localize_with_model(
     model_client: LlmClient,
     items: list[dict[str, str]],
+    *,
+    repair: bool = False,
 ) -> list[dict[str, str]] | None:
+    if repair:
+        task_instruction = (
+            "以下字段是上一轮仍含拉丁字母的中文化结果。只修复这些字段，"
+            "把所有外文词、缩写和专有名词改为中文，不改变原有事实。"
+        )
+    else:
+        task_instruction = (
+            "把每个 title 和 summary 准确翻译或改写成简体中文，"
+            "保留数字和事实，不添加新事实。"
+        )
     messages = [
         {
             "role": "system",
             "content": (
-                "你是信息中文化器。把每个 title 和 summary 准确翻译或改写成简体中文，"
-                "保留数字和事实，不添加新事实，不输出拉丁字母；专有名词使用常见中文译名。"
+                "你是信息中文化器。"
+                f"{task_instruction}"
+                "不输出拉丁字母；专有名词使用常见中文译名。"
+                "JSON 键名可以使用英文，但每个 title 和 summary 的值都禁止出现 A-Z 或 a-z。"
+                "AI、CEO、IPO 等缩写必须改成中文全称；公司、产品和人名必须使用通用中文译名，"
+                "若无通用译名则使用中文音译或中文描述。输出前逐项自检所有值。"
                 "只返回 JSON 对象，格式为 {\"items\":[{\"id\":\"1\","
                 "\"title\":\"...\",\"summary\":\"...\"}]}，顺序和 id 必须不变。"
             ),
@@ -71,7 +132,19 @@ async def _localize_with_model(
         },
     ]
     try:
-        generated = await model_client.generate(messages)
+        generate_with_options = getattr(
+            model_client,
+            "generate_with_options",
+            None,
+        )
+        if callable(generate_with_options):
+            generated = await generate_with_options(
+                messages,
+                max_tokens=_LOCALIZATION_MAX_TOKENS,
+                reasoning_effort=_LOCALIZATION_REASONING_EFFORT,
+            )
+        else:
+            generated = await model_client.generate(messages)
         raw = _CODE_FENCE.sub("", generated.text.strip())
         payload = json.loads(raw)
         candidates = payload.get("items") if isinstance(payload, dict) else None

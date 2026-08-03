@@ -40,12 +40,25 @@ class OpenAICompatibleClient:
         self._config = config
 
     async def generate(self, messages: list[dict[str, Any]]) -> GeneratedReply:
+        return await self.generate_with_options(messages)
+
+    async def generate_with_options(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> GeneratedReply:
         payload = {
             "model": self._config.name,
             "messages": messages,
             "temperature": self._config.temperature,
-            "max_tokens": self._config.max_tokens,
+            "max_tokens": (
+                self._config.max_tokens if max_tokens is None else max_tokens
+            ),
         }
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
         timeout = httpx.Timeout(self._config.timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
