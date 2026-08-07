@@ -108,8 +108,6 @@ _private_user_locks: dict[str, asyncio.Lock] = {}
 _pending_private_greetings: set[str] = set()
 _private_voice_windows: dict[str, "PrivateVoiceWindow"] = {}
 _private_voice_counted_outgoing_keys: OrderedDict[tuple[str, str], None] = OrderedDict()
-PROCESSING_NOTICE_TEXT = "收到，正在处理。"
-PROCESSING_NOTICE_SEND_TIMEOUT_SECONDS = 1.5
 PRIVATE_RANDOM_VOICE_WINDOW_SIZE = 50
 PRIVATE_RANDOM_VOICE_SELECTED_COUNT = 6
 MAX_PRIVATE_VOICE_COUNTED_KEYS = 1000
@@ -158,11 +156,6 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
         )
         return
     simple_greeting = _is_simple_greeting(normalized.text)
-    if (
-        _permission_service.is_private_user_allowed(normalized.user_id)
-        and not simple_greeting
-    ):
-        await _send_private_processing_notice(bot, event, normalized)
     if simple_greeting:
         _pending_private_greetings.add(normalized.user_id)
     try:
@@ -170,51 +163,6 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
             await _handle_private_message_locked(bot, event, normalized)
     finally:
         _pending_private_greetings.discard(normalized.user_id)
-
-
-async def _send_private_processing_notice(
-    bot: Bot,
-    event: PrivateMessageEvent,
-    message,
-) -> bool:
-    sent = False
-
-    async def mark_sent(index, bubble, sent_message_id):
-        nonlocal sent
-        sent = True
-
-    try:
-        async with asyncio.timeout(PROCESSING_NOTICE_SEND_TIMEOUT_SECONDS):
-            await send_reply_bubbles(
-                bot,
-                event,
-                PROCESSING_NOTICE_TEXT,
-                scope_type="private",
-                reply_config=_config.reply,
-                on_send_error=lambda exc, index, bubble: _record_send_error(
-                    message.trace_id,
-                    exc,
-                    index,
-                    "send_private_processing_notice_failed",
-                ),
-                on_sent=mark_sent,
-            )
-    except TimeoutError:
-        await _conversation_service.record_system_event(
-            level="ERROR",
-            event="send_private_processing_notice_timeout",
-            detail="processing notice send exceeded 1.5 seconds",
-            trace_id=message.trace_id,
-        )
-    if sent:
-        await _conversation_service.record_reply_audit(
-            message,
-            action="reply",
-            reason="processing_notice_sent",
-            model_called=False,
-            safety_blocked=False,
-        )
-    return sent
 
 
 async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, normalized) -> None:
