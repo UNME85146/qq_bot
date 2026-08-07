@@ -114,6 +114,13 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         session_memory_service=session_memory_service,
         group_member_profile_service=group_member_profile_service,
         group_safety_classifier=(
-            None if config.model.use_mock else ModelGroupSafetyClassifier(model_client)
+            None
+            if config.model.use_mock
+            else ModelGroupSafetyClassifier(
+                model_client,
+                timeout_seconds=(
+                    config.conversation_sessions.contextual_safety_timeout_seconds
+                ),
+            )
         ),
     )

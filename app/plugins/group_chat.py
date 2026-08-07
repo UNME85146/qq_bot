@@ -71,6 +71,7 @@ from app.routing.direct_intent import DirectReplyIntent, parse_direct_reply_inte
 from app.routing.permission_service import PermissionService
 from app.routing.rate_limiter import RateLimiter
 from app.routing.group_trigger import contains_nickname, nickname_probability_passes
+from app.safety.contextual_safety import GroupSafetyUnavailableError
 from app.safety.safety_service import SafetyService
 from app.storage.repositories import (
     BotSentMessageRepository,
@@ -200,6 +201,8 @@ GROUP_RANDOM_VOICE_WINDOW_SIZE = 50
 GROUP_RANDOM_VOICE_SELECTED_COUNT = 3
 MAX_RECENT_MEDIA_MESSAGES = 200
 MAX_GROUP_VOICE_COUNTED_KEYS = 500
+PROCESSING_NOTICE_TEXT = "收到，正在处理。"
+PROCESSING_NOTICE_SEND_TIMEOUT_SECONDS = 1.5
 FOLLOW_UP_MARKERS = (
     "那",
     "所以",
@@ -412,6 +415,11 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
 
+    processing_notice_attempted = False
+    if _is_long_running_group_feature(normalized.text):
+        await _send_group_processing_notice(bot, event, normalized)
+        processing_notice_attempted = True
+
     if await _try_handle_group_video_feature(bot, event, normalized):
         return
 
@@ -614,7 +622,11 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
                 )
             return
 
-    prepared = await _prepare_group_chat_session(
+    if not processing_notice_attempted:
+        await _send_group_processing_notice(bot, event, normalized)
+    prepared = await _prepare_group_chat_session_with_feedback(
+        bot,
+        event,
         normalized,
         referenced_session_id=referenced_session_id,
     )
@@ -711,7 +723,12 @@ async def _try_handle_group_image_generation_feature(
     command = parse_image_command(message.text)
     if command is None:
         return False
-    if not await _conversation_service.allow_group_feature_request(message):
+    try:
+        allowed = await _conversation_service.allow_group_feature_request(message)
+    except GroupSafetyUnavailableError:
+        await _send_group_safety_unavailable_reply(bot, event, message)
+        return True
+    if not allowed:
         return True
     if message.group_id is None:
         return True
@@ -950,6 +967,118 @@ async def _prepare_group_chat_session(
         message,
         referenced_session_id=referenced_session_id,
     )
+
+
+async def _prepare_group_chat_session_with_feedback(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+    *,
+    referenced_session_id: str | None,
+) -> NormalizedMessage | None:
+    try:
+        return await _prepare_group_chat_session(
+            message,
+            referenced_session_id=referenced_session_id,
+        )
+    except GroupSafetyUnavailableError:
+        await _send_group_safety_unavailable_reply(bot, event, message)
+        return None
+
+
+async def _send_group_safety_unavailable_reply(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+) -> None:
+    await send_reply_bubbles(
+        bot,
+        event,
+        "服务暂时超时，请稍后再试。",
+        scope_type="group",
+        reply_config=_config.reply,
+        group_reply_to_message_id=message.message_id,
+        group_at_user_id=message.user_id,
+        on_send_error=lambda exc, index, bubble: _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_group_safety_timeout_reply_failed",
+        ),
+    )
+    await _conversation_service.record_reply_audit(
+        message,
+        action="reply",
+        reason="group_contextual_safety_unavailable",
+        model_called=False,
+        safety_blocked=True,
+    )
+
+
+def _is_long_running_group_feature(text: str) -> bool:
+    compact = " ".join(str(text or "").strip().split())
+    if not compact:
+        return False
+    if parse_image_command(compact) is not None:
+        return True
+    command = compact.split(maxsplit=1)[0]
+    return command in {
+        "#政事",
+        "#财经",
+        "#科技",
+        "#金融",
+        "#A股",
+        "#美股",
+    } or compact.lower().startswith("#chat ")
+
+
+async def _send_group_processing_notice(
+    bot: Bot,
+    event: GroupMessageEvent,
+    message: NormalizedMessage,
+) -> bool:
+    if _voice_safety_service.check_input(message.text, scope_type="group").action == "block":
+        return False
+    sent = False
+
+    async def mark_sent(index, bubble, sent_message_id):
+        nonlocal sent
+        sent = True
+
+    try:
+        async with asyncio.timeout(PROCESSING_NOTICE_SEND_TIMEOUT_SECONDS):
+            await send_reply_bubbles(
+                bot,
+                event,
+                PROCESSING_NOTICE_TEXT,
+                scope_type="group",
+                reply_config=_config.reply,
+                group_reply_to_message_id=message.message_id,
+                group_at_user_id=message.user_id,
+                on_send_error=lambda exc, index, bubble: _record_send_error(
+                    message.trace_id,
+                    exc,
+                    index,
+                    "send_group_processing_notice_failed",
+                ),
+                on_sent=mark_sent,
+            )
+    except TimeoutError:
+        await _conversation_service.record_system_event(
+            level="ERROR",
+            event="send_group_processing_notice_timeout",
+            detail="processing notice send exceeded 1.5 seconds",
+            trace_id=message.trace_id,
+        )
+    if sent:
+        await _conversation_service.record_reply_audit(
+            message,
+            action="reply",
+            reason="processing_notice_sent",
+            model_called=False,
+            safety_blocked=False,
+        )
+    return sent
 
 
 async def _enqueue_group_reply(task: GroupReplyTask) -> None:

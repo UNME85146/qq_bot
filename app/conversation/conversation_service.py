@@ -5,6 +5,8 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 
+import httpx
+
 from app.conversation.prompt_builder import PromptBuilder
 from app.conversation.session_service import ConversationSessionService
 from app.conversation.session_memory_service import SessionMemoryService
@@ -29,6 +31,7 @@ from app.models import GeneratedReply, NormalizedMessage, StorageConfig
 from app.persona.persona_state_service import PersonaStateService
 from app.routing.permission_service import PermissionService
 from app.safety.safety_service import SafetyService
+from app.safety.contextual_safety import GroupSafetyUnavailableError
 from app.storage.repositories import AuditRepository, ConversationRepository
 
 
@@ -102,21 +105,26 @@ class ConversationService:
         try:
             safety_decision = await self._group_safety_classifier.classify(message)
         except Exception as exc:
+            reason = (
+                "group_contextual_safety_network_timeout"
+                if isinstance(exc, (TimeoutError, httpx.TimeoutException))
+                else "group_contextual_safety_failed"
+            )
             await self._system_event(
                 "ERROR",
-                "group_contextual_safety_failed",
+                reason,
                 f"{type(exc).__name__}: {str(exc)[:120]}",
                 message.trace_id,
             )
             await self._audit(
                 message,
                 action="silence",
-                reason="group_contextual_safety_failed",
+                reason=reason,
                 model_called=True,
                 safety_blocked=True,
                 started_at=started_at,
             )
-            return False
+            raise GroupSafetyUnavailableError(reason) from exc
         if safety_decision in {"allow_ordinary", "allow_factual_case_query"}:
             return True
         await self._audit(

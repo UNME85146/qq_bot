@@ -339,8 +339,9 @@ class LoggingConfig:
 @dataclass(frozen=True)
 class ConversationSessionsConfig:
     inactivity_seconds: int = 900
-    chat_delay_min_ms: int = 2000
-    chat_delay_max_ms: int = 3000
+    chat_delay_min_ms: int = 0
+    chat_delay_max_ms: int = 0
+    contextual_safety_timeout_seconds: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -364,7 +365,7 @@ class VideoConfig:
     http_proxy_env: str = "QQ_BOT_VIDEO_HTTP_PROXY"
     socks_proxy_env: str = "QQ_BOT_VIDEO_SOCKS_PROXY"
     cookie_file_env: str = "QQ_BOT_VIDEO_COOKIE_FILE"
-    progress_threshold_seconds: float = 3.0
+    progress_threshold_seconds: float = 1.0
     domain_failure_threshold: int = 2
     domain_recovery_seconds: float = 120.0
     canonical_url_cache_seconds: float = 3600.0

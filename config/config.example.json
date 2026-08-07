@@ -1,201 +1,172 @@
 {
-    "qq":  {
-               "selfId":  "BOT_QQ",
-               "rootUserIds":  [
-                                   "ROOT_QQ"
-                               ],
-               "ownerUserIds":  [
-                                    "OWNER_QQ"
-                                ],
-               "allowedPrivateUserIds":  [
-                                             "OWNER_QQ"
-                                         ],
-               "allowedGroupIds":  [
-                                       "ALLOWED_GROUP_ID"
-                                   ],
-               "groupMuteControllerUserIds":  [
-                                                  "OWNER_QQ"
-                                              ],
-               "memoryAllowedUserIds":  [
-                                            "OWNER_QQ"
-                                        ],
-               "nicknames":  [
-                                 "测试号",
-                                 "机器人"
-                             ]
-           },
-    "onebot":  {
-                   "mode":  "ws_reverse",
-                   "accessTokenEnv":  "QQ_BOT_ONEBOT_TOKEN",
-                   "host":  "127.0.0.1",
-                   "port":  8080,
-                   "apiRoot":  "http://127.0.0.1:3000"
-               },
-    "model":  {
-                  "provider":  "siliconflow",
-                  "apiKeyEnv":  "QQ_BOT_MODEL_API_KEY",
-                  "baseUrl":  "https://api.example.com/v1",
-                  "name":  "your-model-name",
-                  "timeoutSeconds":  90,
-                  "temperature":  0.8,
-                  "maxTokens":  2400
-              },
-    "persona":  {
-                    "mode":  "history_derived_character",
-                    "profilePath":  "persona_profile.example.json"
-                },
-    "reply":  {
-                  "privateAlwaysReply":  true,
-                  "groupMentionReply":  true,
-                  "nicknameReplyProbability":  0.45,
-                  "activeWindowSeconds":  120,
-                  "minDelayMs":  800,
-                  "maxDelayMs":  4000,
-                  "maxReplyLength":  300,
-                  "longTextMaxLength":  2200,
-                  "longTextMaxBubbles":  8
-              },
-    "presence":  {
-                     "focusWindowSeconds":  180,
-                     "baseOnlineProbability":  0.08,
-                     "focusedRepeatProbability":  0.35,
-                     "unfocusedRepeatProbability":  0.05,
-                     "plusOneRepeatProbability":  0.45,
-                     "stickerRepeatProbability":  0.25,
-                     "textRepeatProbability":  0.08
-                 },
-    "limits":  {
-                   "privateCooldownSeconds":  1.5,
-                   "groupCooldownSeconds":  5,
-                   "maxUserMessagesPerMinute":  12,
-                   "maxGroupMessagesPerMinute":  20,
-                   "modelFailureBreakCount":  3,
-                   "modelFailureBreakSeconds":  60
-               },
-    "storage":  {
-                    "databasePath":  "data/bot.db",
-                    "backupDir":  "data/backups",
-                    "saveRawModelText":  false,
-                    "saveRawUserMessage":  true
-                },
-    "logging":  {
-                    "level":  "INFO",
-                    "logDir":  "logs",
-                    "sanitizeMessageContent":  true
-                },
-    "conversationSessions":  {
-                                 "inactivitySeconds":  900,
-                                 "chatDelayMinMs":  2000,
-                                 "chatDelayMaxMs":  3000
-                             },
-    "retry":  {
-                  "maxAttempts":  3,
-                  "timeoutMultipliers":  [
-                                             1,
-                                             2,
-                                             3
-                                         ],
-                  "backoffSeconds":  [
-                                         2,
-                                         5
-                                     ]
-              },
-    "video":  {
-                  "enabled":  false,
-                  "hostCachePath":  "runtime_artifacts/video-cache",
-                  "containerCachePath":  "/path/in/container/qq-bot-media",
-                  "perMessageConcurrency":  3,
-                  "globalConcurrency":  6,
-                  "downloadTimeoutSeconds":  300,
-                  "sendTimeoutSeconds":  90,
-                  "qqVideoMaxBytes":  null,
-                  "minFreeBytes":  0,
-                  "httpProxyEnv":  "QQ_BOT_VIDEO_HTTP_PROXY",
-                  "socksProxyEnv":  "QQ_BOT_VIDEO_SOCKS_PROXY",
-                  "cookieFileEnv":  "QQ_BOT_VIDEO_COOKIE_FILE",
-                  "progressThresholdSeconds":  3,
-                  "domainFailureThreshold":  2,
-                  "domainRecoverySeconds":  120,
-                  "canonicalUrlCacheSeconds":  3600,
-                  "backoffJitterSeconds":  0.5
-              },
-    "news":  {
-                 "enabled":  false,
-                 "defaultTime":  "08:00",
-                 "timezone":  "Asia/Shanghai",
-                 "feeds":  {
-                               "politics":  [
-                                                "https://feeds.example.com/politics.xml"
-                                            ],
-                               "business":  [
-                                                "https://feeds.example.com/business.xml"
-                                            ],
-                               "technology":  [
-                                                  "https://feeds.example.com/technology.xml"
-                                              ],
-                               "finance":  [
-                                               "https://feeds.example.com/finance.xml"
-                                           ]
-                           }
-             },
-    "markets":  {
-                    "enabled":  false,
-                    "alertThresholdPercent":  3,
-                    "pollIntervalSeconds":  300,
-                    "commandTimeoutSeconds":  20,
-                    "providerTimeoutSeconds":  8,
-                    "circuitFailureThreshold":  3,
-                    "circuitRecoverySeconds":  60,
-                    "aShare":  {
-                                   "provider":  "",
-                                   "baseUrl":  "",
-                                   "apiKeyEnv":  ""
-                               },
-                    "aShareFallbacks":  [
-                                            {
-                                                "provider":  "sina",
-                                                "baseUrl":  "https://hq.sinajs.cn",
-                                                "apiKeyEnv":  ""
-                                            }
-                                        ],
-                    "usShare":  {
-                                    "provider":  "",
-                                    "baseUrl":  "",
-                                    "apiKeyEnv":  ""
-                                }
-                },
-    "search":  {
-                   "enabled":  false,
-                   "provider":  "",
-                   "baseUrl":  "",
-                   "apiKeyEnv":  ""
-               },
-    "speech":  {
-                   "enabled":  false,
-                   "baseUrl":  "",
-                   "apiKeyEnv":  "",
-                   "model":  "",
-                   "voice":  "",
-                   "format":  "mp3",
-                   "timeoutSeconds":  60,
-                   "sendTimeoutSeconds":  60,
-                   "cacheDir":  "runtime_artifacts/speech",
-                   "maxChars":  4096,
-                   "privateEnabled":  true,
-                   "groupEnabled":  true,
-                   "privateCooldownSeconds":  30,
-                   "groupCooldownSeconds":  60
-               },
-    "imageGeneration":  {
-                            "enabled":  false,
-                            "baseUrl":  "",
-                            "apiKeyEnv":  "",
-                            "generationEndpoint":  "/images/generations",
-                            "editEndpoint":  "/images/edits",
-                            "model":  "",
-                            "timeoutSeconds":  120,
-                            "sendTimeoutSeconds":  60,
-                            "cacheDir":  "runtime_artifacts/image-generation",
-                            "editWindowSeconds":  180
-                        }
+  "qq": {
+    "selfId": "BOT_QQ",
+    "rootUserIds": ["ROOT_QQ"],
+    "ownerUserIds": ["OWNER_QQ"],
+    "allowedPrivateUserIds": ["OWNER_QQ"],
+    "allowedGroupIds": ["ALLOWED_GROUP_ID"],
+    "groupMuteControllerUserIds": ["OWNER_QQ"],
+    "memoryAllowedUserIds": ["OWNER_QQ"],
+    "nicknames": ["测试号", "机器人"]
+  },
+  "onebot": {
+    "mode": "ws_reverse",
+    "accessTokenEnv": "QQ_BOT_ONEBOT_TOKEN",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "apiRoot": "http://127.0.0.1:3000"
+  },
+  "model": {
+    "provider": "siliconflow",
+    "apiKeyEnv": "QQ_BOT_MODEL_API_KEY",
+    "baseUrl": "https://api.example.com/v1",
+    "name": "your-model-name",
+    "timeoutSeconds": 90,
+    "temperature": 0.8,
+    "maxTokens": 2400
+  },
+  "persona": {
+    "mode": "history_derived_character",
+    "profilePath": "persona_profile.example.json"
+  },
+  "reply": {
+    "privateAlwaysReply": true,
+    "groupMentionReply": true,
+    "nicknameReplyProbability": 0.45,
+    "activeWindowSeconds": 120,
+    "minDelayMs": 800,
+    "maxDelayMs": 4000,
+    "maxReplyLength": 300,
+    "longTextMaxLength": 2200,
+    "longTextMaxBubbles": 8
+  },
+  "presence": {
+    "focusWindowSeconds": 180,
+    "baseOnlineProbability": 0.08,
+    "focusedRepeatProbability": 0.35,
+    "unfocusedRepeatProbability": 0.05,
+    "plusOneRepeatProbability": 0.45,
+    "stickerRepeatProbability": 0.25,
+    "textRepeatProbability": 0.08
+  },
+  "limits": {
+    "privateCooldownSeconds": 1.5,
+    "groupCooldownSeconds": 5,
+    "maxUserMessagesPerMinute": 12,
+    "maxGroupMessagesPerMinute": 20,
+    "modelFailureBreakCount": 3,
+    "modelFailureBreakSeconds": 60
+  },
+  "storage": {
+    "databasePath": "data/bot.db",
+    "backupDir": "data/backups",
+    "saveRawModelText": false,
+    "saveRawUserMessage": true
+  },
+  "logging": {
+    "level": "INFO",
+    "logDir": "logs",
+    "sanitizeMessageContent": true
+  },
+  "conversationSessions": {
+    "inactivitySeconds": 900,
+    "chatDelayMinMs": 0,
+    "chatDelayMaxMs": 0,
+    "contextualSafetyTimeoutSeconds": 5
+  },
+  "retry": {
+    "maxAttempts": 3,
+    "timeoutMultipliers": [1, 2, 3],
+    "backoffSeconds": [2, 5]
+  },
+  "video": {
+    "enabled": false,
+    "hostCachePath": "runtime_artifacts/video-cache",
+    "containerCachePath": "/path/in/container/qq-bot-media",
+    "perMessageConcurrency": 3,
+    "globalConcurrency": 6,
+    "downloadTimeoutSeconds": 300,
+    "sendTimeoutSeconds": 90,
+    "qqVideoMaxBytes": null,
+    "minFreeBytes": 0,
+    "httpProxyEnv": "QQ_BOT_VIDEO_HTTP_PROXY",
+    "socksProxyEnv": "QQ_BOT_VIDEO_SOCKS_PROXY",
+    "cookieFileEnv": "QQ_BOT_VIDEO_COOKIE_FILE",
+    "progressThresholdSeconds": 1,
+    "domainFailureThreshold": 2,
+    "domainRecoverySeconds": 120,
+    "canonicalUrlCacheSeconds": 3600,
+    "backoffJitterSeconds": 0.5
+  },
+  "news": {
+    "enabled": false,
+    "defaultTime": "08:00",
+    "timezone": "Asia/Shanghai",
+    "feeds": {
+      "politics": ["https://feeds.example.com/politics.xml"],
+      "business": ["https://feeds.example.com/business.xml"],
+      "technology": ["https://feeds.example.com/technology.xml"],
+      "finance": ["https://feeds.example.com/finance.xml"]
+    }
+  },
+  "markets": {
+    "enabled": false,
+    "alertThresholdPercent": 3,
+    "pollIntervalSeconds": 300,
+    "commandTimeoutSeconds": 20,
+    "providerTimeoutSeconds": 8,
+    "circuitFailureThreshold": 3,
+    "circuitRecoverySeconds": 60,
+    "aShare": {
+      "provider": "",
+      "baseUrl": "",
+      "apiKeyEnv": ""
+    },
+    "aShareFallbacks": [
+      {
+        "provider": "sina",
+        "baseUrl": "https://hq.sinajs.cn",
+        "apiKeyEnv": ""
+      }
+    ],
+    "usShare": {
+      "provider": "",
+      "baseUrl": "",
+      "apiKeyEnv": ""
+    }
+  },
+  "search": {
+    "enabled": false,
+    "provider": "",
+    "baseUrl": "",
+    "apiKeyEnv": ""
+  },
+  "speech": {
+    "enabled": false,
+    "baseUrl": "",
+    "apiKeyEnv": "",
+    "model": "",
+    "voice": "",
+    "format": "mp3",
+    "timeoutSeconds": 60,
+    "sendTimeoutSeconds": 60,
+    "cacheDir": "runtime_artifacts/speech",
+    "maxChars": 4096,
+    "privateEnabled": true,
+    "groupEnabled": true,
+    "privateCooldownSeconds": 30,
+    "groupCooldownSeconds": 60
+  },
+  "imageGeneration": {
+    "enabled": false,
+    "baseUrl": "",
+    "apiKeyEnv": "",
+    "generationEndpoint": "/images/generations",
+    "editEndpoint": "/images/edits",
+    "model": "",
+    "timeoutSeconds": 120,
+    "sendTimeoutSeconds": 60,
+    "cacheDir": "runtime_artifacts/image-generation",
+    "editWindowSeconds": 180
+  }
 }

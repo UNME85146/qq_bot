@@ -178,8 +178,11 @@ def _config_block(raw: dict[str, Any], name: str) -> dict[str, Any]:
 def _load_conversation_sessions_config(raw: dict[str, Any]) -> ConversationSessionsConfig:
     config = ConversationSessionsConfig(
         inactivity_seconds=int(raw.get("inactivitySeconds", 900)),
-        chat_delay_min_ms=int(raw.get("chatDelayMinMs", 2000)),
-        chat_delay_max_ms=int(raw.get("chatDelayMaxMs", 3000)),
+        chat_delay_min_ms=int(raw.get("chatDelayMinMs", 0)),
+        chat_delay_max_ms=int(raw.get("chatDelayMaxMs", 0)),
+        contextual_safety_timeout_seconds=float(
+            raw.get("contextualSafetyTimeoutSeconds", 5.0)
+        ),
     )
     if config.inactivity_seconds <= 0:
         raise ValueError("conversationSessions.inactivitySeconds must be positive")
@@ -188,6 +191,10 @@ def _load_conversation_sessions_config(raw: dict[str, Any]) -> ConversationSessi
     if config.chat_delay_min_ms > config.chat_delay_max_ms:
         raise ValueError(
             "conversationSessions.chatDelayMinMs must not exceed chatDelayMaxMs"
+        )
+    if config.contextual_safety_timeout_seconds <= 0:
+        raise ValueError(
+            "conversationSessions.contextualSafetyTimeoutSeconds must be positive"
         )
     return config
 
@@ -238,7 +245,7 @@ def _load_video_config(raw: dict[str, Any]) -> VideoConfig:
         cookie_file_env=str(
             raw.get("cookieFileEnv", "QQ_BOT_VIDEO_COOKIE_FILE")
         ).strip(),
-        progress_threshold_seconds=float(raw.get("progressThresholdSeconds", 3.0)),
+        progress_threshold_seconds=float(raw.get("progressThresholdSeconds", 1.0)),
         domain_failure_threshold=int(raw.get("domainFailureThreshold", 2)),
         domain_recovery_seconds=float(raw.get("domainRecoverySeconds", 120.0)),
         canonical_url_cache_seconds=float(raw.get("canonicalUrlCacheSeconds", 3600.0)),
