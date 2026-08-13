@@ -320,9 +320,10 @@ def _execute(
 
         pre_napcat = _napcat_state(str(target["napcatContainer"]))
         pre_tts = _tts_state()
+        listener_host, listener_port = _onebot_listener(root / "config/config.json")
         if service_was_active:
             _run(["systemctl", "stop", service])
-        if _is_active(service) or _tcp_listening("127.0.0.1", 8080):
+        if _is_active(service) or _tcp_listening(listener_host, listener_port):
             raise DeploymentError("qq-bot.service did not quiesce before backup")
         _write_journal(
             journal_path,
@@ -546,6 +547,7 @@ def _execute(
         if rollback_ok and pre_napcat is not None and pre_tts is not None:
             rollback_ok = _verify_rollback_dependencies(
                 service=service,
+                root=root,
                 napcat_container=str(target["napcatContainer"]),
                 expected_napcat=pre_napcat,
                 expected_tts=pre_tts,
@@ -1563,7 +1565,7 @@ def _rollback(**values) -> bool:
     errors: list[str] | None = values.get("errors")
     if errors is None:
         errors = []
-    if not _quiesce_service(service, errors):
+    if not _quiesce_service(service, root, errors):
         return False
 
     _run_rollback_step(
@@ -1615,7 +1617,7 @@ def _rollback(**values) -> bool:
         errors,
     )
     if errors:
-        _quiesce_service(service, errors)
+        _quiesce_service(service, root, errors)
         return False
     return _restore_service_state(
         service,
@@ -1625,14 +1627,21 @@ def _rollback(**values) -> bool:
     )
 
 
-def _quiesce_service(service: str, errors: list[str]) -> bool:
+def _quiesce_service(service: str, root: Path, errors: list[str]) -> bool:
     result = _run(["systemctl", "stop", service], check=False)
     if result.returncode != 0:
         errors.append(f"quiesce: systemctl stop exited {result.returncode}")
     if _is_active(service):
         errors.append("quiesce: service remained active")
-    if _tcp_listening("127.0.0.1", 8080):
-        errors.append("quiesce: OneBot listener remained reachable")
+    try:
+        listener_host, listener_port = _onebot_listener(root / "config/config.json")
+    except BaseException:
+        # Rollback must still be able to replace a damaged runtime config after
+        # systemd has successfully stopped the service.
+        pass
+    else:
+        if _tcp_listening(listener_host, listener_port):
+            errors.append("quiesce: OneBot listener remained reachable")
     return not errors
 
 
@@ -1657,7 +1666,7 @@ def _restore_service_state(
     initial_error_count = len(errors)
     if not was_active:
         if _is_active(service):
-            _quiesce_service(service, errors)
+            _quiesce_service(service, root, errors)
         return len(errors) == initial_error_count
 
     started_at = datetime.now(UTC)
@@ -1680,6 +1689,7 @@ def _restore_service_state(
 def _verify_rollback_dependencies(
     *,
     service: str,
+    root: Path,
     napcat_container: str,
     expected_napcat: dict[str, Any],
     expected_tts: dict[str, Any],
@@ -1697,7 +1707,7 @@ def _verify_rollback_dependencies(
     except BaseException as exc:
         errors.append(f"rollback_historical_tts: {_safe_error(exc)}")
     if len(errors) != initial_error_count:
-        _quiesce_service(service, errors)
+        _quiesce_service(service, root, errors)
         return False
     return True
 
@@ -1949,6 +1959,16 @@ def _tcp_listening(host: str, port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _onebot_listener(config_path: Path) -> tuple[str, int]:
+    payload = _read_json(config_path)
+    onebot = _object(payload.get("onebot"))
+    host = str(onebot.get("host") or "").strip()
+    port = onebot.get("port")
+    if not host or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise DeploymentError("runtime OneBot listener is invalid")
+    return host, port
 
 
 def _read_os_release() -> dict[str, str]:

@@ -35,6 +35,9 @@ class ModelConfig:
     max_tokens: int
     api_key: str | None
     use_mock: bool
+    reasoning_effort: str | None = None
+    base_url_candidates: tuple[str, ...] = ()
+    endpoint_probe_interval_seconds: float = 60.0
 
 
 @dataclass(frozen=True)

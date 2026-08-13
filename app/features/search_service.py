@@ -112,13 +112,6 @@ class GroupSearchCommandService:
             )
         if not results:
             return SearchCommandResult(True, "没有找到可用资料", "search_empty")
-        if len(results) < self._minimum_results:
-            return SearchCommandResult(
-                True,
-                f"可核验资料不足 {self._minimum_results} 条（当前 {len(results)} 条），"
-                "为避免补造，本次不发送不完整结果",
-                "search_insufficient_results",
-            )
         effective_page_size = self._page_size
         if len(results) < self._page_size * 2:
             effective_page_size = len(results)

@@ -90,7 +90,9 @@ class ConversationService:
             message.text,
             scope_type=message.scope_type,
         )
-        if input_safety.action == "block":
+        if input_safety.action in {"allow", "rewrite"}:
+            return True
+        if self._group_safety_classifier is None:
             await self._audit(
                 message,
                 action="silence",
@@ -100,8 +102,6 @@ class ConversationService:
                 started_at=started_at,
             )
             return False
-        if self._group_safety_classifier is None:
-            return True
         try:
             safety_decision = await self._group_safety_classifier.classify(message)
         except Exception as exc:

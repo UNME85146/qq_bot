@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import sys
 import time
@@ -66,24 +67,51 @@ class AkShareMarketProvider:
         import akshare as ak
 
         frame = ak.stock_zh_a_spot_em()
-        code = symbol.split(".", 1)[0]
-        matched = frame.loc[frame["代码"].astype(str).str.zfill(6) == code]
+        raw_symbol = symbol.strip().upper()
+        raw_code, _separator, raw_suffix = raw_symbol.partition(".")
+        is_code_query = raw_code.isdigit()
+        code = raw_code.zfill(6) if is_code_query else ""
+        matched = (
+            frame.loc[frame["代码"].astype(str).str.zfill(6) == code]
+            if is_code_query
+            else frame.iloc[0:0]
+        )
+        if matched.empty and not is_code_query:
+            names = frame["名称"].astype(str).str.strip()
+            exact = frame.loc[names == symbol.strip()]
+            starts_with = frame.loc[names.str.startswith(symbol.strip())]
+            contains = frame.loc[names.str.contains(symbol.strip(), regex=False)]
+            matched = (
+                exact
+                if not exact.empty
+                else starts_with
+                if not starts_with.empty
+                else contains
+            )
         if matched.empty:
             raise RuntimeError("stock symbol was not found")
         row = matched.iloc[0]
-        price = float(row["最新价"])
-        previous = float(row["昨收"]) if "昨收" in row and row["昨收"] else None
+        code = str(row["代码"]).zfill(6)
+        suffix = raw_suffix if raw_suffix in {"SH", "SZ", "BJ"} else _a_share_suffix(code)
+        canonical_symbol = f"{code}.{suffix}"
+        raw_name = str(row["名称"]).strip() if "名称" in row else ""
+        name = raw_name or None
+        price = _coerce_float(row["最新价"])
+        if price is None:
+            raise RuntimeError("stock quote was unavailable")
+        previous = _coerce_float(row["昨收"]) if "昨收" in row else None
         raw_change = row["涨跌幅"] if "涨跌幅" in row else None
-        change = float(raw_change) if raw_change is not None else None
+        change = _coerce_float(raw_change)
         return MarketQuote(
             market=market,
-            symbol=symbol,
+            symbol=canonical_symbol,
             price=price,
             previous_close=previous,
             change_percent=change,
             source="东方财富 via AkShare",
             observed_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
             delayed=True,
+            name=name,
         )
 
 
@@ -451,6 +479,22 @@ def _sina_symbol(symbol: str) -> str:
     if suffix == "BJ":
         return f"bj{code}"
     raise ValueError("unsupported A-share symbol")
+
+
+def _a_share_suffix(code: str) -> str:
+    if code.startswith(("4", "8")):
+        return "BJ"
+    if code.startswith(("5", "6", "9")):
+        return "SH"
+    return "SZ"
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _sina_observed_at(fields: list[str]) -> str:

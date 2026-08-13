@@ -47,6 +47,7 @@ class MarketQuote:
     previous_close: float | None = None
     change_percent: float | None = None
     delayed: bool = True
+    name: str | None = None
 
 
 @dataclass(frozen=True)

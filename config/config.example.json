@@ -13,14 +13,17 @@
     "mode": "ws_reverse",
     "accessTokenEnv": "QQ_BOT_ONEBOT_TOKEN",
     "host": "127.0.0.1",
-    "port": 8080,
+    "port": 8081,
     "apiRoot": "http://127.0.0.1:3000"
   },
   "model": {
-    "provider": "siliconflow",
+    "provider": "openai-compatible",
     "apiKeyEnv": "QQ_BOT_MODEL_API_KEY",
     "baseUrl": "https://api.example.com/v1",
+    "baseUrlCandidates": [],
+    "endpointProbeIntervalSeconds": 60,
     "name": "your-model-name",
+    "reasoningEffort": null,
     "timeoutSeconds": 90,
     "temperature": 0.8,
     "maxTokens": 2400

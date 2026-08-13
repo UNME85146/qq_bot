@@ -66,7 +66,7 @@ Start the bot:
 The default reverse WebSocket target is:
 
 ```text
-ws://127.0.0.1:8080/onebot/v11/ws
+ws://127.0.0.1:8081/onebot/v11/ws
 ```
 
 ## User Commands

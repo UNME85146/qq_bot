@@ -36,7 +36,7 @@ _BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 _GROUP_HELP_ENTRIES = (
     "抖音/B站链接 - 自动下载并发送视频文件",
     "#政事 / #财经 / #科技 / #金融 - 今日分类新闻",
-    "#A股 / #美股 - 市场概览",
+    "#A股 - AkShare板块概览 / #美股 - 市场概览 / #牧原 或 #00001 - 查询 A 股个股",
     "#股票添加 代码 [成本=价格] [数量=数量] [预警=百分比]",
     "#股票删除 代码 / #我的股票 [详情]",
     "#chat 查一下 关键词 [--page 页码] / #chat 评价一下@群成员",
@@ -221,13 +221,6 @@ class NewsCommandService:
         if not items:
             return [], NewsCommandResult(
                 True, f"{label}今日暂无可用新闻", "news_empty"
-            )
-        if len(items) < self._minimum_items:
-            return [], NewsCommandResult(
-                True,
-                f"{label}可核验新闻不足 {self._minimum_items} 条（当前 {len(items)} 条），"
-                "为避免补造，本次不发送不完整简报",
-                "news_insufficient_items",
             )
         try:
             localized = await localize_information_fields(

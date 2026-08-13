@@ -6,6 +6,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -104,6 +105,11 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             max_tokens=int(model["maxTokens"]),
             api_key=api_key,
             use_mock=api_key is None,
+            reasoning_effort=(
+                str(model.get("reasoningEffort") or "").strip().lower() or None
+            ),
+            base_url_candidates=_load_model_base_url_candidates(model),
+            endpoint_probe_interval_seconds=_load_endpoint_probe_interval(model),
         ),
         persona=persona_config,
         reply=ReplyConfig(
@@ -173,6 +179,49 @@ def _config_block(raw: dict[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(block, dict):
         raise ValueError(f"{name} must be an object")
     return block
+
+
+def _load_model_base_url_candidates(model: dict[str, Any]) -> tuple[str, ...]:
+    raw_candidates = model.get("baseUrlCandidates")
+    if raw_candidates is None:
+        return ()
+    if not isinstance(raw_candidates, list):
+        raise ValueError("model.baseUrlCandidates must be an array")
+    if not raw_candidates:
+        return ()
+
+    candidates: list[str] = []
+    for value in raw_candidates:
+        if not isinstance(value, str):
+            raise ValueError("model.baseUrlCandidates must contain strings")
+        normalized = _normalize_model_base_url(value)
+        if normalized not in candidates:
+            candidates.append(normalized)
+    if len(candidates) < 2:
+        raise ValueError("model.baseUrlCandidates must contain at least two distinct URLs")
+    return tuple(candidates)
+
+
+def _normalize_model_base_url(value: str) -> str:
+    raw = value.strip().rstrip("/")
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("model.baseUrlCandidates entries must be HTTPS base URLs")
+    return raw
+
+
+def _load_endpoint_probe_interval(model: dict[str, Any]) -> float:
+    value = float(model.get("endpointProbeIntervalSeconds", 60.0))
+    if value < 10.0 or value > 3600.0:
+        raise ValueError("model.endpointProbeIntervalSeconds must be between 10 and 3600")
+    return value
 
 
 def _load_conversation_sessions_config(raw: dict[str, Any]) -> ConversationSessionsConfig:

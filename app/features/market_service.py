@@ -119,7 +119,62 @@ class MarketCommandService:
                 details=watch_match.group(1) is not None,
                 page=page,
             )
+        stock_match = re.fullmatch(r"#([^\s#]{1,20})", text)
+        if stock_match is not None:
+            query = _normalize_lookup_query(stock_match.group(1))
+            if query is not None:
+                return await self._lookup_stock(query)
         return None
+
+    async def _lookup_stock(self, query: str) -> MarketCommandResult:
+        provider = self._providers.get("a_share")
+        if provider is None:
+            return MarketCommandResult(
+                True,
+                "A股行情功能未配置",
+                "stock_lookup_unconfigured",
+            )
+        started = time.perf_counter()
+        try:
+            quote = await asyncio.wait_for(
+                provider.quote("a_share", query),
+                timeout=self._command_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.perf_counter() - started
+            return MarketCommandResult(
+                True,
+                f"个股查询超时：命令总时限 {self._command_timeout_seconds:g} 秒（耗时 {elapsed:.2f} 秒）",
+                "stock_lookup_timeout",
+            )
+        except Exception:
+            elapsed = time.perf_counter() - started
+            return MarketCommandResult(
+                True,
+                f"个股查询失败：未找到匹配股票或数据源暂不可用（耗时 {elapsed:.2f} 秒）",
+                "stock_lookup_failed",
+            )
+        if not isinstance(quote, MarketQuote):
+            return MarketCommandResult(
+                True,
+                "个股查询失败：数据源返回格式无效",
+                "stock_lookup_failed",
+            )
+        name = quote.name or query
+        change = _quote_change_percent(quote)
+        change_text = f"，涨跌 {change:+.2f}%" if change is not None else ""
+        previous_text = (
+            f"，昨收 {quote.previous_close:.2f}"
+            if quote.previous_close is not None
+            else ""
+        )
+        text = (
+            f"{name}（{quote.symbol}）：现价 {quote.price:.2f}"
+            f"{change_text}{previous_text}\n"
+            f"来源：{quote.source}，数据时间{_format_market_time(quote.observed_at)}；"
+            "数据可能延迟，仅供参考，不用于自动交易"
+        )
+        return MarketCommandResult(True, text, "stock_lookup")
 
     async def _overview(self, market: str, label: str) -> MarketCommandResult:
         provider = self._providers.get(market)
@@ -127,24 +182,30 @@ class MarketCommandService:
             return MarketCommandResult(True, f"{label}行情功能未配置", "market_unconfigured")
         started = time.perf_counter()
         sectors = _SECTOR_SPECS[market]
+        tasks: list[asyncio.Task[MarketQuote]] = [
+            asyncio.create_task(provider.quote(market, sector.symbol))
+            for sector in sectors
+        ]
+        timed_out = False
         try:
-            async with asyncio.timeout(self._command_timeout_seconds):
-                quotes = list(
-                    await asyncio.gather(
-                        *(
-                            provider.quote(market, sector.symbol)
-                            for sector in sectors
-                        ),
-                        return_exceptions=True,
-                    )
-                )
-        except TimeoutError:
-            elapsed = time.perf_counter() - started
-            return MarketCommandResult(
-                True,
-                f"{label}行情获取超时：命令总时限 {self._command_timeout_seconds:g} 秒（耗时 {elapsed:.2f} 秒）",
-                "market_timeout",
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=self._command_timeout_seconds,
+                return_when=asyncio.ALL_COMPLETED,
             )
+            timed_out = bool(pending)
+            if pending:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            quotes: list[object] = [None] * len(tasks)
+            task_indexes = {task: index for index, task in enumerate(tasks)}
+            for task in done:
+                index = task_indexes[task]
+                try:
+                    quotes[index] = task.result()
+                except BaseException as exc:
+                    quotes[index] = exc
         except Exception:
             elapsed = time.perf_counter() - started
             return MarketCommandResult(
@@ -155,36 +216,53 @@ class MarketCommandService:
         elapsed = time.perf_counter() - started
         successful = [quote for quote in quotes if isinstance(quote, MarketQuote)]
         if not successful:
+            if timed_out:
+                return MarketCommandResult(
+                    True,
+                    f"{label}行情获取超时：命令总时限 {self._command_timeout_seconds:g} 秒（耗时 {elapsed:.2f} 秒）",
+                    "market_timeout",
+                )
             return MarketCommandResult(
                 True,
                 f"{label}行情获取失败：数据源暂不可用（耗时 {elapsed:.2f} 秒）",
                 "market_failed",
             )
-        if len(successful) < len(sectors):
-            return MarketCommandResult(
-                True,
-                (
-                    f"{label}行情数据不完整：仅获取 {len(successful)}/{len(sectors)} 个板块，"
-                    f"本次不发送不完整股报（耗时 {elapsed:.2f} 秒）"
-                ),
-                "market_incomplete",
-            )
+        successful_pairs = [
+            (sector, quote)
+            for sector, quote in zip(sectors, quotes, strict=True)
+            if isinstance(quote, MarketQuote)
+        ]
         blocks = [
             _format_sector_report(index, sector, quote)
-            for index, (sector, quote) in enumerate(zip(sectors, quotes, strict=True), start=1)
+            for index, (sector, quote) in enumerate(successful_pairs, start=1)
         ]
         observed_at = _latest_observed_at(successful)
+        footer = (
+            "共 20 个板块；数据可能延迟，仅供参考，不用于自动交易"
+            if len(successful_pairs) == len(sectors) and not timed_out
+            else (
+                f"仅获取 {len(successful_pairs)}/{len(sectors)} 个板块；"
+                + (
+                    "其余板块未能在命令总时限内完成，"
+                    if timed_out
+                    else "其余板块暂不可用，"
+                )
+                + "数据可能延迟，仅供参考，不用于自动交易"
+            )
+        )
         structured = build_structured_reply(
             header=f"{label}20板块核心股报｜查询截止 {observed_at}｜耗时 {elapsed:.2f} 秒",
             blocks=blocks,
             page_size=len(blocks),
-            footer="共 20 个板块；数据可能延迟，仅供参考，不用于自动交易",
+            footer=footer,
             fallback_message=_build_market_brief(label, sectors, quotes, elapsed),
         )
         return MarketCommandResult(
             True,
             structured.text,
-            "market_overview",
+            "market_overview"
+            if len(successful_pairs) == len(sectors) and not timed_out
+            else "market_overview_partial",
             structured=structured,
         )
 
@@ -295,6 +373,19 @@ def _normalize_symbol(raw: str) -> tuple[str, str]:
     raise ValueError("invalid symbol")
 
 
+def _normalize_lookup_query(raw: str) -> str | None:
+    value = raw.strip()
+    if re.fullmatch(r"\d{5}", value):
+        value = value.zfill(6)
+    if re.fullmatch(r"\d{6}", value):
+        return _normalize_symbol(value)[0]
+    if re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", value.upper()):
+        return value.upper()
+    if re.fullmatch(r"[\u4e00-\u9fff]{2,20}", value):
+        return value
+    return None
+
+
 def _parse_options(parts: list[str]) -> dict[str, float]:
     result = {}
     names = {"成本": "cost", "数量": "quantity", "预警": "alert"}
@@ -369,10 +460,22 @@ def _build_market_brief(
     elapsed: float,
 ) -> str:
     lines = [f"{label}板块核心股简报（二次汇总）"]
-    for index, (sector, quote) in enumerate(zip(sectors, quotes, strict=True), start=1):
-        tendency = _sector_tendency(quote) if isinstance(quote, MarketQuote) else "数据暂缺"
+    successful_pairs = [
+        (sector, quote)
+        for sector, quote in zip(sectors, quotes, strict=True)
+        if isinstance(quote, MarketQuote)
+    ]
+    for index, (sector, quote) in enumerate(successful_pairs, start=1):
+        tendency = _sector_tendency(quote)
         lines.append(f"{index}. {sector.name}：{sector.company}，{tendency}")
-    lines.append(f"共 20 个板块，耗时 {elapsed:.2f} 秒；完整版本超过平台单次发送上限，已汇总一次。")
+    if len(successful_pairs) == len(sectors):
+        footer = f"共 20 个板块，耗时 {elapsed:.2f} 秒；完整版本超过平台单次发送上限，已汇总一次。"
+    else:
+        footer = (
+            f"仅获取 {len(successful_pairs)}/{len(sectors)} 个板块，耗时 {elapsed:.2f} 秒；"
+            "其余板块暂不可用，已汇总可核验内容。"
+        )
+    lines.append(footer)
     return "\n".join(lines)
 
 

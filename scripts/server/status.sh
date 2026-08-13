@@ -27,10 +27,10 @@ fi
 echo
 echo "== ports =="
 if command -v ss >/dev/null 2>&1; then
-  ss -ltnp '( sport = :8080 or sport = :6099 )' || true
+  ss -ltnp '( sport = :8081 or sport = :6099 )' || true
   echo
   echo "== onebot established =="
-  ss -tan | awk '$1 ~ /ESTAB/ && $4 ~ /:8080$/ {print}' || true
+  ss -tan | awk '$1 ~ /ESTAB/ && $4 ~ /:8081$/ {print}' || true
 else
   echo "ss not found"
 fi
