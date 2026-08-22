@@ -41,14 +41,19 @@ def migrate_runtime_config(
         "mode": "history_derived_character",
         "profilePath": "persona_profile.local.json",
     }
-    migrated["conversationSessions"] = _merge_defaults(
+    conversation_sessions = _merge_defaults(
         migrated.get("conversationSessions"),
         {
             "inactivitySeconds": 900,
-            "chatDelayMinMs": 2000,
-            "chatDelayMaxMs": 3000,
+            "chatDelayMinMs": 0,
+            "chatDelayMaxMs": 0,
+            "relationTimeoutSeconds": 1.2,
+            "pendingRetentionDays": 30,
+            "groupModelTimeoutSeconds": 18,
         },
     )
+    conversation_sessions.pop("contextualSafetyTimeoutSeconds", None)
+    migrated["conversationSessions"] = conversation_sessions
     migrated["retry"] = _merge_defaults(
         migrated.get("retry"),
         {
