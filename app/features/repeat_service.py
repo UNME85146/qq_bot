@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from app.features.presence_service import BotPresenceService
 from app.models import GroupMessageIndex, NormalizedMessage, QQConfig, StickerAsset
 from app.routing.permission_service import PermissionService
-from app.safety.safety_service import SafetyService
 from app.storage.repositories import (
     GroupMessageIndexRepository,
     MessageRepeatStateRepository,
@@ -38,14 +37,12 @@ class RepeatService:
         repeat_state_repository: MessageRepeatStateRepository,
         sticker_repository: StickerAssetRepository,
         presence_service: BotPresenceService,
-        safety_service: SafetyService,
         qq_config: QQConfig,
     ) -> None:
         self._message_index_repository = message_index_repository
         self._repeat_state_repository = repeat_state_repository
         self._sticker_repository = sticker_repository
         self._presence_service = presence_service
-        self._safety_service = safety_service
         self._permission_service = PermissionService(qq_config)
         self._self_id = qq_config.self_id
 
@@ -171,7 +168,7 @@ class RepeatService:
                 repeat_kind="sticker",
                 segment_message_ids=(indexed.message_id,),
             )
-        if not is_repeatable_text(indexed.text, self._safety_service):
+        if not is_repeatable_text(indexed.text):
             return None
         return RepeatCandidate(
             group_id=indexed.group_id,
@@ -188,7 +185,7 @@ class RepeatService:
         indexed: GroupMessageIndex,
     ) -> RepeatCandidate | None:
         normalized = normalize_repeat_text(indexed.text)
-        if not normalized or not is_repeatable_text(normalized, self._safety_service):
+        if not normalized or not is_repeatable_text(normalized):
             return None
         recent = await self._message_index_repository.recent_messages(
             indexed.group_id,
@@ -202,7 +199,7 @@ class RepeatService:
             if (
                 not text
                 or text != normalized
-                or not is_repeatable_text(text, self._safety_service)
+                or not is_repeatable_text(text)
             ):
                 break
             segment_ids.append(item.message_id)
@@ -224,7 +221,7 @@ def is_plus_one_text(text: str) -> bool:
     return compact in PLUS_ONE_TEXTS
 
 
-def is_repeatable_text(text: str, safety_service: SafetyService) -> bool:
+def is_repeatable_text(text: str) -> bool:
     cleaned = normalize_repeat_text(text)
     if not cleaned or len(cleaned) > 60:
         return False
@@ -234,10 +231,7 @@ def is_repeatable_text(text: str, safety_service: SafetyService) -> bool:
         return False
     if re.search(r"\[CQ:[^\]]+\]", cleaned):
         return False
-    if not safety_service.can_store_long_term_memory(cleaned):
-        return False
-    check = safety_service.check_input(cleaned, scope_type="group")
-    return check.action == "allow"
+    return True
 
 
 def normalize_repeat_text(text: str) -> str:

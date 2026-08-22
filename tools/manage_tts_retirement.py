@@ -47,7 +47,7 @@ class TtsRetirementSpec:
             sources={
                 "unit": Path("/etc/systemd/system/qq-bot-tts.service"),
                 "adapter": root / "scripts/server/moss_tts_adapter.py",
-                "environment": Path("/home/your-server-user/moss_tts_nano"),
+                "environment": Path("/opt/moss_tts_nano"),
                 "cache": root / "data/tts",
             },
             backup_names={

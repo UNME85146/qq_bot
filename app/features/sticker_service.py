@@ -55,21 +55,22 @@ class StickerService:
             return StickerSaveResult(None, "not_allowed")
         if not message.media_items:
             return StickerSaveResult(None, "no_media")
-        if not self._safety_service.can_store_long_term_memory(message.text):
-            return StickerSaveResult(None, "sensitive_text")
-        input_safety = self._safety_service.check_input(
-            message.text,
-            scope_type=message.scope_type,
-        )
-        if input_safety.action == "block":
-            return StickerSaveResult(None, f"text_{input_safety.reason}")
+        if message.scope_type != "group":
+            if not self._safety_service.can_store_long_term_memory(message.text):
+                return StickerSaveResult(None, "sensitive_text")
+            input_safety = self._safety_service.check_input(
+                message.text,
+                scope_type=message.scope_type,
+            )
+            if input_safety.action == "block":
+                return StickerSaveResult(None, f"text_{input_safety.reason}")
 
         image = _first_sticker_image_with_url(message.media_items)
         if image is None:
             if any(item.type == "image" and item.url for item in message.media_items):
                 return StickerSaveResult(None, "not_sticker_media")
             return StickerSaveResult(None, "no_image_url")
-        if self._image_classifier is not None:
+        if self._image_classifier is not None and message.scope_type != "group":
             try:
                 classification = await self._image_classifier(image.url or "", message.scope_type)
             except Exception:

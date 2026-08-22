@@ -295,6 +295,9 @@ async def init_database(
               model_called INTEGER NOT NULL DEFAULT 0,
               safety_blocked INTEGER NOT NULL DEFAULT 0,
               elapsed_ms INTEGER,
+              response_text TEXT,
+              delivery_status TEXT,
+              sent_message_ids TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
@@ -471,6 +474,7 @@ async def _migration_002_sessions_and_features(db: aiosqlite.Connection) -> None
           display_name TEXT,
           summary TEXT NOT NULL DEFAULT '',
           metrics_json TEXT NOT NULL DEFAULT '{}',
+          preference_notes TEXT NOT NULL DEFAULT '',
           message_count INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL DEFAULT (datetime('now')),
           PRIMARY KEY(group_id, user_id)
@@ -537,6 +541,35 @@ async def _migration_003_news_delivery_checkpoints(
     )
 
 
+async def _migration_004_audit_and_member_preferences(
+    db: aiosqlite.Connection,
+) -> None:
+    await _add_column_if_missing(
+        db,
+        table="group_member_profiles",
+        column="preference_notes",
+        definition="TEXT NOT NULL DEFAULT ''",
+    )
+    await _add_column_if_missing(
+        db,
+        table="reply_audits",
+        column="response_text",
+        definition="TEXT",
+    )
+    await _add_column_if_missing(
+        db,
+        table="reply_audits",
+        column="delivery_status",
+        definition="TEXT",
+    )
+    await _add_column_if_missing(
+        db,
+        table="reply_audits",
+        column="sent_message_ids",
+        definition="TEXT",
+    )
+
+
 MIGRATIONS = (
     Migration(version=1, name="baseline schema"),
     Migration(
@@ -548,6 +581,11 @@ MIGRATIONS = (
         version=3,
         name="scheduled news delivery checkpoints",
         action=_migration_003_news_delivery_checkpoints,
+    ),
+    Migration(
+        version=4,
+        name="audit delivery evidence and member preferences",
+        action=_migration_004_audit_and_member_preferences,
     ),
 )
 LATEST_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)

@@ -15,7 +15,6 @@ from app.features.structured_reply import (
 )
 from app.model.llm_client import LlmClient
 from app.models import NormalizedMessage
-from app.safety.safety_service import SafetyService
 from app.storage.repositories import (
     ConversationRepository,
     ConversationSessionRepository,
@@ -41,7 +40,6 @@ class GroupSearchCommandService:
         conversation_repository: ConversationRepository,
         session_repository: ConversationSessionRepository,
         profile_repository: GroupMemberProfileRepository,
-        safety_service: SafetyService,
         max_results: int = 40,
         page_size: int = 20,
         minimum_results: int = 20,
@@ -51,7 +49,6 @@ class GroupSearchCommandService:
         self._conversations = conversation_repository
         self._sessions = session_repository
         self._profiles = profile_repository
-        self._safety = safety_service
         self._max_results = max_results
         self._page_size = page_size
         self._minimum_results = minimum_results
@@ -88,13 +85,6 @@ class GroupSearchCommandService:
                 True,
                 "用法：#chat 查一下 关键词",
                 "search_query_missing",
-            )
-        safety = self._safety.check_input(query, scope_type="group")
-        if safety.action == "block":
-            return SearchCommandResult(
-                True,
-                safety.replacement_text or "这个查询不适合处理。",
-                "search_query_blocked",
             )
         if self._search_provider is None:
             return SearchCommandResult(
@@ -211,7 +201,6 @@ class GroupSearchCommandService:
                 for row in rows
                 if row.get("role") == "user"
                 and str(row.get("user_id")) == target_id
-                and self._safety.can_store_long_term_memory(str(row.get("content") or ""))
             ]
         if not history and (profile is None or not profile.summary.strip()):
             return SearchCommandResult(
@@ -257,18 +246,9 @@ class GroupSearchCommandService:
                 "evaluation_model_failed",
                 model_called=True,
             )
-        output = self._safety.check_output(generated.text, scope_type="group")
-        if output.action == "block":
-            return SearchCommandResult(
-                True,
-                "这类内容不适合在群里评价",
-                "evaluation_output_blocked",
-                model_called=True,
-            )
-        text = output.replacement_text if output.action == "rewrite" else generated.text
         return SearchCommandResult(
             True,
-            text.strip(),
+            generated.text.strip(),
             "member_evaluation",
             model_called=True,
         )

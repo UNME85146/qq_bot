@@ -623,7 +623,6 @@ def _reload_group_chat(new_config) -> None:
     if hasattr(group_chat, "_search_command_service"):
         from app.features.search_providers import create_search_provider
         from app.features.search_service import GroupSearchCommandService
-        from app.safety.safety_service import SafetyService as SearchSafetyService
         from app.storage.repositories import (
             ConversationRepository,
             ConversationSessionRepository,
@@ -645,10 +644,6 @@ def _reload_group_chat(new_config) -> None:
             profile_repository=GroupMemberProfileRepository(
                 new_config.storage.database_path
             ),
-            safety_service=SearchSafetyService(
-                identity_disclosure=new_config.persona.style_profile.identity_disclosure,
-                source_user_id=new_config.persona.style_profile.source_user_id,
-            ),
         )
     group_chat._group_mute_repository = GroupMuteStateRepository(  # noqa: SLF001
         new_config.storage.database_path
@@ -666,16 +661,10 @@ def _reload_group_chat(new_config) -> None:
             new_config.storage.database_path
         )
     if hasattr(group_chat, "_pending_question_service"):
-        from app.safety.safety_service import SafetyService
         from app.routing.group_pending import GroupPendingQuestionService
 
-        safety_service = SafetyService(
-            identity_disclosure=new_config.persona.style_profile.identity_disclosure,
-            source_user_id=new_config.persona.style_profile.source_user_id,
-        )
         group_chat._pending_question_service = GroupPendingQuestionService(  # noqa: SLF001
             repository=group_chat._pending_question_repository,  # noqa: SLF001
-            safety_service=safety_service,
         )
     group_chat._rate_limiter = RateLimiter(  # noqa: SLF001
         new_config.limits.group_cooldown_seconds,
@@ -697,13 +686,6 @@ def _reload_group_chat(new_config) -> None:
             retry_policy=new_config.retry,
             record_system_event=group_chat._conversation_service.record_system_event,  # noqa: SLF001
         )
-    if hasattr(group_chat, "_voice_safety_service"):
-        group_chat._voice_safety_service = SafetyService(  # noqa: SLF001
-            identity_disclosure=new_config.persona.style_profile.identity_disclosure,
-            source_user_id=new_config.persona.style_profile.source_user_id,
-        )
-
-
 def _reload_group_reactions(new_config) -> None:
     try:
         import app.plugins.group_reactions as group_reactions

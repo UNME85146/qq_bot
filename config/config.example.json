@@ -1,13 +1,28 @@
 {
   "qq": {
     "selfId": "BOT_QQ",
-    "rootUserIds": ["ROOT_QQ"],
-    "ownerUserIds": ["OWNER_QQ"],
-    "allowedPrivateUserIds": ["OWNER_QQ"],
-    "allowedGroupIds": ["ALLOWED_GROUP_ID"],
-    "groupMuteControllerUserIds": ["OWNER_QQ"],
-    "memoryAllowedUserIds": ["OWNER_QQ"],
-    "nicknames": ["测试号", "机器人"]
+    "rootUserIds": [
+      "ROOT_QQ"
+    ],
+    "ownerUserIds": [
+      "OWNER_QQ"
+    ],
+    "allowedPrivateUserIds": [
+      "OWNER_QQ"
+    ],
+    "allowedGroupIds": [
+      "ALLOWED_GROUP_ID"
+    ],
+    "groupMuteControllerUserIds": [
+      "OWNER_QQ"
+    ],
+    "memoryAllowedUserIds": [
+      "OWNER_QQ"
+    ],
+    "nicknames": [
+      "测试号",
+      "机器人"
+    ]
   },
   "onebot": {
     "mode": "ws_reverse",
@@ -75,12 +90,21 @@
     "inactivitySeconds": 900,
     "chatDelayMinMs": 0,
     "chatDelayMaxMs": 0,
-    "contextualSafetyTimeoutSeconds": 5
+    "relationTimeoutSeconds": 1.2,
+    "pendingRetentionDays": 30,
+    "groupModelTimeoutSeconds": 18
   },
   "retry": {
     "maxAttempts": 3,
-    "timeoutMultipliers": [1, 2, 3],
-    "backoffSeconds": [2, 5]
+    "timeoutMultipliers": [
+      1,
+      2,
+      3
+    ],
+    "backoffSeconds": [
+      2,
+      5
+    ]
   },
   "video": {
     "enabled": false,
@@ -106,10 +130,18 @@
     "defaultTime": "08:00",
     "timezone": "Asia/Shanghai",
     "feeds": {
-      "politics": ["https://feeds.example.com/politics.xml"],
-      "business": ["https://feeds.example.com/business.xml"],
-      "technology": ["https://feeds.example.com/technology.xml"],
-      "finance": ["https://feeds.example.com/finance.xml"]
+      "politics": [
+        "https://feeds.example.com/politics.xml"
+      ],
+      "business": [
+        "https://feeds.example.com/business.xml"
+      ],
+      "technology": [
+        "https://feeds.example.com/technology.xml"
+      ],
+      "finance": [
+        "https://feeds.example.com/finance.xml"
+      ]
     }
   },
   "markets": {
@@ -121,7 +153,7 @@
     "circuitFailureThreshold": 3,
     "circuitRecoverySeconds": 60,
     "aShare": {
-      "provider": "",
+      "provider": "akshare",
       "baseUrl": "",
       "apiKeyEnv": ""
     },

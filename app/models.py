@@ -115,6 +115,7 @@ class GroupMemberProfile:
     metrics: dict[str, int]
     message_count: int
     updated_at: str | None
+    preference_notes: str = ""
 
 
 @dataclass(frozen=True)
@@ -344,7 +345,9 @@ class ConversationSessionsConfig:
     inactivity_seconds: int = 900
     chat_delay_min_ms: int = 0
     chat_delay_max_ms: int = 0
-    contextual_safety_timeout_seconds: float = 5.0
+    relation_timeout_seconds: float = 1.2
+    pending_retention_days: int = 30
+    group_model_timeout_seconds: float = 18.0
 
 
 @dataclass(frozen=True)

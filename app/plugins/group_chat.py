@@ -71,8 +71,6 @@ from app.routing.direct_intent import DirectReplyIntent, parse_direct_reply_inte
 from app.routing.permission_service import PermissionService
 from app.routing.rate_limiter import RateLimiter
 from app.routing.group_trigger import contains_nickname, nickname_probability_passes
-from app.safety.contextual_safety import GroupSafetyUnavailableError
-from app.safety.safety_service import SafetyService
 from app.storage.repositories import (
     BotSentMessageRepository,
     ConversationRepository,
@@ -99,10 +97,6 @@ _bot_sent_repository = BotSentMessageRepository(_config.storage.database_path)
 _pending_question_repository = GroupPendingQuestionRepository(_config.storage.database_path)
 _pending_question_service = GroupPendingQuestionService(
     repository=_pending_question_repository,
-    safety_service=SafetyService(
-        identity_disclosure=_config.persona.style_profile.identity_disclosure,
-        source_user_id=_config.persona.style_profile.source_user_id,
-    ),
 )
 _news_subscription_repository = GroupNewsSubscriptionRepository(
     _config.storage.database_path
@@ -143,10 +137,6 @@ _search_command_service = GroupSearchCommandService(
     conversation_repository=ConversationRepository(_config.storage.database_path),
     session_repository=ConversationSessionRepository(_config.storage.database_path),
     profile_repository=GroupMemberProfileRepository(_config.storage.database_path),
-    safety_service=SafetyService(
-        identity_disclosure=_config.persona.style_profile.identity_disclosure,
-        source_user_id=_config.persona.style_profile.source_user_id,
-    ),
 )
 _video_extractor = (
     YtDlpVideoExtractor(
@@ -181,10 +171,6 @@ _tts_service = SpeechService(
     provider=create_speech_provider(_config.speech),
     retry_policy=_config.retry,
     record_system_event=_conversation_service.record_system_event,
-)
-_voice_safety_service = SafetyService(
-    identity_disclosure=_config.persona.style_profile.identity_disclosure,
-    source_user_id=_config.persona.style_profile.source_user_id,
 )
 _active_windows: dict[tuple[str, str], float] = {}
 _group_reply_queues: dict[str, asyncio.Queue["GroupReplyTask"]] = {}
@@ -285,6 +271,18 @@ async def _start_reminder_worker(bot: Bot) -> None:
     if _reminder_worker_started:
         return
     _reminder_worker_started = True
+    try:
+        expired = await _pending_question_repository.expire_stale(
+            retention_days=_config.conversation_sessions.pending_retention_days,
+        )
+        if expired:
+            await _conversation_service.record_system_event(
+                level="INFO",
+                event="group_pending_questions_expired",
+                detail=f"count={expired}; retention_days={_config.conversation_sessions.pending_retention_days}",
+            )
+    except Exception:
+        logger.exception("Failed to expire stale group pending questions")
     asyncio.create_task(reminder_worker(_runtime_bot_proxy, _feature_hub))
     asyncio.create_task(_runtime_news_subscription_worker(_runtime_bot_proxy))
     asyncio.create_task(_runtime_market_alert_worker(_runtime_bot_proxy))
@@ -670,12 +668,25 @@ async def _try_handle_group_information_feature(
         result = await _search_command_service.handle(message)
     if result is None:
         return False
-    send_error = lambda exc, index, bubble: _record_send_error(
-        message.trace_id,
-        exc,
-        index,
-        "send_group_feature_reply_failed",
-    )
+    sent_bubbles: list[str] = []
+    sent_message_ids: list[str] = []
+    send_failed = False
+
+    async def send_error(exc, index, bubble):
+        nonlocal send_failed
+        send_failed = True
+        await _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_group_feature_reply_failed",
+        )
+
+    async def on_sent(index, bubble, sent_message_id):
+        del index
+        sent_bubbles.append(str(bubble))
+        if sent_message_id:
+            sent_message_ids.append(str(sent_message_id))
     structured = getattr(result, "structured", None)
     if structured is not None:
         await send_structured_information(
@@ -686,6 +697,7 @@ async def _try_handle_group_information_feature(
             scope_type="group",
             reply_config=_config.reply,
             on_send_error=send_error,
+            on_sent=on_sent,
         )
     else:
         await send_reply_bubbles(
@@ -695,13 +707,24 @@ async def _try_handle_group_information_feature(
             scope_type="group",
             reply_config=_config.reply,
             on_send_error=send_error,
+            on_sent=on_sent,
         )
+    delivery_status = (
+        "sent"
+        if sent_bubbles and not send_failed
+        else "partial"
+        if sent_bubbles
+        else "failed"
+    )
     await _conversation_service.record_reply_audit(
         message,
         action="reply",
         reason=result.reason,
         model_called=bool(getattr(result, "model_called", False)),
         safety_blocked=False,
+        response_text="\n".join(sent_bubbles) if sent_bubbles else None,
+        delivery_status=delivery_status,
+        sent_message_ids=tuple(sent_message_ids),
     )
     return True
 
@@ -714,13 +737,6 @@ async def _try_handle_group_image_generation_feature(
     command = parse_image_command(message.text)
     if command is None:
         return False
-    try:
-        allowed = await _conversation_service.allow_group_feature_request(message)
-    except GroupSafetyUnavailableError:
-        await _send_group_safety_unavailable_reply(bot, event, message)
-        return True
-    if not allowed:
-        return True
     if message.group_id is None:
         return True
 
@@ -756,16 +772,6 @@ async def _try_handle_group_image_generation_feature(
         return True
 
     category = _image_service.failure_category(message.trace_id)
-    if category == "safety_rejected":
-        await _conversation_service.record_reply_audit(
-            message,
-            action="silence",
-            reason="group_image_safety_blocked",
-            model_called=True,
-            safety_blocked=True,
-        )
-        return True
-
     failure_text = _image_service.failure_message(message.trace_id) or "图片处理失败：未知错误"
     await send_reply_bubbles(
         bot,
@@ -967,42 +973,10 @@ async def _prepare_group_chat_session_with_feedback(
     *,
     referenced_session_id: str | None,
 ) -> NormalizedMessage | None:
-    try:
-        return await _prepare_group_chat_session(
-            message,
-            referenced_session_id=referenced_session_id,
-        )
-    except GroupSafetyUnavailableError:
-        await _send_group_safety_unavailable_reply(bot, event, message)
-        return None
-
-
-async def _send_group_safety_unavailable_reply(
-    bot: Bot,
-    event: GroupMessageEvent,
-    message: NormalizedMessage,
-) -> None:
-    await send_reply_bubbles(
-        bot,
-        event,
-        "服务暂时超时，请稍后再试。",
-        scope_type="group",
-        reply_config=_config.reply,
-        group_reply_to_message_id=message.message_id,
-        group_at_user_id=message.user_id,
-        on_send_error=lambda exc, index, bubble: _record_send_error(
-            message.trace_id,
-            exc,
-            index,
-            "send_group_safety_timeout_reply_failed",
-        ),
-    )
-    await _conversation_service.record_reply_audit(
+    del bot, event
+    return await _prepare_group_chat_session(
         message,
-        action="reply",
-        reason="group_contextual_safety_unavailable",
-        model_called=False,
-        safety_blocked=True,
+        referenced_session_id=referenced_session_id,
     )
 
 
@@ -1673,9 +1647,6 @@ async def _try_send_group_explicit_voice(
         explicit_text = extract_explicit_voice_read_text(message)
     if explicit_text is None:
         return False
-    safety = _voice_safety_service.check_input(explicit_text, scope_type=message.scope_type)
-    if safety.action != "allow":
-        return False
     await record_explicit_voice_selected(
         message,
         config=_voice_config(),
@@ -1940,13 +1911,9 @@ def _sticker_battle_query_text(message: NormalizedMessage) -> str:
 
 
 async def _is_sticker_asset_sendable(asset) -> bool:
-    if _feature_hub.sticker_analysis is None:
-        return True
-    analysis = await _feature_hub.sticker_analysis.get_completed_analysis(asset.asset_id)
-    return not (
-        analysis is not None
-        and analysis.safety_category in {"adult", "illegal", "violence", "privacy"}
-    )
+    # Group safety interception is disabled; provider/library analysis remains
+    # telemetry only and must not suppress a requested group sticker.
+    return True
 
 
 async def _send_context_sticker_missing_text(

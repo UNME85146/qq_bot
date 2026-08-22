@@ -9,6 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 try {
+    $utilityModule = Join-Path $PSHOME `
+        'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'
+    Import-Module $utilityModule -Global -ErrorAction Stop
     Import-Module (Join-Path $PSScriptRoot 'QQBot.WslAutostart.psm1') -Force
     $result = Invoke-QQBotWslAutostart @PSBoundParameters
     $result | ConvertTo-Json -Depth 8 -Compress

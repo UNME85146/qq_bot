@@ -122,6 +122,7 @@ async def send_structured_information(
     scope_type: str,
     reply_config: ReplyConfig,
     on_send_error,
+    on_sent=None,
 ) -> None:
     bubbles = build_structured_information_messages(messages)
     fallbacks = list(fallback_messages)
@@ -129,7 +130,7 @@ async def send_structured_information(
         if index > 0:
             await asyncio.sleep(_message_delay_seconds(reply_config, scope_type=scope_type))
         try:
-            await bot.send(
+            result = await bot.send(
                 event,
                 _build_outgoing_message(
                     bubble,
@@ -139,11 +140,13 @@ async def send_structured_information(
                     group_at_user_id=None,
                 ),
             )
+            if on_sent is not None:
+                await on_sent(index, bubble, _extract_sent_message_id(result))
         except Exception as exc:
             fallback = fallbacks[index].strip() if index < len(fallbacks) else ""
             if fallback and is_message_too_long_error(exc):
                 try:
-                    await bot.send(
+                    result = await bot.send(
                         event,
                         _build_outgoing_message(
                             fallback,
@@ -153,6 +156,8 @@ async def send_structured_information(
                             group_at_user_id=None,
                         ),
                     )
+                    if on_sent is not None:
+                        await on_sent(index, fallback, _extract_sent_message_id(result))
                     continue
                 except Exception as fallback_exc:
                     await on_send_error(fallback_exc, index, fallback)

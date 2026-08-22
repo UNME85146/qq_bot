@@ -49,6 +49,8 @@ class ModelResilienceService:
         *,
         scope_type: str,
         now: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> ModelCallResult:
         current = time.monotonic() if now is None else now
         if self._is_breaker_open(current):
@@ -70,7 +72,12 @@ class ModelResilienceService:
             attempts += 1
             started_at = time.monotonic()
             try:
-                reply = await self._model_client.generate(messages)
+                reply = await _call_model(
+                    self._model_client,
+                    messages,
+                    max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                )
             except Exception as exc:
                 elapsed_ms = int((time.monotonic() - started_at) * 1000)
                 failure = classify_model_exception(exc)
@@ -220,3 +227,22 @@ def _redact_sensitive_text(text: str) -> str:
     for marker in ("QQ_BOT_MODEL_API_KEY", "QQ_BOT_ONEBOT_TOKEN"):
         redacted = redacted.replace(marker, "[redacted_env]")
     return redacted
+
+
+async def _call_model(
+    model_client: LlmClient,
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int | None,
+    reasoning_effort: str | None,
+) -> GeneratedReply:
+    if max_tokens is None and reasoning_effort is None:
+        return await model_client.generate(messages)
+    generate_with_options = getattr(model_client, "generate_with_options", None)
+    if callable(generate_with_options):
+        return await generate_with_options(
+            messages,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+    return await model_client.generate(messages)

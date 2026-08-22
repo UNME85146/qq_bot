@@ -17,7 +17,6 @@ from app.models import AppConfig
 from app.persona.persona_state_service import PersonaStateService
 from app.routing.permission_service import PermissionService
 from app.safety.safety_service import SafetyService
-from app.safety.contextual_safety import ModelGroupSafetyClassifier
 from app.storage.repositories import (
     AuditRepository,
     ConversationRepository,
@@ -85,10 +84,12 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
     conversation_session_service = ConversationSessionService(
         ConversationSessionRepository(config.storage.database_path),
         inactivity_seconds=config.conversation_sessions.inactivity_seconds,
+        relation_timeout_seconds=config.conversation_sessions.relation_timeout_seconds,
         relation_classifier=ModelSessionRelationClassifier(
             model_client=model_client,
             conversation_repository=conversation_repository,
             session_memory_repository=session_memory_repository,
+            reasoning_effort=config.model.reasoning_effort,
         ),
     )
     return ConversationService(
@@ -108,19 +109,14 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         model_resilience_service=model_resilience_service,
         image_understanding_service=ImageUnderstandingService(
             model_resilience_service=model_resilience_service,
+            request_timeout_seconds=config.conversation_sessions.group_model_timeout_seconds,
+            reasoning_effort=config.model.reasoning_effort,
         ),
         model_context_service=model_context_service,
         conversation_session_service=conversation_session_service,
         session_memory_service=session_memory_service,
         group_member_profile_service=group_member_profile_service,
-        group_safety_classifier=(
-            None
-            if config.model.use_mock
-            else ModelGroupSafetyClassifier(
-                model_client,
-                timeout_seconds=(
-                    config.conversation_sessions.contextual_safety_timeout_seconds
-                ),
-            )
-        ),
+        group_model_max_tokens=min(config.model.max_tokens, 320),
+        group_reasoning_effort=config.model.reasoning_effort,
+        group_model_timeout_seconds=config.conversation_sessions.group_model_timeout_seconds,
     )

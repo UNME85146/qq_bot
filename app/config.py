@@ -229,9 +229,9 @@ def _load_conversation_sessions_config(raw: dict[str, Any]) -> ConversationSessi
         inactivity_seconds=int(raw.get("inactivitySeconds", 900)),
         chat_delay_min_ms=int(raw.get("chatDelayMinMs", 0)),
         chat_delay_max_ms=int(raw.get("chatDelayMaxMs", 0)),
-        contextual_safety_timeout_seconds=float(
-            raw.get("contextualSafetyTimeoutSeconds", 5.0)
-        ),
+        relation_timeout_seconds=float(raw.get("relationTimeoutSeconds", 1.2)),
+        pending_retention_days=int(raw.get("pendingRetentionDays", 30)),
+        group_model_timeout_seconds=float(raw.get("groupModelTimeoutSeconds", 18.0)),
     )
     if config.inactivity_seconds <= 0:
         raise ValueError("conversationSessions.inactivitySeconds must be positive")
@@ -241,10 +241,12 @@ def _load_conversation_sessions_config(raw: dict[str, Any]) -> ConversationSessi
         raise ValueError(
             "conversationSessions.chatDelayMinMs must not exceed chatDelayMaxMs"
         )
-    if config.contextual_safety_timeout_seconds <= 0:
-        raise ValueError(
-            "conversationSessions.contextualSafetyTimeoutSeconds must be positive"
-        )
+    if config.relation_timeout_seconds <= 0:
+        raise ValueError("conversationSessions.relationTimeoutSeconds must be positive")
+    if config.pending_retention_days <= 0:
+        raise ValueError("conversationSessions.pendingRetentionDays must be positive")
+    if config.group_model_timeout_seconds <= 0:
+        raise ValueError("conversationSessions.groupModelTimeoutSeconds must be positive")
     return config
 
 

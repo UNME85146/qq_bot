@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
@@ -61,18 +62,26 @@ class ModelContextService:
         sticker_analyses: list[StickerAssetAnalysis] = []
         member_profile_context = ""
         if message.group_id:
-            await self.remember_group_terms(message)
-            group_context = await self._safe_get_group_context(message.group_id)
-            current_indexed_message = await self._get_current_indexed_message(message)
-            referenced_message = await self._get_referenced_message(message)
-            semantic_lines = await self._matched_semantic_lines(message, referenced_message)
-            sticker_analyses = await self._get_sticker_analyses(
+            (
+                group_context,
                 current_indexed_message,
                 referenced_message,
+                member_profile_context,
+            ) = await asyncio.gather(
+                self._safe_get_group_context(message.group_id),
+                self._get_current_indexed_message(message),
+                self._get_referenced_message(message),
+                self._get_group_member_profile_context(
+                    message.group_id,
+                    message.user_id,
+                ),
             )
-            member_profile_context = await self._get_group_member_profile_context(
-                message.group_id,
-                message.user_id,
+            semantic_lines, sticker_analyses = await asyncio.gather(
+                self._matched_semantic_lines(message, referenced_message),
+                self._get_sticker_analyses(
+                    current_indexed_message,
+                    referenced_message,
+                ),
             )
 
         intent = _restate_current_message(message, referenced_message, image_intent)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import time
 from typing import Any
 
 from app.model.resilience import ModelResilienceService
@@ -21,8 +23,31 @@ class ImageAnalysisResult:
 
 
 class ImageUnderstandingService:
-    def __init__(self, *, model_resilience_service: ModelResilienceService) -> None:
+    def __init__(
+        self,
+        *,
+        model_resilience_service: ModelResilienceService,
+        classification_cache_ttl_seconds: float = 300.0,
+        classification_cache_limit: int = 256,
+        request_timeout_seconds: float = 18.0,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        if classification_cache_ttl_seconds <= 0:
+            raise ValueError("classification_cache_ttl_seconds must be positive")
+        if classification_cache_limit <= 0:
+            raise ValueError("classification_cache_limit must be positive")
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
         self._model_resilience_service = model_resilience_service
+        self._classification_cache_ttl_seconds = classification_cache_ttl_seconds
+        self._classification_cache_limit = classification_cache_limit
+        self._request_timeout_seconds = request_timeout_seconds
+        self._reasoning_effort = reasoning_effort
+        self._classification_cache: dict[str, tuple[float, str]] = {}
+        self._classification_inflight: dict[
+            str,
+            asyncio.Task[ImageAnalysisResult],
+        ] = {}
 
     async def analyze(
         self,
@@ -36,39 +61,61 @@ class ImageUnderstandingService:
         if image is None:
             return None
 
-        safety = await self._classify_image(image.url or "", scope_type=scope_type)
-        if safety.category in HIGH_RISK_IMAGE_CATEGORIES:
-            return ImageAnalysisResult(
-                action="silence" if scope_type == "group" else "refuse",
-                category=safety.category,
-                model_called=safety.model_called,
-                failure_reason=safety.failure_reason,
-            )
-        if safety.category != "safe":
-            reply = GeneratedReply(
-                text=_image_unavailable_text(scope_type),
-                raw_model_text=_image_unavailable_text(scope_type),
-                model_name="vision",
-                finish_reason=safety.failure_reason or safety.category,
-            )
-            return ImageAnalysisResult(
-                action="reply",
-                category=safety.category,
-                reply=reply,
-                model_called=safety.model_called,
-                failure_reason=safety.failure_reason,
-            )
+        if scope_type != "group":
+            safety = await self._classify_image(image.url or "", scope_type=scope_type)
+            if safety.category in HIGH_RISK_IMAGE_CATEGORIES:
+                return ImageAnalysisResult(
+                    action="refuse",
+                    category=safety.category,
+                    model_called=safety.model_called,
+                    failure_reason=safety.failure_reason,
+                )
+            if safety.category != "safe":
+                reply = GeneratedReply(
+                    text=_image_unavailable_text(scope_type),
+                    raw_model_text=_image_unavailable_text(scope_type),
+                    model_name="vision",
+                    finish_reason=safety.failure_reason or safety.category,
+                )
+                return ImageAnalysisResult(
+                    action="reply",
+                    category=safety.category,
+                    reply=reply,
+                    model_called=safety.model_called,
+                    failure_reason=safety.failure_reason,
+                )
 
         prompt_text = (
-            "请看这张 QQ 群聊图片，只用中文短句回复。"
-            "不要输出图片安全分类，不要描述任何隐私细节。"
+            "请看这张 QQ 聊天图片，只用中文短句回复。"
+            "不要输出图片安全分类。"
             f"\n用户附带文字：{user_text or '无'}"
         )
         messages = [
             {"role": "system", "content": style_system_prompt},
             {"role": "user", "content": _multimodal_content(prompt_text, image.url or "")},
         ]
-        result = await self._model_resilience_service.generate(messages, scope_type=scope_type)
+        try:
+            async with asyncio.timeout(self._request_timeout_seconds):
+                result = await self._model_resilience_service.generate(
+                    messages,
+                    scope_type=scope_type,
+                    max_tokens=320,
+                    reasoning_effort=self._reasoning_effort,
+                )
+        except TimeoutError:
+            unavailable = _image_unavailable_text(scope_type)
+            return ImageAnalysisResult(
+                action="reply",
+                category="unknown",
+                reply=GeneratedReply(
+                    text=unavailable,
+                    raw_model_text=unavailable,
+                    model_name="vision",
+                    finish_reason="timeout",
+                ),
+                model_called=True,
+                failure_reason="timeout",
+            )
         return ImageAnalysisResult(
             action="reply",
             category="safe",
@@ -78,6 +125,29 @@ class ImageUnderstandingService:
         )
 
     async def _classify_image(self, image_url: str, *, scope_type: str) -> ImageAnalysisResult:
+        cached = self._cached_classification(image_url)
+        if cached is not None:
+            return cached
+        task = self._classification_inflight.get(image_url)
+        if task is None:
+            task = asyncio.create_task(
+                self._classify_image_uncached(image_url, scope_type=scope_type)
+            )
+            self._classification_inflight[image_url] = task
+            task.add_done_callback(
+                lambda completed, url=image_url: self._finish_classification_task(
+                    url,
+                    completed,
+                )
+            )
+        return await asyncio.shield(task)
+
+    async def _classify_image_uncached(
+        self,
+        image_url: str,
+        *,
+        scope_type: str,
+    ) -> ImageAnalysisResult:
         messages = [
             {
                 "role": "system",
@@ -92,10 +162,32 @@ class ImageUnderstandingService:
                 "content": _multimodal_content("请分类这张图片。", image_url),
             },
         ]
-        result = await self._model_resilience_service.generate(messages, scope_type=scope_type)
+        try:
+            async with asyncio.timeout(self._request_timeout_seconds):
+                result = await self._model_resilience_service.generate(
+                    messages,
+                    scope_type=scope_type,
+                    max_tokens=16,
+                    reasoning_effort=self._reasoning_effort,
+                )
+        except TimeoutError:
+            return ImageAnalysisResult(
+                action="classify",
+                category="unknown",
+                model_called=True,
+                failure_reason="timeout",
+            )
         category = _normalize_category(result.reply.raw_model_text or result.reply.text)
         if result.failure_reason is not None:
             category = "unknown"
+        else:
+            self._classification_cache[image_url] = (time.monotonic(), category)
+            if len(self._classification_cache) > self._classification_cache_limit:
+                oldest = min(
+                    self._classification_cache,
+                    key=lambda key: self._classification_cache[key][0],
+                )
+                self._classification_cache.pop(oldest, None)
         return ImageAnalysisResult(
             action="classify",
             category=category,
@@ -103,6 +195,28 @@ class ImageUnderstandingService:
             model_called=result.model_called,
             failure_reason=result.failure_reason,
         )
+
+    def _cached_classification(self, image_url: str) -> ImageAnalysisResult | None:
+        cached = self._classification_cache.get(image_url)
+        if cached is None:
+            return None
+        cached_at, cached_category = cached
+        if time.monotonic() - cached_at >= self._classification_cache_ttl_seconds:
+            self._classification_cache.pop(image_url, None)
+            return None
+        return ImageAnalysisResult(
+            action="classify",
+            category=cached_category,
+            model_called=False,
+        )
+
+    def _finish_classification_task(
+        self,
+        image_url: str,
+        completed: asyncio.Task[ImageAnalysisResult],
+    ) -> None:
+        if self._classification_inflight.get(image_url) is completed:
+            self._classification_inflight.pop(image_url, None)
 
 
 def first_image_with_url(media_items: tuple[MediaItem, ...]) -> MediaItem | None:

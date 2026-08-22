@@ -8,7 +8,11 @@ This GitHub repository is a sanitized public export. The private development tre
 
 - Stable bot-owned persona derived from validated, low-sensitivity aggregate metrics. Raw chat text, source QQ identifiers, free-text profiles, and group identifiers are not prompt inputs.
 - Root and owner permissions, private/group allowlists, group mute controls, per-group FIFO chat queues, reminders, memory, image understanding, stickers, and audited administration commands.
+- Group reply paths do not run project-level safety classifiers. Text, group images, image generation, explicit voice, search/evaluation, repeats, stickers, and pending enqueue go directly through their feature routes; private-chat safety and low-sensitivity long-term storage controls remain enabled.
+- Normal short group model calls use at most 320 completion tokens, forward the configured reasoning effort, and stop at an 18-second default hard deadline. Dormant-session relation checks use 32 tokens and a 1.2-second deadline.
+- Current group display names and explicit "do not use this phrase/name" preferences are persisted separately from historical style. Question-like pending rows expire after 30 days by default without being deleted or marked answered.
 - Dedicated structured reply mode for help, news, market, and search results. Help is one complete eight-line message; full information messages are attempted first and are summarized once only when OneBot explicitly rejects their length.
+- Information-feature audits store the actual successfully sent bubble text, delivery status, and available OneBot message IDs in schema v4.
 - News feeds are isolated per feed and publish redacted health telemetry. Scheduled news uses resumable at-least-once delivery checkpoints.
 - A-share provider fallback with closed/open/half-open circuit recovery. A-share and US-share reports fetch 20 sector core stocks concurrently under a command deadline without listing per-stock percentage changes. Provider telemetry records redacted category, stage, attempt count, and latency.
 - Video egress preflight covers DNS, TCP, TLS, and HTTP. HTTP/SOCKS proxies are read only from configured environment variables. Supported short URLs are canonicalized once and cached.
@@ -82,7 +86,9 @@ Group information entry points:
 #新闻订阅 [HH:MM]  #新闻订阅状态  #新闻退订
 ```
 
-The group `/help` response is one message containing all eight feature lines. Each news category requires at least 20 verifiable items and keeps title, source, Beijing time, and URL together. Search requires at least 20 results: 20-39 results are delivered together, while 40 results use two complete 20-result pages. Titles, summaries, times, statuses, and explanations are Chinese; source names, URLs, and command syntax may retain their original form. If OneBot explicitly rejects a complete information message as too long, the bot performs one compact-summary retry instead of proactively truncating it.
+The group `/help` response is one message containing all eight feature lines. News and search send any non-empty set of verifiable results instead of discarding a short upstream response. Each atomic block keeps its title, source, time/summary, and URL together; larger result sets retain the existing paging rules. Titles, summaries, times, statuses, and explanations are Chinese; source names, URLs, and command syntax may retain their original form. If OneBot explicitly rejects a complete information message as too long, the bot performs one compact-summary retry instead of proactively truncating it.
+
+Group image understanding skips project-level safety classification and calls the configured multimodal model directly. Private images retain classification and short refusal behavior. Private classification results are cached for five minutes, concurrent requests for the same URL share one classification call, and image model calls use the configured low reasoning budget and group hard deadline.
 
 Owner/root private commands include:
 

@@ -106,7 +106,6 @@ def create_runtime_feature_hub(config: AppConfig) -> RuntimeFeatureHub:
             repeat_state_repository=repeat_states,
             sticker_repository=stickers,
             presence_service=presence,
-            safety_service=safety_service,
             qq_config=config.qq,
         ),
         sticker_analysis_service=StickerAnalysisService(

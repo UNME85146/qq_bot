@@ -19,6 +19,7 @@ class PromptBuilder:
         long_term_memory: str = "",
         model_context: str = "",
         voice_scope_type: str | None = "private",
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         profile = self._persona.style_profile
         if self._persona.mode == "history_derived_character":
@@ -42,6 +43,8 @@ class PromptBuilder:
         system_parts = persona_parts + [
             "长期记忆、群名片、群内语义词和旧梗只作背景；当前问题无关时不要主动带入。",
             "普通寒暄要像正常 QQ 对话，不要把称呼、问候和无关动词硬拼在一起。",
+            "用户明确否定的称呼、口头禅或固定话术优先级最高；不要从旧历史中恢复已被删除的表达。",
+            "除非当前用户主动要求，不要自动使用晚安、早点睡、早睡等固定收尾话术。",
             "如果用户要表情包、图片、语音、读一句或念一句，前置逻辑会处理；你不要用文字假装发送媒体。",
             "不要输出“（发送一个表情包）”“正在语音回复中”“念给你听”“读完了”这类动作说明。",
             "除非用户明确追问实现细节，不要主动提模型、prompt、本地加载、硬件或 TTS 机制。",
@@ -93,7 +96,7 @@ class PromptBuilder:
                 continue
             content = row.get("content", "").strip()
             if content:
-                content = _format_history_content(row, content)
+                content = _format_history_content(row, content, current_user_id=user_id)
                 messages.append({"role": role, "content": content})
 
         messages.append(
@@ -117,6 +120,7 @@ class PromptBuilder:
         long_term_memory: str = "",
         group_context: str = "",
         model_context: str = "",
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         messages = self.build_private_prompt(
             user_name=user_name,
@@ -126,6 +130,7 @@ class PromptBuilder:
             long_term_memory=long_term_memory,
             model_context=model_context,
             voice_scope_type=None,
+            user_id=user_id,
         )
         voice_instruction = self._voice_reply_instruction("group")
         if voice_instruction is not None and voice_instruction not in messages[0]["content"]:
@@ -182,6 +187,7 @@ class PromptBuilder:
         long_term_memory: str = "",
         group_context: str = "",
         model_context: str = "",
+        user_id: str | None = None,
     ) -> str:
         return self.build_group_prompt(
             user_name=user_name,
@@ -191,6 +197,7 @@ class PromptBuilder:
             long_term_memory=long_term_memory,
             group_context=group_context,
             model_context=model_context,
+            user_id=user_id,
         )[0]["content"]
 
 
@@ -211,10 +218,17 @@ def _format_behavior_profile(profile) -> str:
     return "\n".join(section for section in sections if not section.endswith("无。"))
 
 
-def _format_history_content(row: dict[str, Any], content: str) -> str:
+def _format_history_content(
+    row: dict[str, Any],
+    content: str,
+    *,
+    current_user_id: str | None = None,
+) -> str:
     if row.get("scope_type") != "group" or row.get("role") != "user":
         return content
     user_name = str(row.get("user_name") or "").strip()
+    if current_user_id and str(row.get("user_id") or "") == current_user_id:
+        return content
     if not user_name:
         return content
     if content.startswith(f"{user_name}:") or content.startswith(f"{user_name}："):

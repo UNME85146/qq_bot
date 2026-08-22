@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -386,6 +386,7 @@ class GroupMemberProfileRepository:
                   display_name,
                   summary,
                   metrics_json,
+                  preference_notes,
                   message_count,
                   updated_at
                 FROM group_member_profiles
@@ -405,6 +406,7 @@ class GroupMemberProfileRepository:
         summary: str,
         metrics: dict[str, int],
         message_count: int,
+        preference_notes: str = "",
     ) -> GroupMemberProfile:
         async with connect_database(self._database_path) as db:
             await db.execute(
@@ -415,13 +417,15 @@ class GroupMemberProfileRepository:
                   display_name,
                   summary,
                   metrics_json,
+                  preference_notes,
                   message_count,
                   updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(group_id, user_id) DO UPDATE SET
                   display_name = excluded.display_name,
                   summary = excluded.summary,
                   metrics_json = excluded.metrics_json,
+                  preference_notes = excluded.preference_notes,
                   message_count = excluded.message_count,
                   updated_at = datetime('now')
                 """,
@@ -431,6 +435,7 @@ class GroupMemberProfileRepository:
                     display_name,
                     summary,
                     json.dumps(metrics, ensure_ascii=False, sort_keys=True),
+                    preference_notes,
                     message_count,
                 ),
             )
@@ -456,6 +461,7 @@ class GroupMemberProfileRepository:
             metrics=metrics,
             message_count=int(row["message_count"]),
             updated_at=row["updated_at"],
+            preference_notes=str(row["preference_notes"] or ""),
         )
 
 
@@ -1496,6 +1502,29 @@ class GroupPendingQuestionRepository:
             )
             await db.commit()
 
+    async def expire_stale(self, *, retention_days: int, group_id: str | None = None) -> int:
+        if retention_days <= 0:
+            raise ValueError("retention_days must be positive")
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        conditions = ["status = 'pending'", "created_at < ?"]
+        parameters: list[object] = [cutoff]
+        if group_id:
+            conditions.append("group_id = ?")
+            parameters.append(group_id)
+        async with connect_database(self._database_path) as db:
+            cursor = await db.execute(
+                f"""
+                UPDATE group_pending_questions
+                SET status = 'expired'
+                WHERE {' AND '.join(conditions)}
+                """,
+                parameters,
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0)
+
     def _to_pending_question(self, row: aiosqlite.Row) -> GroupPendingQuestion:
         return GroupPendingQuestion(
             id=int(row["id"]),
@@ -2493,6 +2522,9 @@ class AuditRepository:
         model_called: bool,
         safety_blocked: bool,
         elapsed_ms: int | None,
+        response_text: str | None = None,
+        delivery_status: str | None = None,
+        sent_message_ids: tuple[str, ...] = (),
     ) -> None:
         async with connect_database(self._database_path) as db:
             await db.execute(
@@ -2506,8 +2538,11 @@ class AuditRepository:
                   reason,
                   model_called,
                   safety_blocked,
-                  elapsed_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  elapsed_ms,
+                  response_text,
+                  delivery_status,
+                  sent_message_ids
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
@@ -2519,6 +2554,12 @@ class AuditRepository:
                     int(model_called),
                     int(safety_blocked),
                     elapsed_ms,
+                    _sanitize_response_text(response_text),
+                    delivery_status,
+                    json.dumps(
+                        [str(value) for value in sent_message_ids if str(value)],
+                        ensure_ascii=False,
+                    ),
                 ),
             )
             await db.commit()
@@ -2560,6 +2601,9 @@ class AuditRepository:
                   model_called,
                   safety_blocked,
                   elapsed_ms,
+                  response_text,
+                  delivery_status,
+                  sent_message_ids,
                   created_at
                 FROM reply_audits
                 ORDER BY id DESC
@@ -2605,3 +2649,19 @@ def _sanitize_detail(detail: str | None) -> str | None:
     if any(pattern.search(compact) for pattern in secret_patterns):
         return "[redacted]"
     return compact[:300]
+
+
+def _sanitize_response_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    compact = "\n".join(line.rstrip() for line in str(value).splitlines()).strip()
+    if not compact:
+        return None
+    secret_patterns = (
+        re.compile(r"\bbearer\s+\S+", re.IGNORECASE),
+        re.compile(r"\bsk-[A-Za-z0-9_-]{8,}", re.IGNORECASE),
+        re.compile(r"QQ_BOT_(?:MODEL_API_KEY|ONEBOT_TOKEN)", re.IGNORECASE),
+    )
+    if any(pattern.search(compact) for pattern in secret_patterns):
+        return "[redacted]"
+    return compact[:8000]

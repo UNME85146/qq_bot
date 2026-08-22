@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 
 from app.models import GroupPendingQuestion, NormalizedMessage
-from app.safety.safety_service import SafetyService
 from app.storage.repositories import GroupPendingQuestionRepository
 
 
@@ -44,21 +43,15 @@ class GroupPendingQuestionService:
         self,
         *,
         repository: GroupPendingQuestionRepository,
-        safety_service: SafetyService,
         max_question_length: int = 220,
     ) -> None:
         self._repository = repository
-        self._safety_service = safety_service
         self._max_question_length = max_question_length
 
     async def maybe_enqueue(self, message: NormalizedMessage) -> GroupPendingQuestion | None:
         if message.group_id is None:
             return None
         if not is_question_like(message.text):
-            return None
-        if self._safety_service.check_input(message.text, scope_type="group").action != "allow":
-            return None
-        if not self._safety_service.can_store_long_term_memory(message.text):
             return None
         cleaned = clean_question_text(message.text, max_length=self._max_question_length)
         if len(cleaned) < 2:

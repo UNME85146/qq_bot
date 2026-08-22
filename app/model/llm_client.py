@@ -145,13 +145,27 @@ class LatencyAwareModelClient:
         }
 
     async def generate(self, messages: list[dict[str, Any]]) -> GeneratedReply:
+        return await self.generate_with_options(messages)
+
+    async def generate_with_options(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> GeneratedReply:
         await self.refresh_if_due()
         endpoint = self._active_endpoint
         if endpoint is None:
             raise ModelEndpointSelectionError("no healthy model endpoint")
         started_at = self._clock()
         try:
-            return await self._clients[endpoint].generate(messages)
+            return await _call_client(
+                self._clients[endpoint],
+                messages,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
         except Exception as first_error:
             await self._record_endpoint_attempt(
                 endpoint,
@@ -163,7 +177,12 @@ class LatencyAwareModelClient:
             for alternate in self._alternate_endpoints(endpoint):
                 alternate_started_at = self._clock()
                 try:
-                    reply = await self._clients[alternate].generate(messages)
+                    reply = await _call_client(
+                        self._clients[alternate],
+                        messages,
+                        max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
+                    )
                 except Exception as alternate_error:
                     await self._record_endpoint_attempt(
                         alternate,
@@ -363,3 +382,22 @@ def _content_to_text(content: Any) -> str:
                 parts.append(str(item.get("text", "")))
         return "\n".join(parts)
     return str(content)
+
+
+async def _call_client(
+    client: LlmClient,
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int | None,
+    reasoning_effort: str | None,
+) -> GeneratedReply:
+    if max_tokens is None and reasoning_effort is None:
+        return await client.generate(messages)
+    generate_with_options = getattr(client, "generate_with_options", None)
+    if callable(generate_with_options):
+        return await generate_with_options(
+            messages,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+    return await client.generate(messages)

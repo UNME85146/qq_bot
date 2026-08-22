@@ -234,6 +234,17 @@ def _memory_update_from_text(text: str) -> _MemoryUpdate:
             r"(?:别记|忘掉|删除)不喜欢(.{1,60})",
         ),
     )
+    avoid_phrase = _extract_first(
+        cleaned,
+        (
+            r"(?:不要|别)(?:再)?(?:说|提|用|喊|叫)(?!我)([^，。！？!?；;]{2,60})",
+            r"我不想听(?:到)?([^，。！？!?；;]{2,60})",
+        ),
+    )
+    if avoid_phrase:
+        return _MemoryUpdate(
+            dislikes=_clean_memory_value(f"固定话术：{avoid_phrase}"),
+        )
     if remove_likes or remove_dislikes:
         return _MemoryUpdate(
             remove_likes=_clean_memory_value(remove_likes),
@@ -251,7 +262,13 @@ def _memory_update_from_text(text: str) -> _MemoryUpdate:
         return _MemoryUpdate(remove_text=_clean_memory_value(remove_text))
     if re.search(r"(?:别|不要)叫我", cleaned):
         return _MemoryUpdate(clear_preferred_name=True)
-    preferred_name = _extract_first(cleaned, (r"^(?:以后)?叫我(.{1,20})$",))
+    preferred_name = _extract_first(
+        cleaned,
+        (
+            r"^(?:以后|从现在起)?(?:请)?叫我(?:为|叫)?(.{1,20})$",
+            r"^(?:以后|从现在起)?(?:请)?称呼我(?:为|叫)?(.{1,20})$",
+        ),
+    )
     if _looks_like_reminder_text(cleaned):
         preferred_name = ""
     likes = _extract_first(cleaned, (r"记住我喜欢(.{1,60})", r"我喜欢(.{1,60})"))
