@@ -1153,7 +1153,7 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
                 target_message,
                 action="reply",
                 reason="group_reply_delivered",
-                model_called=reply.model_name != "fallback",
+                model_called=_reply_used_model(reply),
                 safety_blocked=False,
                 response_text=reply.text,
                 delivery_status="sent",
@@ -1217,7 +1217,7 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             reason="group_reply_delivered"
             if delivery_status == "sent"
             else "group_reply_delivery_failed",
-            model_called=reply.model_name != "fallback",
+            model_called=_reply_used_model(reply),
             safety_blocked=False,
             response_text="\n".join(sent_bubbles) if sent_bubbles else None,
             delivery_status=delivery_status,
@@ -1239,6 +1239,15 @@ def _group_reply_addressing(task: GroupReplyTask, target) -> tuple[str | None, s
     if task.include_pending_backfill:
         return target.message_id, target.user_id
     return None, None
+
+
+def _reply_used_model(reply) -> bool:
+    return str(reply.model_name or "").strip().lower() not in {
+        "fallback",
+        "local",
+        "rate_limiter",
+        "safety",
+    }
 
 
 async def _targets_for_task(task: GroupReplyTask):

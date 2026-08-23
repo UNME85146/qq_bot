@@ -117,10 +117,21 @@ class ImageUnderstandingService:
                 model_called=True,
                 failure_reason="timeout",
             )
+        reply = result.reply
+        category = "safe"
+        if result.failure_reason is not None:
+            unavailable = _image_unavailable_text(scope_type)
+            reply = GeneratedReply(
+                text=unavailable,
+                raw_model_text=unavailable,
+                model_name="vision",
+                finish_reason=result.failure_reason,
+            )
+            category = "unknown"
         return ImageAnalysisResult(
             action="reply",
-            category="safe",
-            reply=result.reply,
+            category=category,
+            reply=reply,
             model_called=result.model_called,
             failure_reason=result.failure_reason,
         )

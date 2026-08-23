@@ -138,10 +138,19 @@ def _extract_preference_note(text: str, safety_service: SafetyService) -> str:
     if not cleaned:
         return ""
     match = re.search(
-        r"(?:不要|别|不想|请不要)(?:再)?(?:说|提|用|喊|叫)([^，。！？!?；;]{2,40})",
+        r"(?:拒绝|禁止|不准|不要|别)[^，。！？!?；;]{0,20}?"
+        r"(?:例如|比如|像)[“\"']?([^，。！？!?；;“”\"']{2,40}?)[”\"']?"
+        r"(?:这种|这类)(?:莫名其妙的)?(?:词|话术|话|称呼|口头禅)",
         cleaned,
         flags=re.IGNORECASE,
     )
+    if match is None:
+        match = re.search(
+            r"(?:不要|别|不想|请不要|拒绝|禁止|不准)(?:再)?"
+            r"(?:说|提|用|喊|叫)([^，。！？!?；;]{2,40})",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
     if match is None:
         return ""
     value = re.sub(r"\s+", " ", match.group(1)).strip(" ：:，,。.!！?？")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -285,6 +286,40 @@ class ConversationService:
                 started_at=started_at,
             )
             return None
+
+        if _is_group_persona_mutation_request(message.text):
+            if can_commit is not None and not can_commit():
+                await self._audit(
+                    message,
+                    action="silence",
+                    reason="group_reply_cancelled_before_commit",
+                    model_called=False,
+                    safety_blocked=False,
+                    started_at=started_at,
+                )
+                return None
+            text = "不改名字，也不加固定口号，正常聊。"
+            reply = GeneratedReply(
+                text=text,
+                raw_model_text=text,
+                model_name="local",
+                finish_reason="group_persona_mutation_ignored",
+            )
+            await self._save_user_message(message)
+            await self._save_assistant_message(message, reply)
+            await self._persona_state_service.record_successful_reply(
+                message.scope_type,
+                message.scope_id,
+            )
+            await self._audit(
+                message,
+                action="reply",
+                reason="group_persona_mutation_ignored",
+                model_called=False,
+                safety_blocked=False,
+                started_at=started_at,
+            )
+            return reply
 
         recent_context, persona_state, model_context = await self._prepare_model_context(message)
         prompt = self._prompt_builder.build_group_prompt(
@@ -801,6 +836,10 @@ class ConversationService:
             reply_mode = "long_text"
         if message.scope_type == "group" and reply_mode == "short":
             parsed = replace(parsed, text=clean_reply_text(parsed.text))
+            parsed = replace(
+                parsed,
+                text=_apply_current_group_reply_constraints(parsed.text, message.text),
+            )
         if message.scope_type == "group":
             output_safety = SafetyCheckResult(
                 action="allow",
@@ -1114,6 +1153,45 @@ def _image_failure_reason(failure_reason: str) -> str:
     if failure_reason == "vision_unavailable":
         return "vision_unavailable"
     return "vision_generate_failed"
+
+
+def _is_group_persona_mutation_request(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact:
+        return False
+    rename_request = re.search(
+        r"(?:现在开始|从现在(?:开始)?|以后)(?:你)?(?:就)?"
+        r"(?:改名(?:为|叫)?|名字(?:改成|改为|叫)|叫作|叫做)",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    fixed_suffix_request = re.search(
+        r"(?:添加|增加|设置|设定|记住)(?:一条)?规则.{0,40}"
+        r"(?:每句(?:话)?|每次回复|所有回复|以后回复).{0,40}"
+        r"(?:末尾|结尾|后面).{0,20}(?:添加|加上|带上|说)",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    return rename_request is not None or fixed_suffix_request is not None
+
+
+def _apply_current_group_reply_constraints(reply_text: str, user_text: str) -> str:
+    compact_user_text = re.sub(r"\s+", "", str(user_text or ""))
+    no_laughter = re.search(
+        r"(?:不准|不要|别|禁止|不许)(?:再)?(?:笑|哈哈|呵呵|嘿嘿)",
+        compact_user_text,
+    )
+    if no_laughter is not None:
+        cleaned = re.sub(r"(?:哈){2,}|(?:呵){2,}|(?:嘿){2,}", "", reply_text)
+        cleaned = re.sub(
+            r"^\s*(?:哈+|呵+|嘿+)[，,。.!！?？~～\s]*",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(r"[😂🤣😆😹😄😁😅]", "", cleaned)
+        cleaned = cleaned.strip(" \t\r\n，,。.!！?？~～")
+        return cleaned or "收到"
+    return reply_text
 
 
 def _normalized_greeting_text(text: str) -> str:
