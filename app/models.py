@@ -348,6 +348,7 @@ class ConversationSessionsConfig:
     relation_timeout_seconds: float = 1.2
     pending_retention_days: int = 30
     group_model_timeout_seconds: float = 18.0
+    vision_timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True)

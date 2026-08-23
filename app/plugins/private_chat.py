@@ -40,6 +40,7 @@ from app.features.tts_service import (
     tts_enabled_for_scope,
     tts_scope_disabled_reason,
 )
+from app.model.image_input import prepare_onebot_image_message
 from app.models import GeneratedReply
 from app.plugins.send_helper import (
     send_private_image_direct,
@@ -387,13 +388,22 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
     if prepared is None:
         return
     normalized = prepared
+    model_kwargs = {}
+    if normalized.media_items:
+        model_kwargs["image_preparer"] = (
+            lambda current: prepare_onebot_image_message(bot, current)
+        )
     if force_voice_reply:
         reply = await _conversation_service.handle_private_message(
             normalized,
             prompt_user_text=_voice_reply_model_text(normalized.text),
+            **model_kwargs,
         )
     else:
-        reply = await _conversation_service.handle_private_message(normalized)
+        reply = await _conversation_service.handle_private_message(
+            normalized,
+            **model_kwargs,
+        )
     if reply is None:
         logger.info("Private message ignored by whitelist: user_id={}", event.user_id)
         return

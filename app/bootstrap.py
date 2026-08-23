@@ -43,6 +43,10 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         model_client=model_client,
         limits=config.limits,
     )
+    vision_resilience_service = ModelResilienceService(
+        model_client=model_client,
+        limits=config.limits,
+    )
     conversation_repository = ConversationRepository(config.storage.database_path)
     memory_service = MemoryService(
         repository=MemoryProfileRepository(config.storage.database_path),
@@ -108,8 +112,8 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         group_context_service=group_context_service,
         model_resilience_service=model_resilience_service,
         image_understanding_service=ImageUnderstandingService(
-            model_resilience_service=model_resilience_service,
-            request_timeout_seconds=config.conversation_sessions.group_model_timeout_seconds,
+            model_resilience_service=vision_resilience_service,
+            request_timeout_seconds=config.conversation_sessions.vision_timeout_seconds,
             reasoning_effort=config.model.reasoning_effort,
         ),
         model_context_service=model_context_service,

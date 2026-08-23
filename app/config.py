@@ -232,6 +232,7 @@ def _load_conversation_sessions_config(raw: dict[str, Any]) -> ConversationSessi
         relation_timeout_seconds=float(raw.get("relationTimeoutSeconds", 1.2)),
         pending_retention_days=int(raw.get("pendingRetentionDays", 30)),
         group_model_timeout_seconds=float(raw.get("groupModelTimeoutSeconds", 18.0)),
+        vision_timeout_seconds=float(raw.get("visionTimeoutSeconds", 30.0)),
     )
     if config.inactivity_seconds <= 0:
         raise ValueError("conversationSessions.inactivitySeconds must be positive")
@@ -247,6 +248,8 @@ def _load_conversation_sessions_config(raw: dict[str, Any]) -> ConversationSessi
         raise ValueError("conversationSessions.pendingRetentionDays must be positive")
     if config.group_model_timeout_seconds <= 0:
         raise ValueError("conversationSessions.groupModelTimeoutSeconds must be positive")
+    if config.vision_timeout_seconds <= 0:
+        raise ValueError("conversationSessions.visionTimeoutSeconds must be positive")
     return config
 
 

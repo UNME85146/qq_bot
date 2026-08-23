@@ -3,17 +3,22 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 
 from app.conversation.prompt_builder import PromptBuilder
 from app.conversation.session_service import ConversationSessionService
 from app.conversation.session_memory_service import SessionMemoryService
-from app.conversation.reply_formatter import ReplyFormatter, parse_model_reply
+from app.conversation.reply_formatter import (
+    ReplyFormatter,
+    clean_reply_text,
+    parse_model_reply,
+)
 from app.conversation.model_context_service import looks_like_long_text_request
 from app.memory.group_context_service import NullGroupContextService
 from app.memory.memory_service import NullMemoryService
 from app.model.llm_client import LlmClient
+from app.model.image_input import ImageInputPreparationError
 from app.model.resilience import (
     ModelCallResult,
     ModelResilienceService,
@@ -128,6 +133,9 @@ class ConversationService:
         message: NormalizedMessage,
         *,
         prompt_user_text: str | None = None,
+        image_preparer: Callable[
+            [NormalizedMessage], Awaitable[NormalizedMessage]
+        ] | None = None,
     ) -> GeneratedReply | None:
         started_at = time.monotonic()
         if not self._permission_service.is_private_user_allowed(message.user_id):
@@ -163,7 +171,11 @@ class ConversationService:
             return reply
 
         if has_media(message.media_items):
-            return await self.handle_private_image_message(message, started_at=started_at)
+            return await self.handle_private_image_message(
+                message,
+                started_at=started_at,
+                image_preparer=image_preparer,
+            )
 
         greeting_reply = self._simple_private_greeting_reply(message)
         if greeting_reply is not None:
@@ -331,6 +343,9 @@ class ConversationService:
         message: NormalizedMessage,
         *,
         started_at: float | None = None,
+        image_preparer: Callable[
+            [NormalizedMessage], Awaitable[NormalizedMessage]
+        ] | None = None,
     ) -> GeneratedReply | None:
         started_at = started_at if started_at is not None else time.monotonic()
         if not self._permission_service.is_private_user_allowed(message.user_id):
@@ -343,6 +358,19 @@ class ConversationService:
                 started_at=started_at,
             )
             return None
+
+        message, input_failure = await self._prepare_image_input(
+            message,
+            image_preparer=image_preparer,
+        )
+        if input_failure is not None:
+            await self._save_user_message(message)
+            return await self._image_unavailable_reply(
+                message,
+                reason=f"vision_input_{input_failure}",
+                model_called=False,
+                started_at=started_at,
+            )
 
         recent_context, persona_state, model_context = await self._prepare_model_context(message)
         style_system_prompt = self._prompt_builder.build_private_prompt(
@@ -400,6 +428,9 @@ class ConversationService:
         *,
         reason: str | None = None,
         can_commit: Callable[[], bool] | None = None,
+        image_preparer: Callable[
+            [NormalizedMessage], Awaitable[NormalizedMessage]
+        ] | None = None,
     ) -> GeneratedReply | None:
         started_at = time.monotonic()
         if message.group_id is None:
@@ -422,6 +453,20 @@ class ConversationService:
                 started_at=started_at,
             )
             return None
+        message, input_failure = await self._prepare_image_input(
+            message,
+            image_preparer=image_preparer,
+        )
+        if input_failure is not None:
+            if can_commit is not None and not can_commit():
+                return None
+            await self._save_user_message(message)
+            return await self._image_unavailable_reply(
+                message,
+                reason=f"vision_input_{input_failure}",
+                model_called=False,
+                started_at=started_at,
+            )
         recent_context, persona_state, model_context = await self._prepare_model_context(message)
         style_system_prompt = self._prompt_builder.build_group_system_message(
             user_name=message.user_name,
@@ -491,6 +536,27 @@ class ConversationService:
             scope_type=message.scope_type,
             style_system_prompt=style_system_prompt,
         )
+
+    async def _prepare_image_input(
+        self,
+        message: NormalizedMessage,
+        *,
+        image_preparer: Callable[
+            [NormalizedMessage], Awaitable[NormalizedMessage]
+        ] | None,
+    ) -> tuple[NormalizedMessage, str | None]:
+        if image_preparer is None:
+            return message, None
+        try:
+            return await image_preparer(message), None
+        except ImageInputPreparationError as exc:
+            await self._system_event(
+                "ERROR",
+                "vision_input_prepare_failed",
+                f"category={exc.category}",
+                message.trace_id,
+            )
+            return message, exc.category
 
     async def _image_unavailable_reply(
         self,
@@ -733,6 +799,8 @@ class ConversationService:
         reply_mode = parsed.reply_mode
         if reply_mode == "short" and looks_like_long_text_request(message.text):
             reply_mode = "long_text"
+        if message.scope_type == "group" and reply_mode == "short":
+            parsed = replace(parsed, text=clean_reply_text(parsed.text))
         if message.scope_type == "group":
             output_safety = SafetyCheckResult(
                 action="allow",

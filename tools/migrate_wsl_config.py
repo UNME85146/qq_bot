@@ -50,6 +50,7 @@ def migrate_runtime_config(
             "relationTimeoutSeconds": 1.2,
             "pendingRetentionDays": 30,
             "groupModelTimeoutSeconds": 18,
+            "visionTimeoutSeconds": 30,
         },
     )
     conversation_sessions.pop("contextualSafetyTimeoutSeconds", None)

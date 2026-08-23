@@ -55,6 +55,7 @@ from app.features.tts_service import (
     tts_scope_disabled_reason,
 )
 from app.model.llm_client import create_model_client
+from app.model.image_input import prepare_onebot_image_message
 from app.models import MediaItem, NormalizedMessage
 from app.plugins.send_helper import (
     _extract_sent_message_id,
@@ -1102,6 +1103,10 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
                 target_message,
                 reason=task.reason,
                 can_commit=lambda: _is_group_chat_task_current(task),
+                image_preparer=lambda current: prepare_onebot_image_message(
+                    task.bot,
+                    current,
+                ),
             )
         else:
             reply = await _conversation_service.handle_group_question(
@@ -1144,6 +1149,16 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             force=force_voice_reply,
         )
         if voice_sent:
+            await _conversation_service.record_reply_audit(
+                target_message,
+                action="reply",
+                reason="group_reply_delivered",
+                model_called=reply.model_name != "fallback",
+                safety_blocked=False,
+                response_text=reply.text,
+                delivery_status="sent",
+                sent_message_ids=(),
+            )
             if message.group_id is not None:
                 _group_last_sent_at[message.group_id] = time.monotonic()
                 _feature_hub.focus_group(message.group_id)
@@ -1153,6 +1168,30 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             continue
 
         reply_to_message_id, at_user_id = _group_reply_addressing(task, target)
+        sent_bubbles: list[str] = []
+        sent_message_ids: list[str] = []
+        send_failed = False
+
+        async def on_send_error(exc, index, bubble):
+            nonlocal send_failed
+            send_failed = True
+            await _record_send_error(message.trace_id, exc, index)
+
+        async def on_sent(index, bubble, sent_message_id):
+            del index
+            sent_bubbles.append(str(bubble))
+            if sent_message_id:
+                sent_message_ids.append(str(sent_message_id))
+            await _record_sent_group_message(
+                message.trace_id,
+                message.group_id,
+                message.self_id,
+                target,
+                sent_message_id,
+                0,
+                target_message.session_id,
+            )
+
         await send_reply_bubbles(
             task.bot,
             task.event,
@@ -1162,20 +1201,27 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             group_reply_to_message_id=reply_to_message_id,
             group_at_user_id=at_user_id,
             reply_mode=reply.reply_mode,
-            on_send_error=lambda exc, index, bubble: _record_send_error(
-                message.trace_id,
-                exc,
-                index,
-            ),
-            on_sent=lambda index, bubble, sent_message_id, target=target: _record_sent_group_message(
-                message.trace_id,
-                message.group_id,
-                message.self_id,
-                target,
-                sent_message_id,
-                index,
-                target_message.session_id,
-            ),
+            on_send_error=on_send_error,
+            on_sent=on_sent,
+        )
+        delivery_status = (
+            "sent"
+            if sent_bubbles and not send_failed
+            else "partial"
+            if sent_bubbles
+            else "failed"
+        )
+        await _conversation_service.record_reply_audit(
+            target_message,
+            action="reply",
+            reason="group_reply_delivered"
+            if delivery_status == "sent"
+            else "group_reply_delivery_failed",
+            model_called=reply.model_name != "fallback",
+            safety_blocked=False,
+            response_text="\n".join(sent_bubbles) if sent_bubbles else None,
+            delivery_status=delivery_status,
+            sent_message_ids=tuple(sent_message_ids),
         )
         if message.group_id is not None:
             _remember_group_non_random_outgoing(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import hashlib
 import time
 from typing import Any
 
@@ -125,18 +126,19 @@ class ImageUnderstandingService:
         )
 
     async def _classify_image(self, image_url: str, *, scope_type: str) -> ImageAnalysisResult:
-        cached = self._cached_classification(image_url)
+        cache_key = _classification_cache_key(image_url)
+        cached = self._cached_classification(cache_key)
         if cached is not None:
             return cached
-        task = self._classification_inflight.get(image_url)
+        task = self._classification_inflight.get(cache_key)
         if task is None:
             task = asyncio.create_task(
                 self._classify_image_uncached(image_url, scope_type=scope_type)
             )
-            self._classification_inflight[image_url] = task
+            self._classification_inflight[cache_key] = task
             task.add_done_callback(
-                lambda completed, url=image_url: self._finish_classification_task(
-                    url,
+                lambda completed, key=cache_key: self._finish_classification_task(
+                    key,
                     completed,
                 )
             )
@@ -181,7 +183,8 @@ class ImageUnderstandingService:
         if result.failure_reason is not None:
             category = "unknown"
         else:
-            self._classification_cache[image_url] = (time.monotonic(), category)
+            cache_key = _classification_cache_key(image_url)
+            self._classification_cache[cache_key] = (time.monotonic(), category)
             if len(self._classification_cache) > self._classification_cache_limit:
                 oldest = min(
                     self._classification_cache,
@@ -196,13 +199,13 @@ class ImageUnderstandingService:
             failure_reason=result.failure_reason,
         )
 
-    def _cached_classification(self, image_url: str) -> ImageAnalysisResult | None:
-        cached = self._classification_cache.get(image_url)
+    def _cached_classification(self, cache_key: str) -> ImageAnalysisResult | None:
+        cached = self._classification_cache.get(cache_key)
         if cached is None:
             return None
         cached_at, cached_category = cached
         if time.monotonic() - cached_at >= self._classification_cache_ttl_seconds:
-            self._classification_cache.pop(image_url, None)
+            self._classification_cache.pop(cache_key, None)
             return None
         return ImageAnalysisResult(
             action="classify",
@@ -212,11 +215,11 @@ class ImageUnderstandingService:
 
     def _finish_classification_task(
         self,
-        image_url: str,
+        cache_key: str,
         completed: asyncio.Task[ImageAnalysisResult],
     ) -> None:
-        if self._classification_inflight.get(image_url) is completed:
-            self._classification_inflight.pop(image_url, None)
+        if self._classification_inflight.get(cache_key) is completed:
+            self._classification_inflight.pop(cache_key, None)
 
 
 def first_image_with_url(media_items: tuple[MediaItem, ...]) -> MediaItem | None:
@@ -243,6 +246,10 @@ def _normalize_category(text: str) -> str:
         if category in lowered:
             return category
     return "unknown"
+
+
+def _classification_cache_key(image_url: str) -> str:
+    return hashlib.sha256(image_url.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def _image_unavailable_text(scope_type: str) -> str:
