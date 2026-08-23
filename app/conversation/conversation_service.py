@@ -838,7 +838,11 @@ class ConversationService:
             parsed = replace(parsed, text=clean_reply_text(parsed.text))
             parsed = replace(
                 parsed,
-                text=_apply_current_group_reply_constraints(parsed.text, message.text),
+                text=_apply_current_group_reply_constraints(
+                    parsed.text,
+                    message.text,
+                    has_media=bool(message.media_items),
+                ),
             )
         if message.scope_type == "group":
             output_safety = SafetyCheckResult(
@@ -1175,23 +1179,47 @@ def _is_group_persona_mutation_request(text: str) -> bool:
     return rename_request is not None or fixed_suffix_request is not None
 
 
-def _apply_current_group_reply_constraints(reply_text: str, user_text: str) -> str:
+def _apply_current_group_reply_constraints(
+    reply_text: str,
+    user_text: str,
+    *,
+    has_media: bool = False,
+) -> str:
     compact_user_text = re.sub(r"\s+", "", str(user_text or ""))
+    cleaned = reply_text
     no_laughter = re.search(
         r"(?:不准|不要|别|禁止|不许)(?:再)?(?:笑|哈哈|呵呵|嘿嘿)",
         compact_user_text,
     )
     if no_laughter is not None:
-        cleaned = re.sub(r"(?:哈){2,}|(?:呵){2,}|(?:嘿){2,}", "", reply_text)
+        cleaned = re.sub(r"(?:哈){2,}|(?:呵){2,}|(?:嘿){2,}", "", cleaned)
         cleaned = re.sub(
             r"^\s*(?:哈+|呵+|嘿+)[，,。.!！?？~～\s]*",
             "",
             cleaned,
         )
         cleaned = re.sub(r"[😂🤣😆😹😄😁😅]", "", cleaned)
-        cleaned = cleaned.strip(" \t\r\n，,。.!！?？~～")
-        return cleaned or "收到"
-    return reply_text
+
+    if has_media:
+        cleaned = re.sub(
+            r"^\s*(?:哈+|呵+|嘿+|笑死了?|笑死)[，,。.!！?？~～\s]*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"[😂🤣😆😹😄😁😅]", "", cleaned)
+
+    if not re.search(r"晚安|早睡|早点睡", compact_user_text):
+        cleaned = re.sub(
+            r"[，,。.!！?？~～\s]*(?:晚安|早点睡|早睡)(?:早睡|早点睡|我儿)*"
+            r"[，,。.!！?？~～\s]*$",
+            "",
+            cleaned,
+        )
+
+    cleaned = re.sub(r"(?:没|没有)看到你消息", "刚才没接上", cleaned)
+    cleaned = cleaned.strip(" \t\r\n，,。.!！?？~～")
+    return cleaned or "收到"
 
 
 def _normalized_greeting_text(text: str) -> str:
