@@ -34,14 +34,11 @@ _CATEGORY_COMMANDS = {
 _DEFAULT_CATEGORIES = ("politics", "business", "technology", "finance")
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 _GROUP_HELP_ENTRIES = (
-    "抖音/B站链接 - 自动下载并发送视频文件",
-    "#政事 / #财经 / #科技 / #金融 - 今日分类新闻",
-    "#A股 - AkShare板块概览 / #美股 - 市场概览 / #牧原 或 #00001 - 查询 A 股个股",
+    "#A股 / #美股 - 按板块列出 10 只股票（5 涨 5 跌）",
     "#股票添加 代码 [成本=价格] [数量=数量] [预警=百分比]",
     "#股票删除 代码 / #我的股票 [详情]",
     "#chat 查一下 关键词 [--page 页码] / #chat 评价一下@群成员",
     "#画图 描述 / #改图 修改要求",
-    "#新闻订阅 [HH:MM] / #新闻订阅状态 / #新闻退订（群主、群管理员或机器人管理员）",
 )
 
 

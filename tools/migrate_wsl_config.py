@@ -10,6 +10,8 @@ from typing import Any
 
 
 WIKIMEDIA_CORE_ZH = "https://api.wikimedia.org/core/v1/wikipedia/zh/search/page"
+CODEX_RUNWAY_STATUS_URL = "https://www.codexrunway.com/api/status.json"
+USAGE_RANKING_BASE_URL = "https://api.example.com"
 
 DEFAULT_NEWS_FEEDS = {
     "politics": ("https://feeds.bbci.co.uk/news/world/rss.xml",),
@@ -85,7 +87,7 @@ def migrate_runtime_config(
     migrated["video"].pop("backoffBaseSeconds", None)
     migrated["video"].update(
         {
-            "enabled": True,
+            "enabled": False,
             "hostCachePath": video_cache_host,
             "containerCachePath": video_cache_container,
         }
@@ -95,7 +97,7 @@ def migrate_runtime_config(
         migrated.get("news"),
         {"defaultTime": "08:00", "timezone": "Asia/Shanghai"},
     )
-    news["enabled"] = True
+    news["enabled"] = False
     configured_feeds = news.get("feeds")
     if not isinstance(configured_feeds, dict) or not any(configured_feeds.values()):
         news["feeds"] = {
@@ -103,13 +105,46 @@ def migrate_runtime_config(
         }
     migrated["news"] = news
 
+    migrated["codexRunway"] = _merge_defaults(
+        migrated.get("codexRunway"),
+        {
+            "enabled": False,
+            "recipientUserId": "",
+            "intervalSeconds": 14_400,
+            "requestTimeoutSeconds": 20,
+            "maxItems": 5,
+            "excerptChars": 160,
+            "maxMessageChars": 1800,
+            "statusUrl": CODEX_RUNWAY_STATUS_URL,
+        },
+    )
+    migrated["codexRunway"]["statusUrl"] = CODEX_RUNWAY_STATUS_URL
+
+    migrated["usageRankingReport"] = _merge_defaults(
+        migrated.get("usageRankingReport"),
+        {
+            "enabled": False,
+            "recipientUserId": "",
+            "sendTime": "17:30",
+            "timezone": "Asia/Shanghai",
+            "limit": 50,
+            "requestTimeoutSeconds": 20,
+            "baseUrl": USAGE_RANKING_BASE_URL,
+            "refreshTokenPath": "runtime_artifacts/secrets/usage-refresh-token",
+            "outputDir": "runtime_artifacts/usage-ranking",
+            "fontPath": "runtime_artifacts/fonts/NotoSansSC-VF.ttf",
+        },
+    )
+    migrated["usageRankingReport"]["baseUrl"] = USAGE_RANKING_BASE_URL
+    migrated["usageRankingReport"]["timezone"] = "Asia/Shanghai"
+
     markets = _merge_defaults(
         migrated.get("markets"),
         {
             "alertThresholdPercent": 3,
             "pollIntervalSeconds": 300,
             "commandTimeoutSeconds": 20,
-            "providerTimeoutSeconds": 8,
+            "providerTimeoutSeconds": 15,
             "circuitFailureThreshold": 3,
             "circuitRecoverySeconds": 60,
             "aShareFallbacks": [

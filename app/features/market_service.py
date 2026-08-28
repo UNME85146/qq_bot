@@ -54,7 +54,7 @@ _SECTOR_SPECS = {
         _SectorSpec("银行", "JPM", "摩根大通"),
         _SectorSpec("支付", "V", "维萨"),
         _SectorSpec("创新药", "LLY", "礼来"),
-        _SectorSpec("综合制药", "JNJ", "强生"),
+        _SectorSpec("医疗器械", "ISRG", "直觉外科"),
         _SectorSpec("零售", "WMT", "沃尔玛"),
         _SectorSpec("饮料", "KO", "可口可乐"),
         _SectorSpec("新能源汽车", "TSLA", "特斯拉"),
@@ -66,6 +66,57 @@ _SECTOR_SPECS = {
         _SectorSpec("物流地产", "PLD", "安博"),
         _SectorSpec("公用事业", "NEE", "新纪元能源公司"),
     ),
+}
+
+_A_SHARE_SECTOR_SYMBOLS = (
+    ("600519.SH", "000858.SZ", "000568.SZ", "002304.SZ", "603369.SH", "000596.SZ", "600809.SH", "600779.SH", "600702.SH", "603198.SH"),
+    ("601398.SH", "601939.SH", "601288.SH", "600036.SH", "601328.SH", "601166.SH", "000001.SZ", "600000.SH", "601818.SH", "601988.SH"),
+    ("601318.SH", "601601.SH", "601336.SH", "601628.SH", "600061.SH", "000617.SZ", "601319.SH", "601339.SH", "601186.SH", "601390.SH"),
+    ("600030.SH", "601211.SH", "600958.SH", "600109.SH", "601881.SH", "600837.SH", "000166.SZ", "600999.SH", "601375.SH", "601555.SH"),
+    ("002594.SZ", "002812.SZ", "300014.SZ", "002709.SZ", "601127.SH", "002050.SZ", "002238.SZ", "600733.SH", "603178.SH", "002850.SZ"),
+    ("300750.SZ", "002460.SZ", "300438.SZ", "300073.SZ", "688819.SH", "002340.SZ", "603659.SH", "688005.SH", "688567.SH", "688772.SH"),
+    ("601012.SH", "688599.SH", "600438.SH", "002129.SZ", "300274.SZ", "601865.SH", "300393.SZ", "600732.SH", "002459.SZ", "603806.SH"),
+    ("688981.SH", "603986.SH", "688012.SH", "688008.SH", "688396.SH", "002371.SZ", "300223.SZ", "603501.SH", "688256.SH", "688082.SH"),
+    ("002475.SZ", "002351.SZ", "000049.SZ", "002241.SZ", "002600.SZ", "300782.SZ", "002456.SZ", "688036.SH", "002273.SZ", "002402.SZ"),
+    ("600941.SH", "000063.SZ", "600050.SH", "601728.SH", "300628.SZ", "002281.SZ", "600522.SH", "600289.SH", "300921.SZ", "000988.SZ"),
+    ("603019.SH", "002230.SZ", "300418.SZ", "688111.SH", "300496.SZ", "300229.SZ", "002920.SZ", "688327.SH", "300474.SZ", "688561.SH"),
+    ("600588.SH", "300033.SZ", "600570.SH", "002410.SZ", "300454.SZ", "600845.SH", "300369.SZ", "688078.SH", "688318.SH", "300523.SZ"),
+    ("600276.SH", "000538.SZ", "603259.SH", "300003.SZ", "600196.SH", "600332.SH", "002007.SZ", "000963.SZ", "300122.SZ", "600085.SH"),
+    ("300760.SZ", "300015.SZ", "300529.SZ", "603658.SH", "688271.SH", "002223.SZ", "300298.SZ", "688389.SH", "603392.SH", "300406.SZ"),
+    ("000333.SZ", "000651.SZ", "600690.SH", "000921.SZ", "603355.SH", "002032.SZ", "002508.SZ", "600854.SH", "000016.SZ", "600060.SH"),
+    ("603288.SH", "600887.SH", "000895.SZ", "002557.SZ", "603027.SH", "600600.SH", "000729.SZ", "002568.SZ", "603866.SH", "600305.SH"),
+    ("600900.SH", "600025.SH", "600011.SH", "600027.SH", "600886.SH", "601991.SH", "000591.SZ", "600905.SH", "000883.SZ", "601985.SH"),
+    ("601088.SH", "601898.SH", "600188.SH", "601666.SH", "000983.SZ", "600123.SH", "600397.SH", "000937.SZ", "601101.SH", "600348.SH"),
+    ("601899.SH", "603799.SH", "600547.SH", "000878.SZ", "002466.SZ", "600362.SH", "000630.SZ", "601600.SH", "600489.SH", "000962.SZ"),
+    ("600893.SH", "600760.SH", "600151.SH", "000768.SZ", "600372.SH", "600118.SH", "600038.SH", "600435.SH", "300527.SZ", "688586.SH"),
+)
+
+_US_SHARE_SECTOR_SYMBOLS = (
+    ("AAPL", "SONY", "HPQ", "DELL", "LOGI", "QCOM", "TXN", "MU", "STX", "WDC"),
+    ("MSFT", "ORCL", "CRM", "ADBE", "INTU", "NOW", "SNOW", "PLTR", "SAP", "IBM"),
+    ("NVDA", "AMD", "AVGO", "ARM", "TSM", "ASML", "MRVL", "SMCI", "AI", "ON"),
+    ("GOOGL", "META", "SNAP", "PINS", "RDDT", "BIDU", "BABA", "JD", "PDD", "SE"),
+    ("AMZN", "SHOP", "MELI", "ETSY", "EBAY", "W", "WMT", "COST", "TGT", "CVS"),
+    ("SPOT", "NFLX", "DIS", "TME", "ROKU", "PARA", "FOXA", "MTCH", "LYV", "UBER"),
+    ("JPM", "BAC", "C", "WFC", "GS", "MS", "SCHW", "BLK", "USB", "PNC"),
+    ("V", "MA", "PYPL", "AXP", "XYZ", "FIS", "HOOD", "GPN", "ADYEY", "COF"),
+    ("LLY", "JNJ", "PFE", "MRK", "ABBV", "BMY", "GILD", "AMGN", "REGN", "NVO"),
+    ("ISRG", "SYK", "MDT", "BSX", "EW", "ABT", "DXCM", "ZBH", "BDX", "TMO"),
+    ("KR", "HD", "LOW", "TJX", "ROST", "DG", "DLTR", "ORLY", "AZO", "SBUX"),
+    ("KO", "PEP", "MNST", "MDLZ", "KHC", "GIS", "CAG", "HSY", "CL", "EL"),
+    ("TSLA", "RIVN", "LI", "NIO", "XPEV", "GM", "F", "TM", "HMC", "STLA"),
+    ("XOM", "CVX", "COP", "SLB", "EOG", "OXY", "PSX", "VLO", "MPC", "HAL"),
+    ("CAT", "DE", "HON", "GE", "RTX", "LMT", "NOC", "GD", "ETN", "EMR"),
+    ("BA", "TDG", "HWM", "JOBY", "TXT", "HII", "LDOS", "KTOS", "RKLB", "ACHR"),
+    ("TMUS", "VZ", "T", "CHTR", "CMCSA", "LUMN", "ERIC", "NOK", "TIGO", "ASTS"),
+    ("INTC", "ADI", "NXPI", "MCHP", "MPWR", "KLAC", "LRCX", "AMAT", "TER", "SWKS"),
+    ("PLD", "AMT", "EQIX", "CCI", "O", "SPG", "PSA", "WELL", "DLR", "VICI"),
+    ("NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE", "ED", "XEL", "WEC"),
+)
+
+_BATCH_SECTOR_SYMBOLS = {
+    "a_share": dict(zip((spec.name for spec in _SECTOR_SPECS["a_share"]), _A_SHARE_SECTOR_SYMBOLS, strict=True)),
+    "us_share": dict(zip((spec.name for spec in _SECTOR_SPECS["us_share"]), _US_SHARE_SECTOR_SYMBOLS, strict=True)),
 }
 _WATCHLIST_PAGE_SIZE = 4
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8))
@@ -180,6 +231,9 @@ class MarketCommandService:
         provider = self._providers.get(market)
         if provider is None:
             return MarketCommandResult(True, f"{label}行情功能未配置", "market_unconfigured")
+        batch_quote = getattr(provider, "quote_many", None)
+        if callable(batch_quote) and getattr(provider, "supports_quote_many", True):
+            return await self._batched_overview(market, label, batch_quote)
         started = time.perf_counter()
         sectors = _SECTOR_SPECS[market]
         tasks: list[asyncio.Task[MarketQuote]] = [
@@ -263,6 +317,72 @@ class MarketCommandService:
             "market_overview"
             if len(successful_pairs) == len(sectors) and not timed_out
             else "market_overview_partial",
+            structured=structured,
+        )
+
+    async def _batched_overview(
+        self,
+        market: str,
+        label: str,
+        quote_many: Callable[[str, list[str]], Awaitable[list[MarketQuote]]],
+    ) -> MarketCommandResult:
+        started = time.perf_counter()
+        sectors = _SECTOR_SPECS[market]
+        symbols = [symbol for sector in sectors for symbol in _BATCH_SECTOR_SYMBOLS[market][sector.name]]
+        timed_out = False
+        try:
+            quotes = await asyncio.wait_for(
+                quote_many(market, symbols),
+                timeout=self._command_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            quotes = []
+            timed_out = True
+        except Exception:
+            quotes = []
+        elapsed = time.perf_counter() - started
+        by_symbol = {
+            str(quote.symbol).upper(): quote
+            for quote in quotes
+            if isinstance(quote, MarketQuote)
+        }
+        blocks: list[str] = []
+        complete = not timed_out
+        for sector in sectors:
+            sector_quotes = [
+                by_symbol[symbol.upper()]
+                for symbol in _BATCH_SECTOR_SYMBOLS[market][sector.name]
+                if symbol.upper() in by_symbol
+            ]
+            gainers, losers = _select_gain_loser_quotes(sector_quotes)
+            if len(gainers) < 5 or len(losers) < 5:
+                complete = False
+            if sector_quotes:
+                blocks.append(
+                    _format_batched_sector_report(
+                        label,
+                        sector,
+                        sector_quotes,
+                    )
+                )
+        if not blocks:
+            reason = "market_timeout" if timed_out else "market_failed"
+            status = "超时" if timed_out else "失败"
+            return MarketCommandResult(
+                True,
+                f"{label}行情获取{status}：数据源暂不可用（耗时 {elapsed:.2f} 秒）",
+                reason,
+            )
+        structured = StructuredReply(
+            messages=tuple(blocks),
+            fallback_messages=tuple(
+                _compact_batched_sector_report(block) for block in blocks
+            ),
+        )
+        return MarketCommandResult(
+            True,
+            structured.text,
+            "market_overview" if complete else "market_overview_partial",
             structured=structured,
         )
 
@@ -414,6 +534,76 @@ def _format_sector_report(
         f"{index}. {sector.name}：核心股{sector.company}；板块参考{_sector_tendency(quote)}；"
         f"数据时间{_format_market_time(quote.observed_at)}\n来源：{quote.source}"
     )
+
+
+def _format_batched_sector_report(
+    label: str,
+    sector: _SectorSpec,
+    quotes: list[MarketQuote],
+) -> str:
+    gainers, losers = _select_gain_loser_quotes(quotes)
+    relative = len(gainers) < 5 or len(losers) < 5
+    if relative and len(quotes) >= 10:
+        ranked = sorted(
+            quotes,
+            key=lambda quote: _quote_change_percent(quote) or 0.0,
+            reverse=True,
+        )
+        gainers = ranked[:5]
+        losers = list(reversed(ranked[-5:]))
+    selected = [*gainers, *losers]
+    if relative and len(selected) == 10:
+        heading = f"{label}｜{sector.name}：5只相对领涨，5只相对领跌"
+    else:
+        heading = f"{label}｜{sector.name}：{len(gainers)}只上涨，{len(losers)}只下跌"
+    lines = [heading]
+    for index, quote in enumerate(selected, start=1):
+        change = _quote_change_percent(quote)
+        change_text = f"{change:+.2f}%" if change is not None else "未知"
+        name = quote.name or quote.symbol
+        currency = "￥" if quote.market == "a_share" else "$"
+        previous = (
+            f"{quote.previous_close:.2f}{currency}"
+            if quote.previous_close is not None
+            else "未知"
+        )
+        price = f"{currency}{quote.price:.2f}" if currency == "$" else f"{quote.price:.2f}￥"
+        lines.append(
+            f"{index}、{name} 股票代码 {quote.symbol} 昨日收盘：{previous}，"
+            f"当前价格：{price}，涨跌：{change_text}"
+        )
+    if len(selected) < 10:
+        lines.append(f"数据暂缺：本板块仅获取 {len(selected)}/10 只可核验股票")
+    lines.append("数据可能延迟，仅供参考，不用于自动交易")
+    return "\n".join(lines)
+
+
+def _select_gain_loser_quotes(
+    quotes: list[MarketQuote],
+) -> tuple[list[MarketQuote], list[MarketQuote]]:
+    gainers = sorted(
+        (
+            quote
+            for quote in quotes
+            if (_quote_change_percent(quote) or 0.0) > 0
+        ),
+        key=lambda quote: _quote_change_percent(quote) or 0.0,
+        reverse=True,
+    )[:5]
+    losers = sorted(
+        (
+            quote
+            for quote in quotes
+            if (_quote_change_percent(quote) or 0.0) < 0
+        ),
+        key=lambda quote: _quote_change_percent(quote) or 0.0,
+    )[:5]
+    return gainers, losers
+
+
+def _compact_batched_sector_report(block: str) -> str:
+    lines = block.splitlines()
+    return "\n".join(lines[:1] + [line for line in lines[1:] if "股票代码" in line][:10] + lines[-1:])
 
 
 def _sector_tendency(quote: MarketQuote) -> str:

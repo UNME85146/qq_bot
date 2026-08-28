@@ -7,10 +7,9 @@ import re
 import sys
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -25,6 +24,11 @@ from app.features.provider_health import (
 from app.models import MarketProviderConfig, MarketsConfig
 
 
+_BEIJING_TIME_ZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
+_YFINANCE_BATCH_CHUNK_SIZE = 25
+_YFINANCE_BATCH_CONCURRENCY = 4
+
+
 class MarketProviderUnavailableError(RuntimeError):
     def __init__(self, message: str, *, category: str = "provider_error") -> None:
         self.category = category
@@ -34,6 +38,20 @@ class MarketProviderUnavailableError(RuntimeError):
 class YFinanceMarketProvider:
     async def quote(self, market: str, symbol: str) -> MarketQuote:
         return await _quote_in_isolated_process("yfinance", market, symbol)
+
+    async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
+        chunks = [
+            symbols[index : index + _YFINANCE_BATCH_CHUNK_SIZE]
+            for index in range(0, len(symbols), _YFINANCE_BATCH_CHUNK_SIZE)
+        ]
+        gate = asyncio.Semaphore(_YFINANCE_BATCH_CONCURRENCY)
+
+        async def fetch_chunk(chunk: list[str]) -> list[MarketQuote]:
+            async with gate:
+                return await _quotes_in_isolated_process("yfinance", market, chunk)
+
+        results = await asyncio.gather(*(fetch_chunk(chunk) for chunk in chunks))
+        return [quote for chunk_quotes in results for quote in chunk_quotes]
 
     @staticmethod
     def _quote_sync(market: str, symbol: str) -> MarketQuote:
@@ -53,24 +71,89 @@ class YFinanceMarketProvider:
             previous_close=previous,
             change_percent=change,
             source="Yahoo Finance via yfinance",
-            observed_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+            observed_at=datetime.now(_BEIJING_TIME_ZONE).isoformat(),
             delayed=True,
         )
+
+    @staticmethod
+    def _quotes_sync(market: str, symbols: list[str]) -> list[MarketQuote]:
+        if not symbols:
+            return []
+        import yfinance as yf
+
+        frame = yf.download(
+            tickers=symbols,
+            period="5d",
+            interval="1d",
+            auto_adjust=False,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+        quotes: list[MarketQuote] = []
+        observed_at = datetime.now(_BEIJING_TIME_ZONE).isoformat()
+        for symbol in symbols:
+            try:
+                closes = [float(value) for value in frame[symbol]["Close"].dropna().tolist()]
+            except Exception:
+                continue
+            if not closes:
+                continue
+            price = closes[-1]
+            previous = closes[-2] if len(closes) >= 2 else None
+            change = ((price - previous) / previous * 100) if previous else None
+            quotes.append(
+                MarketQuote(
+                    market=market,
+                    symbol=symbol,
+                    name=symbol,
+                    price=price,
+                    previous_close=previous,
+                    change_percent=change,
+                    source="Yahoo Finance via yfinance",
+                    observed_at=observed_at,
+                    delayed=True,
+                )
+            )
+        return quotes
 
 
 class AkShareMarketProvider:
     async def quote(self, market: str, symbol: str) -> MarketQuote:
         return await _quote_in_isolated_process("akshare", market, symbol)
 
+    async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
+        return await _quotes_in_isolated_process("akshare", market, symbols)
+
     @staticmethod
     def _quote_sync(market: str, symbol: str) -> MarketQuote:
         import akshare as ak
 
         frame = ak.stock_zh_a_spot_em()
+        return _akshare_quotes_from_frame(market, frame, [symbol], strict=True)[0]
+
+    @staticmethod
+    def _quotes_sync(market: str, symbols: list[str]) -> list[MarketQuote]:
+        import akshare as ak
+
+        frame = ak.stock_zh_a_spot_em()
+        return _akshare_quotes_from_frame(market, frame, symbols, strict=False)
+
+
+def _akshare_quotes_from_frame(
+    market: str,
+    frame,
+    symbols: list[str],
+    *,
+    strict: bool,
+) -> list[MarketQuote]:
+    quotes: list[MarketQuote] = []
+    for symbol in symbols:
         raw_symbol = symbol.strip().upper()
         raw_code, _separator, raw_suffix = raw_symbol.partition(".")
         is_code_query = raw_code.isdigit()
         code = raw_code.zfill(6) if is_code_query else ""
+        raw_symbol = symbol.strip().upper()
         matched = (
             frame.loc[frame["代码"].astype(str).str.zfill(6) == code]
             if is_code_query
@@ -89,7 +172,9 @@ class AkShareMarketProvider:
                 else contains
             )
         if matched.empty:
-            raise RuntimeError("stock symbol was not found")
+            if strict:
+                raise RuntimeError("stock symbol was not found")
+            continue
         row = matched.iloc[0]
         code = str(row["代码"]).zfill(6)
         suffix = raw_suffix if raw_suffix in {"SH", "SZ", "BJ"} else _a_share_suffix(code)
@@ -102,17 +187,20 @@ class AkShareMarketProvider:
         previous = _coerce_float(row["昨收"]) if "昨收" in row else None
         raw_change = row["涨跌幅"] if "涨跌幅" in row else None
         change = _coerce_float(raw_change)
-        return MarketQuote(
-            market=market,
-            symbol=canonical_symbol,
-            price=price,
-            previous_close=previous,
-            change_percent=change,
-            source="东方财富 via AkShare",
-            observed_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
-            delayed=True,
-            name=name,
+        quotes.append(
+            MarketQuote(
+                market=market,
+                symbol=canonical_symbol,
+                price=price,
+                previous_close=previous,
+                change_percent=change,
+                source="东方财富 via AkShare",
+                observed_at=datetime.now(_BEIJING_TIME_ZONE).isoformat(),
+                delayed=True,
+                name=name,
+            )
         )
+    return quotes
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -163,6 +251,45 @@ async def _quote_in_isolated_process(
         ) from exc
 
 
+async def _quotes_in_isolated_process(
+    provider: str,
+    market: str,
+    symbols: list[str],
+) -> list[MarketQuote]:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "app.features.market_worker",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        cwd=_PROJECT_ROOT,
+    )
+    request = json.dumps(
+        {"provider": provider, "market": market, "symbols": symbols},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        stdout, _stderr = await process.communicate(request)
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    response = _last_worker_payload(stdout)
+    if process.returncode != 0 or not response.get("ok"):
+        category = str(response.get("category") or "provider_error")
+        raise MarketProviderUnavailableError(category, category=category)
+    quotes = response.get("quotes")
+    if not isinstance(quotes, list):
+        raise MarketProviderUnavailableError("invalid_response", category="invalid_response")
+    try:
+        return [MarketQuote(**quote) for quote in quotes if isinstance(quote, dict)]
+    except (TypeError, ValueError) as exc:
+        raise MarketProviderUnavailableError("invalid_response", category="invalid_response") from exc
+
+
 def _last_worker_payload(stdout: bytes) -> dict[str, Any]:
     lines = [line for line in stdout.decode("utf-8", errors="replace").splitlines() if line]
     if not lines:
@@ -198,7 +325,13 @@ class SinaMarketProvider:
         self._transport = transport
 
     async def quote(self, market: str, symbol: str) -> MarketQuote:
-        request_symbol = _sina_symbol(symbol)
+        quotes = await self.quote_many(market, [symbol])
+        if not quotes:
+            raise ValueError("empty sina quote")
+        return quotes[0]
+
+    async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
+        request_symbols = [_sina_symbol(symbol) for symbol in symbols]
         async with httpx.AsyncClient(
             timeout=self._timeout_seconds,
             transport=self._transport,
@@ -208,30 +341,48 @@ class SinaMarketProvider:
             },
         ) as client:
             response = await client.get(
-                f"{self._base_url}/list={request_symbol}"
+                f"{self._base_url}/list={','.join(request_symbols)}"
             )
             response.raise_for_status()
         text = response.content.decode("gb18030", errors="replace")
-        match = re.search(r'="([^"]*)"', text)
-        if match is None or not match.group(1).strip():
-            raise ValueError("empty sina quote")
-        fields = match.group(1).split(",")
-        if len(fields) < 4:
-            raise ValueError("invalid sina quote")
-        previous = float(fields[2])
-        price = float(fields[3])
-        observed_at = _sina_observed_at(fields)
-        change = ((price - previous) / previous * 100) if previous else None
-        return MarketQuote(
-            market=market,
-            symbol=symbol,
-            price=price,
-            previous_close=previous,
-            change_percent=change,
-            source="新浪财经",
-            observed_at=observed_at,
-            delayed=True,
-        )
+        payloads = {
+            request_symbol: fields_text
+            for request_symbol, fields_text in re.findall(
+                r'hq_str_([^=]+)="([^"]*)"',
+                text,
+            )
+            if fields_text.strip()
+        }
+        quotes: list[MarketQuote] = []
+        for symbol, request_symbol in zip(symbols, request_symbols, strict=True):
+            fields_text = payloads.get(request_symbol)
+            if not fields_text:
+                continue
+            fields = fields_text.split(",")
+            if len(fields) < 4:
+                continue
+            previous = float(fields[2])
+            price = float(fields[3])
+            if price <= 0 < previous:
+                price = previous
+            if price <= 0:
+                continue
+            observed_at = _sina_observed_at(fields)
+            change = ((price - previous) / previous * 100) if previous else None
+            quotes.append(
+                MarketQuote(
+                    market=market,
+                    symbol=symbol,
+                    name=str(fields[0]).strip() or None,
+                    price=price,
+                    previous_close=previous,
+                    change_percent=change,
+                    source="新浪财经",
+                    observed_at=observed_at,
+                    delayed=True,
+                )
+            )
+        return quotes
 
 
 class InstrumentedMarketProvider:
@@ -251,6 +402,10 @@ class InstrumentedMarketProvider:
         self._health = health_registry
         self._attempt_timeout_seconds = attempt_timeout_seconds
         self._record_system_event = record_system_event
+
+    @property
+    def supports_quote_many(self) -> bool:
+        return callable(getattr(self._provider, "quote_many", None))
 
     async def quote(self, market: str, symbol: str) -> MarketQuote:
         for attempt in range(1, 3):
@@ -287,6 +442,39 @@ class InstrumentedMarketProvider:
             )
             return quote
         raise AssertionError("unreachable")
+
+    async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
+        quote_many = getattr(self._provider, "quote_many", None)
+        if not callable(quote_many):
+            return await asyncio.gather(*(self.quote(market, symbol) for symbol in symbols))
+        started = time.perf_counter()
+        try:
+            async with asyncio.timeout(self._attempt_timeout_seconds):
+                quotes = await quote_many(market, symbols)
+        except Exception as exc:
+            await self._health.record_attempt(
+                kind="market",
+                provider=self._provider_name,
+                target=self._target,
+                stage="quote_many",
+                success=False,
+                attempts=1,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                error_category=classify_provider_error(exc),
+                record_system_event=self._record_system_event,
+            )
+            raise
+        await self._health.record_attempt(
+            kind="market",
+            provider=self._provider_name,
+            target=self._target,
+            stage="quote_many",
+            success=True,
+            attempts=1,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            record_system_event=self._record_system_event,
+        )
+        return quotes
 
     async def _record(
         self,
@@ -340,6 +528,10 @@ class FailoverMarketProvider:
         self._health = health_registry
         self._attempt_timeout_seconds = attempt_timeout_seconds
         self._record_system_event = record_system_event
+
+    @property
+    def supports_quote_many(self) -> bool:
+        return any(callable(getattr(provider, "quote_many", None)) for _, _, provider in self._providers)
 
     async def quote(self, market: str, symbol: str) -> MarketQuote:
         last_error: Exception | None = None
@@ -406,6 +598,55 @@ class FailoverMarketProvider:
                     if index > 0:
                         quote = replace(quote, source=f"{quote.source}（备用源）")
                     return quote
+        raise MarketProviderUnavailableError("all configured market providers failed") from last_error
+
+    async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
+        last_error: Exception | None = None
+        for index, (name, target, provider) in enumerate(self._providers):
+            breaker = self._breakers[name]
+            async with self._provider_gates[name]:
+                if not breaker.allow_request():
+                    continue
+                started = time.perf_counter()
+                try:
+                    quote_many = getattr(provider, "quote_many", None)
+                    if callable(quote_many):
+                        async with asyncio.timeout(self._attempt_timeout_seconds):
+                            quotes = await quote_many(market, symbols)
+                    else:
+                        quotes = await asyncio.gather(
+                            *(provider.quote(market, symbol) for symbol in symbols)
+                        )
+                    breaker.record_success()
+                    await self._health.record_attempt(
+                        kind="market",
+                        provider=name,
+                        target=target,
+                        stage="quote_many",
+                        success=True,
+                        attempts=1,
+                        duration_ms=round((time.perf_counter() - started) * 1000),
+                        circuit_state=breaker.state,
+                        record_system_event=self._record_system_event,
+                    )
+                    if index > 0:
+                        quotes = [replace(quote, source=f"{quote.source}（备用源）") for quote in quotes]
+                    return quotes
+                except Exception as exc:
+                    last_error = exc
+                    breaker.record_failure()
+                    await self._health.record_attempt(
+                        kind="market",
+                        provider=name,
+                        target=target,
+                        stage="quote_many",
+                        success=False,
+                        attempts=1,
+                        duration_ms=round((time.perf_counter() - started) * 1000),
+                        error_category=classify_provider_error(exc),
+                        circuit_state=breaker.state,
+                        record_system_event=self._record_system_event,
+                    )
         raise MarketProviderUnavailableError("all configured market providers failed") from last_error
 
     def circuit_state(self, provider_name: str) -> str:
@@ -501,7 +742,7 @@ def _sina_observed_at(fields: list[str]) -> str:
     if len(fields) > 31 and fields[30] and fields[31]:
         try:
             parsed = datetime.fromisoformat(f"{fields[30]}T{fields[31]}")
-            return parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai")).isoformat()
+            return parsed.replace(tzinfo=_BEIJING_TIME_ZONE).isoformat()
         except ValueError:
             pass
     return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()

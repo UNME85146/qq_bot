@@ -397,6 +397,32 @@ class NewsConfig:
 
 
 @dataclass(frozen=True)
+class CodexRunwayConfig:
+    enabled: bool = False
+    recipient_user_id: str = ""
+    interval_seconds: int = 14_400
+    request_timeout_seconds: float = 20.0
+    max_items: int = 5
+    excerpt_chars: int = 160
+    max_message_chars: int = 1800
+    status_url: str = "https://www.codexrunway.com/api/status.json"
+
+
+@dataclass(frozen=True)
+class UsageRankingReportConfig:
+    enabled: bool = False
+    recipient_user_id: str = ""
+    send_time: str = "17:30"
+    timezone: str = "Asia/Shanghai"
+    limit: int = 50
+    request_timeout_seconds: float = 20.0
+    base_url: str = "https://api.example.com"
+    refresh_token_path: str = "runtime_artifacts/secrets/usage-refresh-token"
+    output_dir: str = "runtime_artifacts/usage-ranking"
+    font_path: str = "runtime_artifacts/fonts/NotoSansSC-VF.ttf"
+
+
+@dataclass(frozen=True)
 class MarketProviderConfig:
     provider: str = ""
     base_url: str = ""
@@ -409,7 +435,7 @@ class MarketsConfig:
     alert_threshold_percent: float = 3.0
     poll_interval_seconds: int = 300
     command_timeout_seconds: float = 20.0
-    provider_timeout_seconds: float = 8.0
+    provider_timeout_seconds: float = 15.0
     circuit_failure_threshold: int = 3
     circuit_recovery_seconds: float = 60.0
     a_share: MarketProviderConfig = field(default_factory=MarketProviderConfig)
@@ -475,6 +501,10 @@ class AppConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     video: VideoConfig = field(default_factory=VideoConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
+    codex_runway: CodexRunwayConfig = field(default_factory=CodexRunwayConfig)
+    usage_ranking_report: UsageRankingReportConfig = field(
+        default_factory=UsageRankingReportConfig
+    )
     markets: MarketsConfig = field(default_factory=MarketsConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     speech: SpeechConfig = field(default_factory=SpeechConfig)

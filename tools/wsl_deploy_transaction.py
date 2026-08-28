@@ -799,17 +799,36 @@ def _napcat_state(container: str) -> dict[str, Any]:
 
 def _napcat_runtime_identity(container: str) -> tuple[int, int]:
     output = _run(
-        ["docker", "exec", container, "ps", "-eo", "uid=,gid=,comm="],
+        ["docker", "exec", container, "ps", "-eo", "uid=,gid=,comm=,args="],
         quiet=True,
     ).stdout
+    return _parse_napcat_runtime_identity(output)
+
+
+def _parse_napcat_runtime_identity(output: str) -> tuple[int, int]:
     identities = {
         (int(parts[0]), int(parts[1]))
         for line in output.splitlines()
-        if len(parts := line.split(None, 2)) == 3 and parts[2] == "qq"
+        if len(parts := line.split(None, 3)) == 4
+        and parts[2] == "qq"
+        and _is_napcat_main_qq_command(parts[3])
     }
     if len(identities) != 1:
         raise DeploymentError("NapCat QQ runtime identity is unavailable or ambiguous")
     return next(iter(identities))
+
+
+def _is_napcat_main_qq_command(command: str) -> bool:
+    argv = command.split()
+    return (
+        bool(argv)
+        and argv[0].endswith("/opt/QQ/qq")
+        and not any(item.startswith("--type=") for item in argv[1:])
+        and any(
+            argv[index] == "-q" and index + 1 < len(argv) and argv[index + 1].isdigit()
+            for index in range(len(argv))
+        )
+    )
 
 
 def _tts_state() -> dict[str, Any]:

@@ -70,6 +70,34 @@ _VOICE_STATUS_PREFIX_PATTERN = re.compile(
     r"[\s：:，,。.!！?？]*"
 )
 _EMPTY_REPLY_FALLBACKS = ("卡了", "刚才那句算了", "当我没说")
+_QUALITY_EMPTY_FALLBACK = "我先不展开。"
+_QUALITY_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_QUALITY_ZERO_WIDTH_PATTERN = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+_QUALITY_HTML_PATTERN = re.compile(r"</?[^>]{1,40}>")
+_QUALITY_ROLE_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:assistant|system|user|tool|回复|正文|回答|系统提示)\s*[:：]?\s*",
+    re.IGNORECASE,
+)
+_QUALITY_MARKDOWN_ROLE_PATTERN = re.compile(
+    r"^\s*\*{1,2}(?:assistant|system|user|tool)\s*:\s*\*{1,2}\s*",
+    re.IGNORECASE,
+)
+_QUALITY_BEARER_PATTERN = re.compile(r"\bbearer\s+\S+", re.IGNORECASE)
+_QUALITY_API_KEY_PATTERN = re.compile(
+    r"\b(api[_-]?key|token|authorization)\s*[:=]\s*\S+",
+    re.IGNORECASE,
+)
+_QUALITY_PHONE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+_QUALITY_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_QUALITY_IP_PATTERN = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+_QUALITY_TRACE_PATTERN = re.compile(r"\b(?:trace|trace_id|request_id)=?[0-9a-f]{32}\b", re.IGNORECASE)
+_QUALITY_PATH_PATTERN = re.compile(r"(?<!\w)(?:[A-Za-z]:\\|/home/|/opt/)[^\s]+")
+_QUALITY_LONG_NUMBER_PATTERN = re.compile(r"(?<!\d)\d{7,}(?!\d)")
+_QUALITY_REPEAT_PUNCTUATION_PATTERN = re.compile(r"([!?！？])\1{1,}")
+_QUALITY_REPEAT_SENTENCE_PATTERN = re.compile(
+    r"(?P<sentence>[^\n。！？!?；;]{1,40}[。！？!?；;])(?P=sentence)+"
+)
+_QUALITY_REPEAT_LINE_PATTERN = re.compile(r"^(?P<line>.+)\n(?P=line)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -90,7 +118,7 @@ class ReplyFormatter:
         self._max_length = max_length
 
     def format(self, text: str) -> str:
-        cleaned = clean_reply_text(text)
+        cleaned = clean_reply_text(text, apply_quality=False)
         return truncate_naturally(cleaned, self._max_length)
 
     def format_unlimited(self, text: str, *, reply_mode: str = "short") -> str:
@@ -99,7 +127,7 @@ class ReplyFormatter:
         return _clean_reply_text_for_mode(text, reply_mode=reply_mode)
 
 
-def parse_model_reply(text: str) -> ReplyParseResult:
+def parse_model_reply(text: str, *, apply_quality: bool = False) -> ReplyParseResult:
     original = text or ""
     payload = _try_load_json_payload(original)
     reply_mode = "short"
@@ -110,10 +138,10 @@ def parse_model_reply(text: str) -> ReplyParseResult:
         reply_mode = _normalize_reply_mode(str(payload.get("reply_mode", "") or ""))
         send_sticker = _truthy(payload.get("send_sticker"))
         sticker_intent = str(payload.get("sticker_intent", "") or "").strip()
-    cleaned = clean_reply_text(original)
+    cleaned = clean_reply_text(original, apply_quality=apply_quality)
     cleaned = _strip_labeled_prefix(cleaned)
     cleaned = _strip_orphan_fences(cleaned)
-    cleaned = clean_reply_text(cleaned)
+    cleaned = clean_reply_text(cleaned, apply_quality=apply_quality)
     cleaned = _normalize_code_blocks(cleaned)
     if _is_empty_or_meaningless_reply(cleaned):
         cleaned = _empty_reply_fallback(original)
@@ -152,11 +180,13 @@ def has_fenced_code_block(text: str) -> bool:
     return bool(_FENCED_BLOCK_PATTERN.search(text))
 
 
-def clean_reply_text(text: str) -> str:
+def clean_reply_text(text: str, *, apply_quality: bool = True) -> str:
     cleaned = str(text or "").strip()
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n\s*\n+", "\n", cleaned)
+    if apply_quality:
+        cleaned = _repair_recent_group_quality(cleaned)
     cleaned = _strip_fake_media_actions(cleaned)
     cleaned = _strip_voice_status_text(cleaned)
     for prefix in ("作为AI语言模型，", "作为 AI 语言模型，"):
@@ -165,9 +195,140 @@ def clean_reply_text(text: str) -> str:
     return cleaned.strip()
 
 
+def _repair_recent_group_quality(text: str) -> str:
+    """Apply deterministic, privacy-safe cleanup before a reply reaches QQ."""
+    cleaned = _QUALITY_CONTROL_PATTERN.sub("", str(text or ""))
+    cleaned = _QUALITY_ZERO_WIDTH_PATTERN.sub("", cleaned)
+    cleaned = _QUALITY_HTML_PATTERN.sub("", cleaned)
+    cleaned = _QUALITY_MARKDOWN_ROLE_PATTERN.sub("", cleaned)
+    cleaned = re.sub(r"^(?:系统提示词要求我回复|我需要遵循系统提示词回复)\s*", "", cleaned)
+    cleaned = _QUALITY_ROLE_PREFIX_PATTERN.sub("", cleaned)
+    cleaned = re.sub(r"^我是\s*AI(?:模型|助手)?\s*[,，：:]?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _unwrap_quality_payload(cleaned)
+    if not cleaned:
+        return _QUALITY_EMPTY_FALLBACK
+
+    cleaned = _QUALITY_BEARER_PATTERN.sub("[redacted]", cleaned)
+    cleaned = _QUALITY_API_KEY_PATTERN.sub(
+        lambda match: f"{match.group(1)}=[redacted]",
+        cleaned,
+    )
+    cleaned = _QUALITY_PHONE_PATTERN.sub("[phone]", cleaned)
+    cleaned = _QUALITY_EMAIL_PATTERN.sub("[email]", cleaned)
+    cleaned = _QUALITY_IP_PATTERN.sub("[ip]", cleaned)
+    cleaned = _QUALITY_TRACE_PATTERN.sub("trace=[trace]", cleaned)
+    cleaned = _QUALITY_PATH_PATTERN.sub("[path]", cleaned)
+    cleaned = _QUALITY_LONG_NUMBER_PATTERN.sub("[number]", cleaned)
+
+    if _contains_unsafe_group_claim(cleaned):
+        return _unsafe_group_claim_replacement(cleaned)
+
+    cleaned = re.sub(r"哈哈{2,}", "哈哈", cleaned)
+    cleaned = re.sub(r"😂{2,}", "😂", cleaned)
+    cleaned = re.sub(r"(?:早睡){2,}", "早睡", cleaned)
+    cleaned = re.sub(r"(?:对不起){2,}", "对不起", cleaned)
+    cleaned = re.sub(r"(?:收到){2,}", "收到", cleaned)
+    cleaned = re.sub(r"(?:有什么想问的吗[？?]){2,}", "有什么想问的吗？", cleaned)
+    cleaned = _QUALITY_REPEAT_SENTENCE_PATTERN.sub(r"\g<sentence>", cleaned)
+    cleaned = _QUALITY_REPEAT_LINE_PATTERN.sub(r"\g<line>", cleaned)
+    cleaned = _QUALITY_REPEAT_PUNCTUATION_PATTERN.sub(r"\1", cleaned)
+    cleaned = re.sub(r"[？?！!]\s+", lambda match: match.group(0).strip(), cleaned)
+    cleaned = cleaned.replace(",", "，").replace("!", "！")
+    cleaned = re.sub(r"([，。！？；：])\s+", r"\1", cleaned)
+    cleaned = re.sub(r"[？?]{2,}", "？", cleaned)
+    cleaned = re.sub(r"[！!]{2,}", "！", cleaned)
+    cleaned = re.sub(r"\n\s*\n+", "\n", cleaned)
+    cleaned = cleaned.strip()
+
+    if not cleaned or cleaned.lower() in {
+        "null",
+        "none",
+        "undefined",
+        "nan",
+        "[object object]",
+        "[redacted]",
+    }:
+        return _QUALITY_EMPTY_FALLBACK
+    if len(cleaned) > 160 and _is_single_repeated_fragment(cleaned):
+        return _QUALITY_EMPTY_FALLBACK
+    return cleaned
+
+
+def _unwrap_quality_payload(text: str) -> str:
+    candidate = text.strip()
+    if not candidate or candidate[0] not in "[{" or candidate[-1] not in "]}":
+        return candidate
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return candidate
+    if isinstance(payload, dict):
+        if str(payload.get("role", "")).lower() == "system":
+            return ""
+        for key in ("reply_text", "text", "content", "reply"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value
+        if "reply_text" in payload:
+            return "卡了"
+        return ""
+    return ""
+
+
+def _contains_unsafe_group_claim(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "男同",
+            "诈骗犯",
+            "犯罪分子",
+            "露骨色情",
+            "色情描写",
+            "黄段子",
+            "打死",
+            "杀了",
+            "弄死",
+            "住址",
+            "住在",
+            "在哪上班",
+            "工作地点",
+            "上班",
+            "查了下聊天记录",
+            "看了群记录",
+            "数据库里",
+            "群记录",
+        )
+    )
+
+
+def _unsafe_group_claim_replacement(text: str) -> str:
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("住址", "住在")):
+        return "我不传播他人的住址或位置。"
+    if any(marker in lowered for marker in ("在哪上班", "工作地点", "上班")):
+        return "我不根据群聊猜测位置。"
+    if any(marker in lowered for marker in ("打死", "杀了", "弄死")):
+        return "别上升到伤害别人。"
+    if any(marker in lowered for marker in ("露骨色情", "色情描写", "黄段子")):
+        return "这个话题我不展开。"
+    if any(marker in lowered for marker in ("诈骗犯", "犯罪分子")):
+        return "我不替群成员下结论。"
+    suffix = "。" if text.rstrip().endswith(tuple("。！？!?")) else ""
+    return f"我不对群成员做标签{suffix}"
+
+
+def _is_single_repeated_fragment(text: str) -> bool:
+    compact = text.strip()
+    for size in range(2, min(80, len(compact) // 2 + 1)):
+        if len(compact) % size == 0 and compact == compact[:size] * (len(compact) // size):
+            return True
+    return False
+
+
 def _clean_reply_text_for_mode(text: str, *, reply_mode: str) -> str:
     if reply_mode != "long_text":
-        return clean_reply_text(text)
+        return clean_reply_text(text, apply_quality=False)
     cleaned = str(text or "").strip()
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
     cleaned = re.sub(r"[ \t]+", " ", cleaned)

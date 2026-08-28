@@ -8,7 +8,7 @@ import re
 import sqlite3
 import sys
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -158,6 +158,7 @@ def main() -> int:
     parser.add_argument("--source-user-id", required=True, help="QQ user id to extract style from.")
     parser.add_argument("--output", required=True, help="Output persona_profile.local.json path.")
     parser.add_argument("--report-output", help="Optional JSON report path for source coverage and behavior stats.")
+    parser.add_argument("--days", type=int, help="Only include records from the most recent number of days.")
     args = parser.parse_args()
 
     result = build_style_profile(
@@ -168,6 +169,7 @@ def main() -> int:
         source_user_id=str(args.source_user_id),
         output_path=Path(args.output),
         report_output_path=Path(args.report_output) if args.report_output else None,
+        days=args.days,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -183,7 +185,16 @@ def build_style_profile(
     source_user_id: str,
     output_path: Path,
     report_output_path: Path | None = None,
+    days: int | None = None,
+    reference_time: datetime | None = None,
 ) -> dict[str, Any]:
+    if days is not None and days <= 0:
+        raise ValueError("days must be positive")
+    current_time = reference_time or datetime.now(UTC)
+    if current_time.tzinfo is None:
+        raise ValueError("reference_time must be timezone-aware")
+    current_time = current_time.astimezone(UTC)
+    cutoff_at = current_time - timedelta(days=days) if days is not None else None
     safety_service = SafetyService(source_user_id=source_user_id)
     resolved_inputs = list(input_dirs or [])
     resolved_files = list(input_files or [])
@@ -212,6 +223,8 @@ def build_style_profile(
         "skippedSystemOrRecalled": 0,
         "output": str(output_path),
         "reportOutput": str(report_output_path) if report_output_path else None,
+        "lookbackDays": days,
+        "windowStart": cutoff_at.isoformat() if cutoff_at is not None else None,
     }
     valid_texts: list[str] = []
     behavior_stats: dict[str, Any] = {
@@ -254,6 +267,7 @@ def build_style_profile(
             stats=stats,
             behavior_stats=behavior_stats,
             valid_texts=valid_texts,
+            cutoff_at=cutoff_at,
         )
 
     for runtime_db in resolved_runtime_dbs:
@@ -264,6 +278,7 @@ def build_style_profile(
             stats=stats,
             behavior_stats=behavior_stats,
             valid_texts=valid_texts,
+            cutoff_at=cutoff_at,
         )
 
     stats["validLowSensitiveTexts"] = len(valid_texts)
@@ -358,9 +373,15 @@ def _consume_records(
     stats: dict[str, Any],
     behavior_stats: dict[str, Any],
     valid_texts: list[str],
+    cutoff_at: datetime | None = None,
 ) -> None:
     previous_record: dict[str, Any] | None = None
     for record in records:
+        if cutoff_at is not None:
+            record_at = _record_datetime(record)
+            if record_at is None or record_at < cutoff_at:
+                previous_record = None
+                continue
         stats["totalRecords"] += 1
 
         if str(_sender_uin(record)) != source_user_id:

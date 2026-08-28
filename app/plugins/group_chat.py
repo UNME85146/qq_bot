@@ -24,8 +24,9 @@ from app.features.reminder_service import (
 )
 from app.features.news_service import (
     NewsCommandService,
-    run_news_subscription_once,
 )
+from app.features.codex_runway_monitor import codex_runway_worker
+from app.features.usage_ranking_report import usage_ranking_report_worker
 from app.features.rss_news_provider import RssNewsProvider
 from app.features.market_service import MarketCommandService, run_market_alert_once
 from app.features.market_providers import create_market_providers
@@ -209,6 +210,8 @@ BACKFILL_MARKERS = (
     "上面的问题",
 )
 _reminder_worker_started = False
+_codex_runway_worker_started = False
+_usage_ranking_worker_started = False
 _runtime_bot: Bot | None = None
 
 
@@ -267,7 +270,8 @@ group_chat = on_message(priority=10, block=False)
 
 
 async def _start_reminder_worker(bot: Bot) -> None:
-    global _reminder_worker_started, _runtime_bot
+    global _reminder_worker_started
+    global _codex_runway_worker_started, _usage_ranking_worker_started, _runtime_bot
     _runtime_bot = bot
     if _reminder_worker_started:
         return
@@ -285,30 +289,31 @@ async def _start_reminder_worker(bot: Bot) -> None:
     except Exception:
         logger.exception("Failed to expire stale group pending questions")
     asyncio.create_task(reminder_worker(_runtime_bot_proxy, _feature_hub))
-    asyncio.create_task(_runtime_news_subscription_worker(_runtime_bot_proxy))
     asyncio.create_task(_runtime_market_alert_worker(_runtime_bot_proxy))
+    if not _codex_runway_worker_started:
+        _codex_runway_worker_started = True
+        asyncio.create_task(
+            codex_runway_worker(
+                _runtime_bot_proxy,
+                _config.codex_runway,
+                record_system_event=_conversation_service.record_system_event,
+            )
+        )
+    if not _usage_ranking_worker_started:
+        _usage_ranking_worker_started = True
+        asyncio.create_task(
+            usage_ranking_report_worker(
+                _runtime_bot_proxy,
+                _config.usage_ranking_report,
+                record_system_event=_conversation_service.record_system_event,
+            )
+        )
 
 
 async def _clear_runtime_bot(bot: Bot) -> None:
     global _runtime_bot
     if _runtime_bot is bot:
         _runtime_bot = None
-
-
-async def _runtime_news_subscription_worker(bot: Bot) -> None:
-    while True:
-        try:
-            zone = ZoneInfo(_config.news.timezone)
-            await run_news_subscription_once(
-                bot,
-                _news_command_service,
-                _news_subscription_repository,
-                now=datetime.now(zone),
-                can_send_group=_scheduled_group_send_allowed,
-            )
-        except Exception:
-            logger.exception("News subscription worker iteration failed")
-        await asyncio.sleep(30.0)
 
 
 async def _runtime_market_alert_worker(bot: Bot) -> None:
@@ -410,9 +415,6 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
             model_called=False,
             safety_blocked=False,
         )
-        return
-
-    if await _try_handle_group_video_feature(bot, event, normalized):
         return
 
     if await _try_handle_group_information_feature(bot, event, normalized):
@@ -662,7 +664,11 @@ async def _try_handle_group_information_feature(
     event: GroupMessageEvent,
     message: NormalizedMessage,
 ) -> bool:
-    result = await _news_command_service.handle(message)
+    result = (
+        await _news_command_service.handle(message)
+        if message.text.strip().startswith("/help")
+        else None
+    )
     if result is None:
         result = await _market_command_service.handle(message)
     if result is None:
@@ -802,46 +808,8 @@ async def _try_handle_group_video_feature(
     event: GroupMessageEvent,
     message: NormalizedMessage,
 ) -> bool:
-    async def send_progress(text: str) -> None:
-        await send_reply_bubbles(
-            bot,
-            event,
-            text,
-            scope_type="group",
-            reply_config=_config.reply,
-            on_send_error=lambda exc, index, bubble: _record_send_error(
-                message.trace_id,
-                exc,
-                index,
-                "send_group_video_progress_failed",
-            ),
-        )
-
-    result = await _video_service.handle(bot, message, on_progress=send_progress)
-    if result is None:
-        return False
-    if result.text:
-        await send_structured_information(
-            bot,
-            event,
-            (result.text,),
-            scope_type="group",
-            reply_config=_config.reply,
-            on_send_error=lambda exc, index, bubble: _record_send_error(
-                message.trace_id,
-                exc,
-                index,
-                "send_group_video_status_failed",
-            ),
-        )
-    await _conversation_service.record_reply_audit(
-        message,
-        action="reply",
-        reason=result.reason,
-        model_called=False,
-        safety_blocked=False,
-    )
-    return True
+    del bot, event, message
+    return False
 
 
 def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:

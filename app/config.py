@@ -4,7 +4,7 @@ import json
 import os
 import re
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -21,6 +21,7 @@ from app.persona.history_character import (
 from app.models import (
     AppConfig,
     BehaviorProfileConfig,
+    CodexRunwayConfig,
     ConversationSessionsConfig,
     ImageGenerationConfig,
     LimitsConfig,
@@ -39,6 +40,7 @@ from app.models import (
     SpeechConfig,
     StorageConfig,
     StyleProfileConfig,
+    UsageRankingReportConfig,
     VideoConfig,
 )
 
@@ -65,6 +67,8 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     retry = _config_block(raw, "retry")
     video = _config_block(raw, "video")
     news = _config_block(raw, "news")
+    codex_runway = _config_block(raw, "codexRunway")
+    usage_ranking_report = _config_block(raw, "usageRankingReport")
     markets = _config_block(raw, "markets")
     search = _config_block(raw, "search")
     speech = _config_block(raw, "speech")
@@ -163,6 +167,10 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         retry=_load_retry_config(retry),
         video=_load_video_config(video),
         news=_load_news_config(news),
+        codex_runway=_load_codex_runway_config(codex_runway),
+        usage_ranking_report=_load_usage_ranking_report_config(
+            usage_ranking_report
+        ),
         markets=_load_markets_config(markets),
         search=_load_search_config(search),
         speech=_load_speech_config(speech),
@@ -362,6 +370,112 @@ def _load_news_config(raw: dict[str, Any]) -> NewsConfig:
     return config
 
 
+def _load_codex_runway_config(raw: dict[str, Any]) -> CodexRunwayConfig:
+    config = CodexRunwayConfig(
+        enabled=bool(raw.get("enabled", False)),
+        recipient_user_id=str(raw.get("recipientUserId", "")).strip(),
+        interval_seconds=int(raw.get("intervalSeconds", 14_400)),
+        request_timeout_seconds=float(raw.get("requestTimeoutSeconds", 20.0)),
+        max_items=int(raw.get("maxItems", 5)),
+        excerpt_chars=int(raw.get("excerptChars", 160)),
+        max_message_chars=int(raw.get("maxMessageChars", 1800)),
+        status_url=str(
+            raw.get(
+                "statusUrl",
+                "https://www.codexrunway.com/api/status.json",
+            )
+        ).strip(),
+    )
+    if config.enabled and not re.fullmatch(r"\d+", config.recipient_user_id):
+        raise ValueError(
+            "codexRunway.recipientUserId must be a numeric QQ id when enabled"
+        )
+    if config.recipient_user_id and not re.fullmatch(r"\d+", config.recipient_user_id):
+        raise ValueError("codexRunway.recipientUserId must be a numeric QQ id")
+    if config.interval_seconds <= 0:
+        raise ValueError("codexRunway.intervalSeconds must be positive")
+    if config.request_timeout_seconds <= 0:
+        raise ValueError("codexRunway.requestTimeoutSeconds must be positive")
+    if not 1 <= config.max_items <= 10:
+        raise ValueError("codexRunway.maxItems must be between 1 and 10")
+    if not 60 <= config.excerpt_chars <= 500:
+        raise ValueError("codexRunway.excerptChars must be between 60 and 500")
+    if not 500 <= config.max_message_chars <= 4000:
+        raise ValueError("codexRunway.maxMessageChars must be between 500 and 4000")
+    if config.status_url != "https://www.codexrunway.com/api/status.json":
+        raise ValueError("codexRunway.statusUrl must use the official HTTPS endpoint")
+    return config
+
+
+def _load_usage_ranking_report_config(
+    raw: dict[str, Any],
+) -> UsageRankingReportConfig:
+    config = UsageRankingReportConfig(
+        enabled=bool(raw.get("enabled", False)),
+        recipient_user_id=str(raw.get("recipientUserId", "")).strip(),
+        send_time=str(raw.get("sendTime", "17:30")).strip(),
+        timezone=str(raw.get("timezone", "Asia/Shanghai")).strip(),
+        limit=int(raw.get("limit", 50)),
+        request_timeout_seconds=float(raw.get("requestTimeoutSeconds", 20.0)),
+        base_url=str(raw.get("baseUrl", "https://api.example.com"))
+        .strip()
+        .rstrip("/"),
+        refresh_token_path=str(
+            raw.get(
+                "refreshTokenPath",
+                "runtime_artifacts/secrets/usage-refresh-token",
+            )
+        ).strip(),
+        output_dir=str(
+            raw.get("outputDir", "runtime_artifacts/usage-ranking")
+        ).strip(),
+        font_path=str(
+            raw.get("fontPath", "runtime_artifacts/fonts/NotoSansSC-VF.ttf")
+        ).strip(),
+    )
+    if config.enabled and not re.fullmatch(r"\d+", config.recipient_user_id):
+        raise ValueError(
+            "usageRankingReport.recipientUserId must be a numeric QQ id when enabled"
+        )
+    if config.recipient_user_id and not re.fullmatch(r"\d+", config.recipient_user_id):
+        raise ValueError("usageRankingReport.recipientUserId must be a numeric QQ id")
+    if not _is_hhmm(config.send_time):
+        raise ValueError("usageRankingReport.sendTime must use HH:MM")
+    if config.timezone != "Asia/Shanghai":
+        raise ValueError("usageRankingReport.timezone must be Asia/Shanghai")
+    if not 1 <= config.limit <= 50:
+        raise ValueError("usageRankingReport.limit must be between 1 and 50")
+    if config.request_timeout_seconds <= 0:
+        raise ValueError("usageRankingReport.requestTimeoutSeconds must be positive")
+    if config.base_url != "https://api.example.com":
+        raise ValueError("usageRankingReport.baseUrl must use the fixed HTTPS host")
+    _validate_runtime_artifact_path(
+        config.refresh_token_path,
+        field="usageRankingReport.refreshTokenPath",
+    )
+    _validate_runtime_artifact_path(
+        config.output_dir,
+        field="usageRankingReport.outputDir",
+    )
+    _validate_runtime_artifact_path(
+        config.font_path,
+        field="usageRankingReport.fontPath",
+    )
+    return config
+
+
+def _validate_runtime_artifact_path(value: str, *, field: str) -> None:
+    path = PurePosixPath(value.replace("\\", "/"))
+    if (
+        not value
+        or path.is_absolute()
+        or ".." in path.parts
+        or len(path.parts) < 2
+        or path.parts[0] != "runtime_artifacts"
+    ):
+        raise ValueError(f"{field} must stay under runtime_artifacts")
+
+
 def _load_market_provider_config(raw: dict[str, Any]) -> MarketProviderConfig:
     return MarketProviderConfig(
         provider=str(raw.get("provider", "")).strip(),
@@ -379,7 +493,7 @@ def _load_markets_config(raw: dict[str, Any]) -> MarketsConfig:
         alert_threshold_percent=float(raw.get("alertThresholdPercent", 3.0)),
         poll_interval_seconds=int(raw.get("pollIntervalSeconds", 300)),
         command_timeout_seconds=float(raw.get("commandTimeoutSeconds", 20.0)),
-        provider_timeout_seconds=float(raw.get("providerTimeoutSeconds", 8.0)),
+        provider_timeout_seconds=float(raw.get("providerTimeoutSeconds", 15.0)),
         circuit_failure_threshold=int(raw.get("circuitFailureThreshold", 3)),
         circuit_recovery_seconds=float(raw.get("circuitRecoverySeconds", 60.0)),
         a_share=_load_market_provider_config(raw.get("aShare", {})),

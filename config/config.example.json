@@ -1,28 +1,13 @@
 {
   "qq": {
     "selfId": "BOT_QQ",
-    "rootUserIds": [
-      "ROOT_QQ"
-    ],
-    "ownerUserIds": [
-      "OWNER_QQ"
-    ],
-    "allowedPrivateUserIds": [
-      "OWNER_QQ"
-    ],
-    "allowedGroupIds": [
-      "ALLOWED_GROUP_ID"
-    ],
-    "groupMuteControllerUserIds": [
-      "OWNER_QQ"
-    ],
-    "memoryAllowedUserIds": [
-      "OWNER_QQ"
-    ],
-    "nicknames": [
-      "测试号",
-      "机器人"
-    ]
+    "rootUserIds": ["ROOT_QQ"],
+    "ownerUserIds": ["OWNER_QQ"],
+    "allowedPrivateUserIds": ["OWNER_QQ"],
+    "allowedGroupIds": ["ALLOWED_GROUP_ID"],
+    "groupMuteControllerUserIds": ["OWNER_QQ"],
+    "memoryAllowedUserIds": ["OWNER_QQ"],
+    "nicknames": ["测试号", "机器人"]
   },
   "onebot": {
     "mode": "ws_reverse",
@@ -97,15 +82,8 @@
   },
   "retry": {
     "maxAttempts": 3,
-    "timeoutMultipliers": [
-      1,
-      2,
-      3
-    ],
-    "backoffSeconds": [
-      2,
-      5
-    ]
+    "timeoutMultipliers": [1, 2, 3],
+    "backoffSeconds": [2, 5]
   },
   "video": {
     "enabled": false,
@@ -131,26 +109,40 @@
     "defaultTime": "08:00",
     "timezone": "Asia/Shanghai",
     "feeds": {
-      "politics": [
-        "https://feeds.example.com/politics.xml"
-      ],
-      "business": [
-        "https://feeds.example.com/business.xml"
-      ],
-      "technology": [
-        "https://feeds.example.com/technology.xml"
-      ],
-      "finance": [
-        "https://feeds.example.com/finance.xml"
-      ]
+      "politics": ["https://feeds.example.com/politics.xml"],
+      "business": ["https://feeds.example.com/business.xml"],
+      "technology": ["https://feeds.example.com/technology.xml"],
+      "finance": ["https://feeds.example.com/finance.xml"]
     }
+  },
+  "codexRunway": {
+    "enabled": false,
+    "recipientUserId": "",
+    "intervalSeconds": 14400,
+    "requestTimeoutSeconds": 20,
+    "maxItems": 5,
+    "excerptChars": 160,
+    "maxMessageChars": 1800,
+    "statusUrl": "https://www.codexrunway.com/api/status.json"
+  },
+  "usageRankingReport": {
+    "enabled": false,
+    "recipientUserId": "",
+    "sendTime": "17:30",
+    "timezone": "Asia/Shanghai",
+    "limit": 50,
+    "requestTimeoutSeconds": 20,
+    "baseUrl": "https://api.example.com",
+    "refreshTokenPath": "runtime_artifacts/secrets/usage-refresh-token",
+    "outputDir": "runtime_artifacts/usage-ranking",
+    "fontPath": "runtime_artifacts/fonts/NotoSansSC-VF.ttf"
   },
   "markets": {
     "enabled": false,
     "alertThresholdPercent": 3,
     "pollIntervalSeconds": 300,
     "commandTimeoutSeconds": 20,
-    "providerTimeoutSeconds": 8,
+    "providerTimeoutSeconds": 15,
     "circuitFailureThreshold": 3,
     "circuitRecoverySeconds": 60,
     "aShare": {

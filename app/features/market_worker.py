@@ -14,13 +14,28 @@ def main() -> int:
         provider = str(payload.get("provider") or "")
         market = str(payload.get("market") or "")
         symbol = str(payload.get("symbol") or "")
+        symbols = payload.get("symbols")
+        if isinstance(symbols, list):
+            requested_symbols = [str(item) for item in symbols]
+        else:
+            requested_symbols = []
         if provider == "akshare":
-            quote = AkShareMarketProvider._quote_sync(market, symbol)
+            quotes = (
+                AkShareMarketProvider._quotes_sync(market, requested_symbols)
+                if requested_symbols
+                else [AkShareMarketProvider._quote_sync(market, symbol)]
+            )
         elif provider == "yfinance":
-            quote = YFinanceMarketProvider._quote_sync(market, symbol)
+            quotes = (
+                YFinanceMarketProvider._quotes_sync(market, requested_symbols)
+                if requested_symbols
+                else [YFinanceMarketProvider._quote_sync(market, symbol)]
+            )
         else:
             raise ValueError("unsupported market provider")
-        result = {"ok": True, "quote": asdict(quote)}
+        result = {"ok": True, "quotes": [asdict(quote) for quote in quotes]}
+        if not requested_symbols:
+            result["quote"] = result["quotes"][0]
         return_code = 0
     except Exception as exc:
         result = {"ok": False, "category": classify_provider_error(exc)}

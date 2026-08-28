@@ -401,12 +401,26 @@ def adapter_kind(path):
 def napcat_identity(container):
     identities = {
         (int(parts[0]), int(parts[1]))
-        for line in run("docker", "exec", container, "ps", "-eo", "uid=,gid=,comm=").splitlines()
-        if len(parts := line.split(None, 2)) == 3 and parts[2] == "qq"
+        for line in run("docker", "exec", container, "ps", "-eo", "uid=,gid=,comm=,args=").splitlines()
+        if len(parts := line.split(None, 3)) == 4
+        and parts[2] == "qq"
+        and is_main_qq_command(parts[3])
     }
     if len(identities) != 1:
         raise SystemExit("NapCat QQ runtime identity is unavailable or ambiguous")
     return next(iter(identities))
+
+def is_main_qq_command(command):
+    argv = command.split()
+    return (
+        bool(argv)
+        and argv[0].endswith("/opt/QQ/qq")
+        and not any(item.startswith("--type=") for item in argv[1:])
+        and any(
+            argv[index] == "-q" and index + 1 < len(argv) and argv[index + 1].isdigit()
+            for index in range(len(argv))
+        )
+    )
 
 root = Path(os.environ["QQ_BOT_ROOT"]).resolve()
 if not root.is_dir() or str(root) != os.environ["QQ_BOT_ROOT"]:
