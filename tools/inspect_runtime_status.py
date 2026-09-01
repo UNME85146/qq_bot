@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import load_config
+from app.features.speech_provider import speech_endpoint_url
 from tools.runtime_common import (
     last_model_failure,
     muted_group_states,
@@ -66,7 +67,10 @@ def main() -> int:
             "enabled": config.speech.enabled,
             "privateEnabled": config.speech.private_enabled,
             "groupEnabled": config.speech.group_enabled,
-            "endpoint": _speech_endpoint(config.speech.base_url),
+            "apiMode": config.speech.api_mode,
+            "randomReplyEnabled": config.speech.random_reply_enabled,
+            "maxAudioBytes": config.speech.max_audio_bytes,
+            "endpoint": _speech_endpoint(config.speech),
             "model": config.speech.model,
             "voice": config.speech.voice,
             "format": config.speech.format,
@@ -166,8 +170,8 @@ def _historical_tts_supported_platform() -> bool:
     return os.name == "posix"
 
 
-def _speech_endpoint(base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/audio/speech" if base_url else "unconfigured"
+def _speech_endpoint(config) -> str:
+    return speech_endpoint_url(config) if config.base_url else "unconfigured"
 
 
 if __name__ == "__main__":

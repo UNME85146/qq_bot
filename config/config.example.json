@@ -171,6 +171,7 @@
   },
   "speech": {
     "enabled": false,
+    "apiMode": "audio_speech",
     "baseUrl": "",
     "apiKeyEnv": "",
     "model": "",
@@ -183,7 +184,9 @@
     "privateEnabled": true,
     "groupEnabled": true,
     "privateCooldownSeconds": 30,
-    "groupCooldownSeconds": 60
+    "groupCooldownSeconds": 60,
+    "randomReplyEnabled": false,
+    "maxAudioBytes": 8388608
   },
   "imageGeneration": {
     "enabled": false,

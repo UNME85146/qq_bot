@@ -44,7 +44,7 @@ from app.features.sticker_service import is_sticker_media
 from app.features.image_provider import create_image_provider
 from app.features.image_service import ImageGenerationService, parse_image_command
 from app.features.speech_provider import create_speech_provider
-from app.features.speech_service import SpeechService
+from app.features.speech_service import SpeechDeliveryOutcome, SpeechService
 from app.features.tts_service import (
     extract_explicit_voice_read_text,
     forced_voice_tts_skip_reason,
@@ -1138,22 +1138,32 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             _active_windows[(message.group_id, target.user_id)] = (
                 time.monotonic() + _config.reply.active_window_seconds
             )
-        voice_sent = await _maybe_send_group_voice_reply(
+        voice_delivery = await _maybe_send_group_voice_reply(
             task.bot,
             target_message,
             reply,
             force=force_voice_reply,
         )
-        if voice_sent:
+        if voice_delivery:
+            delivery_status = getattr(
+                voice_delivery,
+                "delivery_status",
+                "sent",
+            )
+            sent_message_id = getattr(voice_delivery, "message_id", None)
             await _conversation_service.record_reply_audit(
                 target_message,
                 action="reply",
-                reason="group_reply_delivered",
+                reason=(
+                    "group_reply_delivered"
+                    if delivery_status == "sent"
+                    else "group_reply_delivery_unknown"
+                ),
                 model_called=_reply_used_model(reply),
                 safety_blocked=False,
                 response_text=reply.text,
-                delivery_status="sent",
-                sent_message_ids=(),
+                delivery_status=delivery_status,
+                sent_message_ids=(sent_message_id,) if sent_message_id else (),
             )
             if message.group_id is not None:
                 _group_last_sent_at[message.group_id] = time.monotonic()
@@ -1323,6 +1333,8 @@ async def _maybe_send_group_voice_reply(
             ignore_cooldown=True,
         )
         if sent:
+            return sent
+        if _speech_delivery_unknown(message.trace_id):
             return True
         failure_text = _current_speech_failure(message.trace_id)
         if failure_text and message.group_id:
@@ -1335,6 +1347,8 @@ async def _maybe_send_group_voice_reply(
         )
         return False
 
+    if not _voice_config().random_reply_enabled:
+        return False
     group_decision = _next_group_random_voice_decision(message)
     if group_decision is None:
         return False
@@ -1433,6 +1447,11 @@ async def _maybe_send_group_tts_text(
     if send_with_cleanup is not None:
         send_result = await send_with_cleanup(message, result, send_record)
         if send_result is None:
+            if _speech_delivery_unknown(message.trace_id):
+                return SpeechDeliveryOutcome(
+                    handled=True,
+                    delivery_status="unknown",
+                )
             return False
         await _record_sent_group_voice_message(
             message,
@@ -1441,7 +1460,11 @@ async def _maybe_send_group_tts_text(
         if count_voice_window:
             _remember_group_non_random_outgoing(message.group_id, message.message_id)
         _group_last_sent_at[message.group_id] = time.monotonic()
-        return True
+        return SpeechDeliveryOutcome(
+            handled=True,
+            delivery_status="sent",
+            message_id=_extract_sent_message_id(send_result),
+        )
     try:
         send_result = await send_record()
         await _record_sent_group_voice_message(
@@ -1459,7 +1482,11 @@ async def _maybe_send_group_tts_text(
             trace_id=message.trace_id,
         )
         return False
-    return True
+    return SpeechDeliveryOutcome(
+        handled=True,
+        delivery_status="sent",
+        message_id=_extract_sent_message_id(send_result),
+    )
 
 
 async def _pending_backfill_targets(message: NormalizedMessage) -> list[PendingQuestionTarget]:
@@ -1712,13 +1739,26 @@ async def _try_send_group_explicit_voice(
         ignore_cooldown=True,
         single_request=True,
     )
-    if sent:
+    if sent and getattr(sent, "delivery_status", "sent") == "sent":
+        sent_message_id = getattr(sent, "message_id", None)
         await _conversation_service.record_reply_audit(
             message,
             action="reply",
             reason="group_explicit_voice_sent",
             model_called=False,
             safety_blocked=False,
+            delivery_status="sent",
+            sent_message_ids=(sent_message_id,) if sent_message_id else (),
+        )
+        return True
+    if _speech_delivery_unknown(message.trace_id):
+        await _conversation_service.record_reply_audit(
+            message,
+            action="reply",
+            reason="group_explicit_voice_delivery_unknown",
+            model_called=False,
+            safety_blocked=False,
+            delivery_status="unknown",
         )
         return True
     await record_tts_fallback_text_sent(
@@ -1809,14 +1849,21 @@ def _speech_failure_text(trace_id: str, *, fallback: str | None = None) -> str:
     if fallback:
         return fallback
     return (
-        "当前配置不支持语音：请管理员配置支持 /v1/audio/speech "
-        "的语音模型和 API Key"
+        "当前配置不支持语音：请管理员配置远程语音模型、接口模式和 API Key"
     )
 
 
 def _current_speech_failure(trace_id: str) -> str | None:
     failure_message = getattr(_tts_service, "failure_message", None)
     return failure_message(trace_id) if failure_message is not None else None
+
+
+def _speech_delivery_unknown(trace_id: str) -> bool:
+    failure_category = getattr(_tts_service, "failure_category", None)
+    return (
+        failure_category is not None
+        and failure_category(trace_id) == "delivery_unknown"
+    )
 
 
 async def _try_repeat_from_plus_one_text(bot: Bot, message: NormalizedMessage) -> bool:

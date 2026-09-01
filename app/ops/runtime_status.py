@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.features.speech_provider import speech_endpoint_url
 from tools.runtime_common import (
     last_model_failure,
     muted_group_states,
@@ -30,7 +31,9 @@ def build_owner_status_text(config) -> str:
             f"speech={'on' if config.speech.enabled else 'off'} "
             f"private={'on' if config.speech.private_enabled else 'off'} "
             f"group={'on' if config.speech.group_enabled else 'off'} "
-            f"endpoint={_speech_endpoint(config.speech.base_url)} "
+            f"mode={config.speech.api_mode} "
+            f"random={'on' if config.speech.random_reply_enabled else 'off'} "
+            f"endpoint={_speech_endpoint(config.speech)} "
             f"model={config.speech.model or 'unconfigured'} "
             f"voice={config.speech.voice or 'unconfigured'}"
         ),
@@ -108,8 +111,8 @@ def _short_join(values: set[str], *, limit: int = 6) -> str:
     return f"{visible},+{len(sorted_values) - limit}"
 
 
-def _speech_endpoint(base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/audio/speech" if base_url else "unconfigured"
+def _speech_endpoint(config) -> str:
+    return speech_endpoint_url(config) if config.base_url else "unconfigured"
 
 
 def _group_queue_text() -> str:

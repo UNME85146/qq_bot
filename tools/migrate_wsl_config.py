@@ -169,6 +169,8 @@ def migrate_runtime_config(
     }
 
     allowed_speech_fields = {
+        "enabled",
+        "apiMode",
         "baseUrl",
         "apiKeyEnv",
         "model",
@@ -182,6 +184,8 @@ def migrate_runtime_config(
         "groupEnabled",
         "privateCooldownSeconds",
         "groupCooldownSeconds",
+        "randomReplyEnabled",
+        "maxAudioBytes",
     }
     current_speech = _object(migrated.get("speech"))
     speech = {
@@ -192,6 +196,8 @@ def migrate_runtime_config(
     speech = _merge_defaults(
         speech,
         {
+            "enabled": False,
+            "apiMode": "audio_speech",
             "baseUrl": "",
             "apiKeyEnv": "",
             "model": "",
@@ -205,9 +211,11 @@ def migrate_runtime_config(
             "groupEnabled": True,
             "privateCooldownSeconds": 30,
             "groupCooldownSeconds": 60,
+            "randomReplyEnabled": True,
+            "maxAudioBytes": 8 * 1024 * 1024,
         },
     )
-    speech["enabled"] = False
+    speech["enabled"] = bool(speech.get("enabled", False))
     migrated["speech"] = speech
 
     image_enabled = bool(model.get("baseUrl") and model.get("apiKeyEnv"))

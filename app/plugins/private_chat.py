@@ -29,7 +29,7 @@ from app.features.sticker_service import is_sticker_save_request
 from app.features.image_provider import cleanup_stale_image_cache, create_image_provider
 from app.features.image_service import ImageGenerationService, parse_image_command
 from app.features.speech_provider import create_speech_provider
-from app.features.speech_service import SpeechService
+from app.features.speech_service import SpeechDeliveryOutcome, SpeechService
 from app.features.tts_service import (
     extract_explicit_voice_read_text,
     forced_voice_tts_skip_reason,
@@ -43,6 +43,7 @@ from app.features.tts_service import (
 from app.model.image_input import prepare_onebot_image_message
 from app.models import GeneratedReply
 from app.plugins.send_helper import (
+    _extract_sent_message_id,
     send_private_image_direct,
     send_private_record_direct,
     send_reply_bubbles,
@@ -407,13 +408,24 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
     if reply is None:
         logger.info("Private message ignored by whitelist: user_id={}", event.user_id)
         return
-    voice_sent = await _maybe_send_private_voice_reply(
+    voice_delivery = await _maybe_send_private_voice_reply(
         bot,
         normalized,
         reply,
         force=force_voice_reply,
     )
-    if voice_sent:
+    if voice_delivery:
+        if getattr(voice_delivery, "delivery_status", None) == "unknown":
+            await _conversation_service.record_reply_audit(
+                normalized,
+                action="reply",
+                reason="private_voice_delivery_unknown",
+                model_called=True,
+                safety_blocked=False,
+                response_text=reply.text,
+                delivery_status="unknown",
+                sent_message_ids=(),
+            )
         _remember_private_direct_action(normalized.user_id, "voice")
         return
 
@@ -634,13 +646,26 @@ async def _try_send_private_explicit_voice(
         ignore_cooldown=True,
         single_request=True,
     )
-    if sent:
+    if sent and getattr(sent, "delivery_status", "sent") == "sent":
+        sent_message_id = getattr(sent, "message_id", None)
         await _conversation_service.record_reply_audit(
             normalized,
             action="reply",
             reason="private_explicit_voice_sent",
             model_called=False,
             safety_blocked=False,
+            delivery_status="sent",
+            sent_message_ids=(sent_message_id,) if sent_message_id else (),
+        )
+        return True
+    if _speech_delivery_unknown(normalized.trace_id):
+        await _conversation_service.record_reply_audit(
+            normalized,
+            action="reply",
+            reason="private_explicit_voice_delivery_unknown",
+            model_called=False,
+            safety_blocked=False,
+            delivery_status="unknown",
         )
         return True
     await record_tts_fallback_text_sent(
@@ -727,6 +752,8 @@ async def _maybe_send_private_voice_reply(
             ignore_cooldown=True,
         )
         if sent:
+            return sent
+        if _speech_delivery_unknown(normalized.trace_id):
             return True
         failure_text = _current_speech_failure(normalized.trace_id)
         if failure_text:
@@ -742,6 +769,8 @@ async def _maybe_send_private_voice_reply(
         )
         return False
 
+    if not _voice_config().random_reply_enabled:
+        return False
     private_decision = _next_private_random_voice_decision(normalized)
     if private_decision is None:
         return False
@@ -830,11 +859,20 @@ async def _maybe_send_private_tts_text(
     if send_with_cleanup is not None:
         sent_result = await send_with_cleanup(normalized, result, send_record)
         if sent_result is None:
+            if _speech_delivery_unknown(normalized.trace_id):
+                return SpeechDeliveryOutcome(
+                    handled=True,
+                    delivery_status="unknown",
+                )
             return False
         _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
-        return True
+        return SpeechDeliveryOutcome(
+            handled=True,
+            delivery_status="sent",
+            message_id=_extract_sent_message_id(sent_result),
+        )
     try:
-        await send_record()
+        sent_result = await send_record()
         _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
     except Exception as exc:
         await _conversation_service.record_system_event(
@@ -844,7 +882,11 @@ async def _maybe_send_private_tts_text(
             trace_id=normalized.trace_id,
         )
         return False
-    return True
+    return SpeechDeliveryOutcome(
+        handled=True,
+        delivery_status="sent",
+        message_id=_extract_sent_message_id(sent_result),
+    )
 
 
 async def _try_send_private_speech_unavailable(
@@ -892,14 +934,21 @@ def _speech_failure_text(trace_id: str, *, fallback: str | None = None) -> str:
     if fallback:
         return fallback
     return (
-        "当前配置不支持语音：请管理员配置支持 /v1/audio/speech "
-        "的语音模型和 API Key"
+        "当前配置不支持语音：请管理员配置远程语音模型、接口模式和 API Key"
     )
 
 
 def _current_speech_failure(trace_id: str) -> str | None:
     failure_message = getattr(_tts_service, "failure_message", None)
     return failure_message(trace_id) if failure_message is not None else None
+
+
+def _speech_delivery_unknown(trace_id: str) -> bool:
+    failure_category = getattr(_tts_service, "failure_category", None)
+    return (
+        failure_category is not None
+        and failure_category(trace_id) == "delivery_unknown"
+    )
 
 
 def _next_private_random_voice_decision(normalized) -> PrivateRandomVoiceDecision | None:

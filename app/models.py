@@ -456,6 +456,7 @@ class SearchConfig:
 @dataclass(frozen=True)
 class SpeechConfig:
     enabled: bool = False
+    api_mode: str = "audio_speech"
     base_url: str = ""
     api_key_env: str = ""
     model: str = ""
@@ -469,6 +470,8 @@ class SpeechConfig:
     group_enabled: bool = True
     private_cooldown_seconds: float = 30.0
     group_cooldown_seconds: float = 60.0
+    random_reply_enabled: bool = True
+    max_audio_bytes: int = 8 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ImageGenerationConfig:

@@ -68,6 +68,8 @@ class ImageAsset:
 class SpeechAsset:
     file_path: str
     format: str
+    transcript: str | None = None
+    provider_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,7 +115,15 @@ class ImageProvider(Protocol):
 
 @runtime_checkable
 class SpeechProvider(Protocol):
-    async def synthesize(self, text: str) -> SpeechAsset: ...
+    async def synthesize(
+        self,
+        text: str,
+        *,
+        timeout_seconds: float,
+        request_id: str,
+    ) -> SpeechAsset: ...
+
+    async def cleanup(self, asset: SpeechAsset) -> None: ...
 
 
 @runtime_checkable

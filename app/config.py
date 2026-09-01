@@ -552,6 +552,7 @@ def _load_speech_config(raw: dict[str, Any]) -> SpeechConfig:
         )
     config = SpeechConfig(
         enabled=bool(raw.get("enabled", False)),
+        api_mode=str(raw.get("apiMode", "audio_speech")).strip().lower(),
         base_url=str(raw.get("baseUrl", "")).rstrip("/"),
         api_key_env=str(raw.get("apiKeyEnv", "")).strip(),
         model=str(raw.get("model", "")).strip(),
@@ -565,17 +566,41 @@ def _load_speech_config(raw: dict[str, Any]) -> SpeechConfig:
         group_enabled=bool(raw.get("groupEnabled", True)),
         private_cooldown_seconds=float(raw.get("privateCooldownSeconds", 30.0)),
         group_cooldown_seconds=float(raw.get("groupCooldownSeconds", 60.0)),
+        random_reply_enabled=bool(raw.get("randomReplyEnabled", True)),
+        max_audio_bytes=int(raw.get("maxAudioBytes", 8 * 1024 * 1024)),
     )
+    if config.api_mode not in {"audio_speech", "chat_completions_audio"}:
+        raise ValueError(
+            "speech.apiMode must be audio_speech or chat_completions_audio"
+        )
     if config.timeout_seconds <= 0:
         raise ValueError("speech.timeoutSeconds must be positive")
     if config.send_timeout_seconds <= 0:
         raise ValueError("speech.sendTimeoutSeconds must be positive")
     if config.max_chars <= 0:
         raise ValueError("speech.maxChars must be positive")
+    if config.max_audio_bytes <= 0:
+        raise ValueError("speech.maxAudioBytes must be positive")
     if not config.cache_dir:
         raise ValueError("speech.cacheDir must not be empty")
-    if config.format not in {"mp3", "opus", "aac", "flac", "wav", "pcm"}:
+    if config.format not in {
+        "mp3",
+        "opus",
+        "aac",
+        "flac",
+        "wav",
+        "pcm",
+        "pcm16",
+    }:
         raise ValueError("speech.format is unsupported")
+    if config.api_mode == "chat_completions_audio" and config.format not in {
+        "wav",
+        "mp3",
+        "flac",
+        "opus",
+        "pcm16",
+    }:
+        raise ValueError("speech.format is unsupported for chat_completions_audio")
     return config
 
 

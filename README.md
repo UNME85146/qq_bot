@@ -18,7 +18,7 @@ This GitHub repository is a sanitized public export. The private development tre
 - A-share provider fallback with closed/open/half-open circuit recovery. A-share and US-share reports return 20 sector messages with 10 stocks per sector, including name, code, previous close, current price, and percentage change. When a sector does not contain five actual gainers and five actual losers, the report explicitly labels the top/bottom five as relative leaders/laggards.
 - Automatic Douyin/Bilibili download, categorized news commands, news subscriptions, and scheduled news delivery are disabled. Historical provider and maintenance modules remain available for rollback and audit work but are not routed from group messages.
 - Optional four-hour Codex Runway summaries and a daily local-rendered usage-ranking image are disabled by default and require an explicitly configured recipient and credential file.
-- OpenAI-compatible speech and image endpoints are optional. The historical local TTS service is not shipped; existing deployments can manage retirement and rollback packages with the transactional tool in `tools/`.
+- OpenAI-compatible speech and image endpoints are optional. Speech supports either binary `/audio/speech` or Chat Completions audio selected by `speech.apiMode`; Chat Audio responses are size-, format-, Base64-, and transcript-validated. Explicit voice commands can be enabled while random voice replies remain disabled, and QQ record delivery is attempted once to avoid duplicate audio after an ambiguous timeout. The historical local TTS service is not shipped.
 
 ## Requirements
 

@@ -172,6 +172,7 @@ def handle_voice_config_command(config_path: str | Path, command_text: str) -> A
 def _ensure_speech(raw: dict[str, Any]) -> dict[str, Any]:
     speech = raw.setdefault("speech", {})
     speech.setdefault("enabled", False)
+    speech.setdefault("apiMode", "audio_speech")
     speech.setdefault("baseUrl", "")
     speech.setdefault("apiKeyEnv", "")
     speech.setdefault("model", "")
@@ -185,6 +186,8 @@ def _ensure_speech(raw: dict[str, Any]) -> dict[str, Any]:
     speech.setdefault("groupEnabled", True)
     speech.setdefault("privateCooldownSeconds", 30)
     speech.setdefault("groupCooldownSeconds", 60)
+    speech.setdefault("randomReplyEnabled", True)
+    speech.setdefault("maxAudioBytes", 8 * 1024 * 1024)
     return speech
 
 
@@ -193,18 +196,25 @@ def _voice_status_text(tts: dict[str, Any]) -> str:
         str(tts.get(field, "")).strip()
         for field in ("baseUrl", "apiKeyEnv", "model", "voice")
     )
+    api_mode = str(tts.get("apiMode", "audio_speech")).strip().lower()
+    endpoint_path = (
+        "/chat/completions"
+        if api_mode == "chat_completions_audio"
+        else "/audio/speech"
+    )
     endpoint = str(tts.get("baseUrl", "")).rstrip("/")
     if endpoint:
-        endpoint += "/audio/speech"
+        endpoint += endpoint_path
     return "\n".join(
         [
             f"语音回复={'开' if bool(tts.get('enabled', False)) else '关'}",
             f"私聊语音={'开' if bool(tts.get('privateEnabled', True)) else '关'} "
             f"群聊语音={'开' if bool(tts.get('groupEnabled', True)) else '关'}",
-            f"接口={'已配置' if configured else '未配置'} /v1/audio/speech",
+            f"接口={'已配置' if configured else '未配置'} {endpoint_path}",
             f"端点={endpoint or '未配置'}",
             f"模型={tts.get('model', '') or '未配置'} 音色={tts.get('voice', '') or '未配置'}",
             f"格式={tts.get('format', '')} 最大字数={tts.get('maxChars', '')}",
+            f"随机语音={'开' if bool(tts.get('randomReplyEnabled', True)) else '关'}",
         ]
     )
 

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from app.features.contracts import SpeechAsset
-from app.features.speech_provider import SpeechProviderError
+from app.features.speech_provider import SpeechProviderError, speech_endpoint_path
 from app.features.tts_service import prepare_tts_speech_text
 from app.models import GeneratedReply, NormalizedMessage, RetryConfig, SpeechConfig
 from app.retry import RetryClassification, RetryExhaustedError, run_with_retry
@@ -17,6 +17,22 @@ class SpeechGenerationResult:
     audio_path: str
     format: str
     voice_profile_id: str
+    transcript: str | None = None
+    provider_model: str | None = None
+
+
+@dataclass(frozen=True)
+class SpeechDeliveryOutcome:
+    handled: bool
+    delivery_status: str
+    message_id: str | None = None
+
+    @property
+    def sent(self) -> bool:
+        return self.delivery_status == "sent"
+
+    def __bool__(self) -> bool:
+        return self.handled
 
 
 class SpeechService:
@@ -105,6 +121,8 @@ class SpeechService:
             audio_path=result.value.file_path,
             format=result.value.format,
             voice_profile_id=self._config.voice,
+            transcript=result.value.transcript,
+            provider_model=result.value.provider_model,
         )
 
     async def send_and_cleanup(
@@ -116,24 +134,29 @@ class SpeechService:
         asset = SpeechAsset(file_path=result.audio_path, format=result.format)
         try:
             try:
-                sent = await run_with_retry(
-                    lambda timeout: send(),
-                    stage="speech_send",
-                    base_timeout_seconds=self._config.send_timeout_seconds,
-                    policy=self._retry_policy,
-                    classify=_classify_send_error,
-                    sleep=self._retry_sleep,
+                sent = await asyncio.wait_for(
+                    send(),
+                    timeout=self._config.send_timeout_seconds,
                 )
-            except RetryExhaustedError as exc:
+            except (TimeoutError, asyncio.TimeoutError):
                 self._failures[message.trace_id] = (
                     "send",
-                    exc.category,
-                    exc.attempts,
+                    "delivery_unknown",
+                    1,
                 )
-                await self._record_failure(message, exc.category, exc.attempts)
+                await self._record_failure(message, "delivery_unknown", 1)
+                return None
+            except Exception as exc:
+                classification = _classify_send_error(exc)
+                self._failures[message.trace_id] = (
+                    "send",
+                    classification.category,
+                    1,
+                )
+                await self._record_failure(message, classification.category, 1)
                 return None
             self._failures.pop(message.trace_id, None)
-            return sent.value
+            return sent
         finally:
             cleanup = getattr(self._provider, "cleanup", None)
             if cleanup is not None:
@@ -146,27 +169,37 @@ class SpeechService:
         stage, category, attempts = failure
         if category == "unconfigured":
             return (
-                "当前配置不支持语音：请管理员配置支持 /v1/audio/speech "
-                "的语音模型和 API Key"
+                "当前配置不支持语音：请管理员配置远程语音模型、接口模式和 API Key"
             )
         label = "语音生成" if stage == "generate" else "语音发送"
         if category == "timeout":
             return f"{label}超时：连续{attempts}次未完成"
         reasons = {
             "authentication": "API 鉴权失败",
-            "capability_unsupported": "接口不支持 /v1/audio/speech",
+            "capability_unsupported": (
+                f"接口不支持 {speech_endpoint_path(self._config)}"
+            ),
             "model_or_parameter_unsupported": "模型或音色不支持语音生成",
             "rate_limited": f"接口连续{attempts}次限流",
             "provider_unavailable": f"服务连续{attempts}次不可用",
             "request_failed": "接口拒绝请求",
             "empty_audio": "接口返回空音频",
+            "invalid_audio_response": "接口返回了无效音频结构",
+            "invalid_audio_format": "接口返回的音频格式不正确",
+            "transcript_mismatch": "语音内容与待朗读文本不一致",
+            "audio_too_large": "接口返回的音频超过大小限制",
             "text_too_long": "文本超过语音接口长度限制",
             "empty_text": "没有可朗读的文本",
             "cooldown": "语音请求过于频繁",
             "file_too_large": "QQ拒绝文件，文件大小超过限制",
             "send_failed": f"QQ连续{attempts}次发送失败",
+            "delivery_unknown": "QQ投递状态未知，已停止重发以避免重复语音",
         }
         return f"{label}失败：{reasons.get(category, '未知错误')}"
+
+    def failure_category(self, trace_id: str) -> str | None:
+        failure = self._failures.get(trace_id)
+        return failure[1] if failure is not None else None
 
     async def _record_failure(
         self,

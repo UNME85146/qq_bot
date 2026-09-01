@@ -197,9 +197,14 @@ class PromptBuilder:
             return None
         if scope_type == "group" and not self._tts.group_enabled:
             return None
+        endpoint_description = (
+            "Chat Completions 音频接口逐字朗读"
+            if self._tts.api_mode == "chat_completions_audio"
+            else "/v1/audio/speech 兼容接口朗读"
+        )
         return (
             "当前会话已开启远程语音生成：你只负责生成正常聊天回复文本，"
-            "系统会把最终回复文本交给 /v1/audio/speech 兼容接口朗读。"
+            f"系统会把最终回复文本交给{endpoint_description}。"
             "用户要求语音、念一下、读出来时，直接给出要表达或要朗读的内容；"
             "不要说自己没有语音功能、不能发语音、发不出语音、让用户脑补、"
             "文字代替语音、念完了，也不要输出音频标记、SSML 或解释 TTS 机制。"

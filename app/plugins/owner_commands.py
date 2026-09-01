@@ -239,7 +239,7 @@ def _help_text(*, is_root: bool) -> str:
         [
             "",
             "语音命令：",
-            "/voice status - 查看 /v1/audio/speech 配置状态、模型、音色和端点。用法：/voice status",
+            "/voice status - 查看远程语音配置状态、模型、音色和端点。用法：/voice status",
             "/voice on - 开启全局语音回复。用法：/voice on",
             "/voice off - 关闭全局语音回复。用法：/voice off",
             "/voice private on|off - 开关私聊回复附加语音。例：/voice private on",
