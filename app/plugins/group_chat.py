@@ -1912,6 +1912,7 @@ async def _send_reply_sticker_if_requested(
     asset = await _choose_safe_sticker(
         intent_text,
         exclude_asset_id=exclude_asset_id,
+        require_semantic_match=True,
     )
     if asset is None:
         return False
@@ -1940,9 +1941,16 @@ async def _choose_safe_sticker(
     intent_text: str,
     *,
     exclude_asset_id: str | None = None,
+    require_semantic_match: bool = False,
 ):
     for _ in range(3):
-        asset = await _feature_hub.stickers.choose_for_text(intent_text)
+        if require_semantic_match:
+            asset = await _feature_hub.stickers.choose_for_text(
+                intent_text,
+                require_semantic_match=True,
+            )
+        else:
+            asset = await _feature_hub.stickers.choose_for_text(intent_text)
         if asset is None:
             return None
         if exclude_asset_id is not None and asset.asset_id == exclude_asset_id:

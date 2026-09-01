@@ -92,7 +92,9 @@ class ImageUnderstandingService:
             "JSON 只使用 reply_text、send_sticker、sticker_intent 三个字段："
             "reply_text 是找不到合适表情包或媒体发送失败时才显示的一句中文短文本；"
             "send_sticker 固定为 true；"
-            "sticker_intent 用 1-3 个简短中文情绪或回应标签描述适合回什么表情包。"
+            "sticker_intent 只从以下标签选择 1-3 个，用空格分隔："
+            "无语、开心、疑惑、震惊、支持、拒绝、可爱、难过、生气、尴尬、"
+            "嫌弃、困倦、庆祝、安慰、调侃。"
             f"\n用户附带文字：{user_text or '无'}"
         )
         messages = [

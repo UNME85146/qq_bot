@@ -123,13 +123,20 @@ class StickerService:
             await self._analysis_repository.ensure_pending(asset.asset_id)
         return StickerSaveResult(asset, "saved")
 
-    async def choose_for_text(self, text: str) -> StickerAsset | None:
+    async def choose_for_text(
+        self,
+        text: str,
+        *,
+        require_semantic_match: bool = False,
+    ) -> StickerAsset | None:
         query_tags = sorted(extract_query_tags(text))
+        if require_semantic_match and not query_tags:
+            return None
         limit = self._max_assets if self._max_assets > 0 else MAX_STICKER_ASSETS
         assets = await self._matching_assets_by_analysis(query_tags, limit=limit)
         if not assets:
             assets = await self._repository.find_matching(query_tags=query_tags, limit=limit)
-        if not assets and query_tags == ["default"]:
+        if not assets and not require_semantic_match and query_tags == ["default"]:
             assets = await self._repository.find_matching(query_tags=[], limit=limit)
         assets = [asset for asset in assets if Path(asset.file_path).exists()]
         if not assets:
@@ -190,6 +197,14 @@ def extract_query_tags(text: str) -> set[str]:
         "支持": ("支持", "+1", "加一", "赞"),
         "拒绝": ("不要", "拒绝", "别"),
         "可爱": ("可爱", "狗", "猫", "萌"),
+        "难过": ("难过", "伤心", "哭", "委屈"),
+        "生气": ("生气", "愤怒", "气死", "恼火"),
+        "尴尬": ("尴尬", "社死"),
+        "嫌弃": ("嫌弃", "鄙视", "白眼"),
+        "困倦": ("困倦", "困了", "想睡", "累了"),
+        "庆祝": ("庆祝", "恭喜", "胜利", "干杯"),
+        "安慰": ("安慰", "抱抱", "没事"),
+        "调侃": ("调侃", "搞笑", "逗"),
         "黄豆": ("黄豆", "豆"),
         "gif": ("gif", "动图"),
     }
