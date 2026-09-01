@@ -129,6 +129,8 @@ class StickerService:
         assets = await self._matching_assets_by_analysis(query_tags, limit=limit)
         if not assets:
             assets = await self._repository.find_matching(query_tags=query_tags, limit=limit)
+        if not assets and query_tags == ["default"]:
+            assets = await self._repository.find_matching(query_tags=[], limit=limit)
         assets = [asset for asset in assets if Path(asset.file_path).exists()]
         if not assets:
             return None

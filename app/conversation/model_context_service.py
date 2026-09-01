@@ -340,6 +340,12 @@ def _analysis_lines(
 
 def _reply_mode_hint(message: NormalizedMessage) -> str:
     compact = "".join(message.text.split())
+    if looks_like_technical_explanation_request(compact):
+        return (
+            "- Reply mode hint: this is a technical explanation or #chat research request. "
+            "Answer accurately and completely in one QQ message with "
+            "reply_mode=single_message_long; do not apply the ordinary short group style."
+        )
     if looks_like_long_text_request(compact):
         return (
             "- Reply mode hint: this is an explicit long-form request. "
@@ -352,7 +358,73 @@ def _reply_mode_hint(message: NormalizedMessage) -> str:
 
 
 def looks_like_long_text_request(text: str) -> bool:
-    return _looks_like_long_text_request(text)
+    return looks_like_technical_explanation_request(text) or _looks_like_long_text_request(text)
+
+
+def looks_like_technical_explanation_request(text: str) -> bool:
+    normalized = "".join(str(text or "").split()).lower()
+    if not normalized:
+        return False
+    if normalized.startswith("#chat") and any(
+        marker in normalized for marker in ("查", "搜", "找", "评价", "分析")
+    ):
+        return True
+    explanation_markers = (
+        "是什么",
+        "什么框架",
+        "为什么",
+        "怎么实现",
+        "如何实现",
+        "原理",
+        "区别",
+        "仔细讲",
+        "详细讲",
+        "展开讲",
+        "解释一下",
+        "教程",
+        "用法",
+        "报错",
+        "调试",
+        "排查",
+    )
+    if not any(marker in normalized for marker in explanation_markers):
+        return False
+    technical_markers = (
+        "代码",
+        "编程",
+        "开发",
+        "框架",
+        "源码",
+        "算法",
+        "接口",
+        "api",
+        "sdk",
+        "数据库",
+        "sql",
+        "协议",
+        "http",
+        "websocket",
+        "部署",
+        "容器",
+        "docker",
+        "模型",
+        "prompt",
+        "python",
+        "java",
+        "javascript",
+        "typescript",
+        "c++",
+        "c#",
+        "delphi",
+        "vcl",
+        "windows",
+        "linux",
+        "前端",
+        "后端",
+        "服务端",
+        "客户端",
+    )
+    return any(marker in normalized for marker in technical_markers)
 
 
 def _looks_like_long_text_request(text: str) -> bool:

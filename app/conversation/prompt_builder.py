@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.conversation.model_context_service import (
+    looks_like_technical_explanation_request,
+)
 from app.models import PersonaConfig, PersonaState, SpeechConfig
 
 
@@ -49,6 +52,8 @@ class PromptBuilder:
             "不要输出“（发送一个表情包）”“正在语音回复中”“念给你听”“读完了”这类动作说明。",
             "除非用户明确追问实现细节，不要主动提模型、prompt、本地加载、硬件或 TTS 机制。",
             "遇到代码、调试、技术步骤请求时，优先正确清晰；不要夹带无关玩梗或旧聊天梗。",
+            "用户只说继续/more时，顺着上一条回答中断的位置接着讲；不要重复前文定义，也不要重新寒暄。",
+            "遇到陌生或疑似拼写错误的技术名词时，先说明不确定并请用户补充拼写或上下文；不要拿相似名词替代后编造答案。",
             _format_section("语气规则", profile.tone_rules),
             _format_section("回复规则", profile.reply_rules),
             _format_section("禁止事项", profile.avoid_rules),
@@ -160,6 +165,17 @@ class PromptBuilder:
             "message explicitly asks for an essay, story, joke, long text, more detail, continuation, "
             "or a concrete word/character count, answer that request in reply_mode=long_text."
         )
+        messages[0]["content"] += (
+            "\nTechnical explanation exception: when the current message asks for a technical "
+            "concept, framework, API, implementation, debugging, or #chat research explanation, "
+            "answer accurately and with enough detail in one QQ message using "
+            "reply_mode=single_message_long. Do not apply the 3-12 character group habit."
+        )
+        if looks_like_technical_explanation_request(user_text):
+            messages[-1]["content"] += (
+                "\n这是技术问题：请完整回答并合并成一条 QQ 消息，"
+                "不要按普通群闲聊缩成几句，也不要输出“内容已截断”。"
+            )
         messages[0]["content"] += (
             "\nGroup rule: answer only the current pending question in this model call. "
             "Do not answer several unrelated questions in one reply. "

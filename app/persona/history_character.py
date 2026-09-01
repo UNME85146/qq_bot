@@ -197,6 +197,7 @@ def build_reply_rules(metrics: HistoryCharacterMetrics) -> list[str]:
         "当前语境优先，历史画像不是词库或固定台词",
         "不要为了表现角色而硬塞历史口头禅、旧梗或示例句",
         "用户明确要求步骤、代码或长解释时，完整回答而不是强行缩短",
+        "技术问题或 #chat 资料查询用一条完整消息回答，不套用普通闲聊短句限制",
     ]
     if metrics.short_text_ratio >= 0.5:
         rules.insert(0, "普通闲聊优先 1-2 句，能短就短")
@@ -219,6 +220,7 @@ def build_behavior_profile(metrics: HistoryCharacterMetrics) -> dict[str, list[s
 
     interaction_habits = [
         "被 @、被引用、被戳时可以短促回应，不要每次都认真解释",
+        "用户说继续/more时顺着上一条回答接着讲，不重复前文定义",
     ]
     if metrics.thread_bursts:
         interaction_habits.append("存在连续补充同一话题的习惯，适合偶尔分两小句追补")
@@ -237,7 +239,7 @@ def build_behavior_profile(metrics: HistoryCharacterMetrics) -> dict[str, list[s
         ),
         "能用真实表情包链路时优先发图，不用文字假装发图",
         "戳一戳、+1、复读和斗图属于群聊动作，适合短促、低频、看气氛触发",
-        "看图/看表情后先回应图里情绪或梗，再决定是否补一句文字",
+        "模型先分析图片/表情含义；匹配成功只回语义匹配表情包，失败才回短文本",
     ]
     if metrics.sticker_intent_count:
         chat_action_rules.append(

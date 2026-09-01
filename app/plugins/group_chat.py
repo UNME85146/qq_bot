@@ -243,6 +243,7 @@ class GroupReplyTask:
     not_before: float = 0.0
     mute_generation: int = 0
     include_pending_backfill: bool = False
+    exclude_sticker_asset_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -635,6 +636,7 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
             reason=normalized.trigger_reason or "group_mention",
             queued_at=time.monotonic(),
             include_pending_backfill=_is_backfill_request(normalized.text),
+            exclude_sticker_asset_id=sticker_asset_id,
         )
     )
     await _conversation_service.record_reply_audit(
@@ -1105,6 +1107,32 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             )
             await _pending_question_service.mark_answered(target)
             continue
+
+        if reply.reply_mode == "sticker_only" and reply.send_sticker:
+            sticker_sent = await _send_reply_sticker_if_requested(
+                task.bot,
+                target_message,
+                reply.sticker_intent or reply.text,
+                exclude_asset_id=task.exclude_sticker_asset_id,
+            )
+            if sticker_sent:
+                await _conversation_service.record_reply_audit(
+                    target_message,
+                    action="reply",
+                    reason="group_image_sticker_sent",
+                    model_called=_reply_used_model(reply),
+                    safety_blocked=False,
+                    response_text="[sticker]",
+                    delivery_status="sent",
+                    sent_message_ids=(),
+                )
+                if message.group_id is not None:
+                    _group_last_sent_at[message.group_id] = time.monotonic()
+                    _feature_hub.focus_group(message.group_id)
+                await _pending_question_service.mark_answered(target)
+                if target is not targets[-1] and message.group_id is not None:
+                    await _wait_group_interval(message.group_id)
+                continue
 
         if message.group_id is not None:
             _active_windows[(message.group_id, target.user_id)] = (
@@ -1876,10 +1904,15 @@ async def _send_reply_sticker_if_requested(
     bot: Bot,
     message: NormalizedMessage,
     intent_text: str,
+    *,
+    exclude_asset_id: str | None = None,
 ) -> bool:
     if message.group_id is None:
         return False
-    asset = await _choose_safe_sticker(intent_text)
+    asset = await _choose_safe_sticker(
+        intent_text,
+        exclude_asset_id=exclude_asset_id,
+    )
     if asset is None:
         return False
     try:

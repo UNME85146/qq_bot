@@ -147,7 +147,7 @@ def parse_model_reply(text: str, *, apply_quality: bool = False) -> ReplyParseRe
         cleaned = _empty_reply_fallback(original)
     if reply_mode == "short":
         reply_mode = detect_reply_mode(cleaned)
-    if reply_mode == "long_text":
+    if reply_mode in {"long_text", "single_message_long"}:
         cleaned = _clean_reply_text_for_mode(cleaned, reply_mode=reply_mode)
     return ReplyParseResult(
         text=cleaned,
@@ -327,7 +327,7 @@ def _is_single_repeated_fragment(text: str) -> bool:
 
 
 def _clean_reply_text_for_mode(text: str, *, reply_mode: str) -> str:
-    if reply_mode != "long_text":
+    if reply_mode not in {"long_text", "single_message_long"}:
         return clean_reply_text(text, apply_quality=False)
     cleaned = str(text or "").strip()
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
@@ -352,6 +352,8 @@ def split_reply_messages(text: str, *, reply_mode: str = "short") -> list[str]:
     )
     if _is_empty_or_meaningless_reply(text):
         return []
+    if reply_mode == "single_message_long":
+        return [text]
     if reply_mode in {"long_text", "code_block"}:
         return _split_long_or_code_text(text)
     messages: list[str] = []
@@ -425,6 +427,8 @@ def _normalize_reply_mode(value: str) -> str:
         return "long_text"
     if value in {"code", "code_block"}:
         return "code_block"
+    if value in {"single_message", "single_message_long", "technical"}:
+        return "single_message_long"
     return "short"
 
 

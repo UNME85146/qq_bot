@@ -87,8 +87,12 @@ class ImageUnderstandingService:
                 )
 
         prompt_text = (
-            "请看这张 QQ 聊天图片，只用中文短句回复。"
-            "不要输出图片安全分类。"
+            "请分析这张 QQ 聊天图片或表情包的大概含义、主要情绪和聊天意图。"
+            "只输出 JSON，不要 Markdown，不要输出图片安全分类。"
+            "JSON 只使用 reply_text、send_sticker、sticker_intent 三个字段："
+            "reply_text 是找不到合适表情包或媒体发送失败时才显示的一句中文短文本；"
+            "send_sticker 固定为 true；"
+            "sticker_intent 用 1-3 个简短中文情绪或回应标签描述适合回什么表情包。"
             f"\n用户附带文字：{user_text or '无'}"
         )
         messages = [

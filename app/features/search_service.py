@@ -58,7 +58,7 @@ class GroupSearchCommandService:
             return None
         text = " ".join(message.text.strip().split())
         search_match = re.fullmatch(
-            r"#chat\s+查一下(?:\s+(.+?))?(?:\s+--page\s+(-?\d+))?",
+            r"#chat\s+(?:帮我\s*)?查一下(?:\s+(.+?))?(?:\s+--page\s+(-?\d+))?",
             text,
             re.IGNORECASE,
         )

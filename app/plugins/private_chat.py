@@ -421,6 +421,35 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
         _remember_private_direct_action(normalized.user_id, "voice")
     else:
         _clear_private_direct_action(normalized.user_id)
+    if (
+        normalized.media_items
+        and reply.reply_mode == "sticker_only"
+        and reply.send_sticker
+        and _can_pair_sticker_with_media_reply(reply)
+    ):
+        sticker_sent = await _send_reply_sticker_if_requested(
+            bot,
+            normalized,
+            normalized.user_id,
+            reply.sticker_intent or reply.text,
+            exclude_asset_id=saved_sticker_asset_id,
+        )
+        if sticker_sent:
+            _remember_private_non_random_outgoing(
+                normalized.user_id,
+                normalized.message_id,
+            )
+            await _conversation_service.record_reply_audit(
+                normalized,
+                action="reply",
+                reason="private_image_sticker_sent",
+                model_called=True,
+                safety_blocked=False,
+                response_text="[sticker]",
+                delivery_status="sent",
+                sent_message_ids=(),
+            )
+            return
     await send_reply_bubbles(
         bot,
         event,
@@ -436,16 +465,6 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
         ),
     )
     _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
-    if normalized.media_items and _can_pair_sticker_with_media_reply(reply):
-        sticker_sent = await _send_reply_sticker_if_requested(
-            bot,
-            normalized,
-            normalized.user_id,
-            reply.text,
-            exclude_asset_id=saved_sticker_asset_id,
-        )
-        if sticker_sent:
-            _remember_private_non_random_outgoing(normalized.user_id)
 
 
 async def _try_handle_private_market_feature(

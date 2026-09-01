@@ -15,7 +15,10 @@ from app.conversation.reply_formatter import (
     clean_reply_text,
     parse_model_reply,
 )
-from app.conversation.model_context_service import looks_like_long_text_request
+from app.conversation.model_context_service import (
+    looks_like_long_text_request,
+    looks_like_technical_explanation_request,
+)
 from app.memory.group_context_service import NullGroupContextService
 from app.memory.memory_service import NullMemoryService
 from app.model.llm_client import LlmClient
@@ -638,6 +641,7 @@ class ConversationService:
             reply,
             message,
             unlimited=unlimited,
+            prefer_sticker=analysis.failure_reason is None,
         )
         await self._save_assistant_message(message, reply)
         await self._persona_state_service.record_successful_reply(
@@ -829,10 +833,23 @@ class ConversationService:
         message: NormalizedMessage,
         *,
         unlimited: bool,
+        prefer_sticker: bool = False,
     ) -> tuple[GeneratedReply, object]:
         parsed = parse_model_reply(reply.text)
         reply_mode = parsed.reply_mode
-        if reply_mode == "short" and looks_like_long_text_request(message.text):
+        if prefer_sticker:
+            reply_mode = "sticker_only"
+            parsed = replace(
+                parsed,
+                send_sticker=True,
+                sticker_intent=parsed.sticker_intent or parsed.text,
+            )
+        if (
+            reply_mode != "code_block"
+            and looks_like_technical_explanation_request(message.text)
+        ):
+            reply_mode = "single_message_long"
+        elif reply_mode == "short" and looks_like_long_text_request(message.text):
             reply_mode = "long_text"
         if message.scope_type == "group" and reply_mode == "short":
             parsed = replace(parsed, text=clean_reply_text(parsed.text))
@@ -855,7 +872,11 @@ class ConversationService:
                 scope_type=message.scope_type,
             )
         reply_text = output_safety.replacement_text if output_safety.replacement_text else parsed.text
-        if unlimited or reply_mode in {"long_text", "code_block"}:
+        if unlimited or reply_mode in {
+            "long_text",
+            "single_message_long",
+            "code_block",
+        }:
             formatted_text = self._reply_formatter.format_unlimited(
                 reply_text,
                 reply_mode=reply_mode,
@@ -873,7 +894,8 @@ class ConversationService:
             prompt_tokens=reply.prompt_tokens,
             completion_tokens=reply.completion_tokens,
             reply_mode=reply_mode,
-            send_sticker=parsed.send_sticker and _is_explicit_sticker_context(message.text),
+            send_sticker=parsed.send_sticker
+            and (prefer_sticker or _is_explicit_sticker_context(message.text)),
             sticker_intent=parsed.sticker_intent,
         )
         return (

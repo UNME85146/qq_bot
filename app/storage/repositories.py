@@ -1856,7 +1856,7 @@ class StickerAssetRepository:
             for asset in assets
             if any(tag in asset.tags.lower() for tag in lowered)
         ]
-        return matched or assets
+        return matched
 
     async def mark_used(self, asset_id: str) -> None:
         async with connect_database(self._database_path) as db:

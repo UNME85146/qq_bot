@@ -10,6 +10,8 @@ This GitHub repository is a sanitized public export. The private development tre
 - Root and owner permissions, private/group allowlists, group mute controls, per-group FIFO chat queues, reminders, memory, image understanding, stickers, and audited administration commands.
 - Group reply paths do not run project-level safety classifiers. Text, group images, image generation, explicit voice, search/evaluation, repeats, stickers, and pending enqueue go directly through their feature routes; private-chat safety and low-sensitivity long-term storage controls remain enabled.
 - Normal short group model calls use at most 320 completion tokens, forward the configured reasoning effort, and stop at an 18-second default hard deadline. Dormant-session relation checks use 32 tokens and a 1.2-second deadline. Image understanding uses a separate breaker and 30-second deadline, so image failures cannot open the chat breaker.
+- Technical explanation requests use a separate `single_message_long` mode: they bypass the normal 320-token group cap and send the complete formatted answer as one QQ message without the ordinary bubble/truncation limit. Non-technical chat remains short.
+- Successful image understanding returns a short fallback plus a semantic sticker intent. Group and private routes send one matching safe local sticker without a text caption; only a missing match or media-send failure uses the short text. Plain incoming sticker media is analyzed first unless the user explicitly requests a sticker battle.
 - Current group display names and explicit "do not use this phrase/name" preferences are persisted separately from historical style. Question-like pending rows expire after 30 days by default without being deleted or marked answered.
 - Dedicated structured reply mode for help, market, and search results. Full information messages are attempted first and are summarized once only when OneBot explicitly rejects their length.
 - Information-feature audits store the actual successfully sent bubble text, delivery status, and available OneBot message IDs in schema v4.
@@ -80,12 +82,13 @@ Group information entry points:
 /help
 #A股          #美股
 #chat 查一下 <query> [--page N]
+#chat 帮我查一下 <query> [--page N]
 #画图 <prompt>  #改图 <instruction>
 ```
 
 Market reports send one message per sector. Search keeps each title, source, summary, and URL together and retains paging for larger result sets. If OneBot explicitly rejects a complete information message as too long, the bot performs one compact-summary retry instead of proactively truncating it.
 
-Group image understanding skips project-level safety classification and calls the configured multimodal model directly. Triggered OneBot images first resolve a fresh `get_image` URL, accept only trusted QQ CDN HTTPS downloads up to 8 MiB, and inline JPEG/PNG; GIF/WebP are converted to a bounded PNG first frame with ffmpeg. Private images retain classification and short refusal behavior. Private classification results are cached for five minutes, concurrent requests for the same prepared image share one SHA-256 cache key, and image model calls use the configured low reasoning budget and independent vision deadline.
+Group image understanding skips project-level safety classification and calls the configured multimodal model directly. Triggered OneBot images first resolve a fresh `get_image` URL, accept only trusted QQ CDN HTTPS downloads up to 8 MiB, and inline JPEG/PNG; GIF/WebP are converted to a bounded PNG first frame with ffmpeg. A successful visual call produces a controlled semantic sticker intent and sends one matching safe local sticker without a text caption; the just-received asset is excluded. Missing matches and media-send failures use the generated short fallback. Private images retain classification and short refusal behavior. Private classification results are cached for five minutes, concurrent requests for the same prepared image share one SHA-256 cache key, and image model calls use the configured reasoning budget and independent vision deadline.
 
 Owner/root private commands include:
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.features.sticker_service import is_sticker_media, is_sticker_request
+from app.features.sticker_service import is_sticker_request
 from app.features.tts_service import (
     extract_explicit_voice_read_text,
     is_explicit_voice_reply_request,
@@ -34,10 +34,7 @@ def parse_direct_reply_intent(
         sticker_request=allow_sticker
         and is_sticker_request(message.text, allow_short=allow_short_sticker),
         sticker_battle_request=allow_sticker
-        and (
-            _is_sticker_battle_request(message.text)
-            or _has_direct_sticker_battle_media(message)
-        ),
+        and _is_sticker_battle_request(message.text),
         voice_read_text=voice_read_text,
         voice_reply_requested=voice_read_text is None
         and is_explicit_voice_reply_request(
@@ -45,13 +42,6 @@ def parse_direct_reply_intent(
             allow_group_without_at=allow_group_without_at,
         ),
     )
-
-
-def _has_direct_sticker_battle_media(message: NormalizedMessage) -> bool:
-    if not message.media_items:
-        return False
-    return any(item.type == "face" or is_sticker_media(item) for item in message.media_items)
-
 
 def _is_sticker_battle_request(text: str) -> bool:
     compact = "".join(str(text or "").split()).lower()

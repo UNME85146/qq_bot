@@ -29,6 +29,10 @@ def build_reply_bubbles(
 ) -> list[str]:
     if scope_type == "private":
         return _non_empty_bubbles(split_reply_messages(text, reply_mode=reply_mode))
+    if reply_mode == "single_message_long":
+        return _non_empty_bubbles(
+            split_reply_messages(text, reply_mode=reply_mode)
+        )
 
     is_long_mode = reply_mode in {"long_text", "code_block"}
     limit = 3 if not is_long_mode else (long_text_max_bubbles or 8)
