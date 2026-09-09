@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 from app.features.contracts import StructuredReply
@@ -67,10 +68,16 @@ def build_structured_reply(
 
 
 def is_message_too_long_error(exc: Exception) -> bool:
-    text = str(exc).casefold()
+    values = [str(exc)]
+    values.extend(_nested_error_strings(getattr(exc, "info", None)))
+    text = "\n".join(values).casefold()
     markers = (
         "消息过长",
+        "消息太长",
         "消息长度",
+        "内容过长",
+        "长度超限",
+        "字数超限",
         "字数限制",
         "message too long",
         "message length",
@@ -78,6 +85,24 @@ def is_message_too_long_error(exc: Exception) -> bool:
         "content too long",
     )
     return any(marker in text for marker in markers)
+
+
+def _nested_error_strings(value: Any, *, depth: int = 0) -> list[str]:
+    if depth > 3 or value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        result: list[str] = []
+        for item in value.values():
+            result.extend(_nested_error_strings(item, depth=depth + 1))
+        return result
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            result.extend(_nested_error_strings(item, depth=depth + 1))
+        return result
+    return []
 
 
 def build_compact_brief(

@@ -118,11 +118,11 @@
   "codexRunway": {
     "enabled": false,
     "recipientUserId": "",
-    "intervalSeconds": 14400,
+    "sendTimes": ["00:30", "08:00", "18:00"],
+    "timezone": "Asia/Shanghai",
+    "lookbackSeconds": 36000,
     "requestTimeoutSeconds": 20,
     "maxItems": 5,
-    "excerptChars": 160,
-    "maxMessageChars": 1800,
     "statusUrl": "https://www.codexrunway.com/api/status.json"
   },
   "usageRankingReport": {

@@ -123,15 +123,35 @@ async def send_structured_information(
     messages: tuple[str, ...] | list[str],
     *,
     fallback_messages: tuple[str, ...] | list[str] = (),
+    overflow_message_groups: tuple[tuple[str, ...], ...]
+    | list[tuple[str, ...]] = (),
     scope_type: str,
     reply_config: ReplyConfig,
     on_send_error,
     on_sent=None,
 ) -> None:
-    bubbles = build_structured_information_messages(messages)
+    source_messages = list(messages)
     fallbacks = list(fallback_messages)
-    for index, bubble in enumerate(bubbles):
-        if index > 0:
+    overflow_groups = list(overflow_message_groups)
+    entries = []
+    for source_index, message in enumerate(source_messages):
+        bubble = str(message or "").strip()
+        if not bubble:
+            continue
+        fallback = (
+            fallbacks[source_index].strip()
+            if source_index < len(fallbacks)
+            else ""
+        )
+        overflow = (
+            _non_empty_bubbles(list(overflow_groups[source_index]))
+            if source_index < len(overflow_groups)
+            else []
+        )
+        entries.append((bubble, fallback, overflow))
+    sent_count = 0
+    for bubble, fallback, overflow in entries:
+        if sent_count > 0:
             await asyncio.sleep(_message_delay_seconds(reply_config, scope_type=scope_type))
         try:
             result = await bot.send(
@@ -139,15 +159,45 @@ async def send_structured_information(
                 _build_outgoing_message(
                     bubble,
                     scope_type=scope_type,
-                    index=index,
+                    index=sent_count,
                     group_reply_to_message_id=None,
                     group_at_user_id=None,
                 ),
             )
             if on_sent is not None:
-                await on_sent(index, bubble, _extract_sent_message_id(result))
+                await on_sent(sent_count, bubble, _extract_sent_message_id(result))
+            sent_count += 1
         except Exception as exc:
-            fallback = fallbacks[index].strip() if index < len(fallbacks) else ""
+            if overflow and is_message_too_long_error(exc):
+                for overflow_bubble in overflow:
+                    if sent_count > 0:
+                        await asyncio.sleep(
+                            _message_delay_seconds(
+                                reply_config,
+                                scope_type=scope_type,
+                            )
+                        )
+                    try:
+                        result = await bot.send(
+                            event,
+                            _build_outgoing_message(
+                                overflow_bubble,
+                                scope_type=scope_type,
+                                index=sent_count,
+                                group_reply_to_message_id=None,
+                                group_at_user_id=None,
+                            ),
+                        )
+                        if on_sent is not None:
+                            await on_sent(
+                                sent_count,
+                                overflow_bubble,
+                                _extract_sent_message_id(result),
+                            )
+                        sent_count += 1
+                    except Exception as overflow_exc:
+                        await on_send_error(overflow_exc, sent_count, overflow_bubble)
+                continue
             if fallback and is_message_too_long_error(exc):
                 try:
                     result = await bot.send(
@@ -155,18 +205,23 @@ async def send_structured_information(
                         _build_outgoing_message(
                             fallback,
                             scope_type=scope_type,
-                            index=index,
+                            index=sent_count,
                             group_reply_to_message_id=None,
                             group_at_user_id=None,
                         ),
                     )
                     if on_sent is not None:
-                        await on_sent(index, fallback, _extract_sent_message_id(result))
+                        await on_sent(
+                            sent_count,
+                            fallback,
+                            _extract_sent_message_id(result),
+                        )
+                    sent_count += 1
                     continue
                 except Exception as fallback_exc:
-                    await on_send_error(fallback_exc, index, fallback)
+                    await on_send_error(fallback_exc, sent_count, fallback)
                     continue
-            await on_send_error(exc, index, bubble)
+            await on_send_error(exc, sent_count, bubble)
 
 
 def build_structured_information_messages(

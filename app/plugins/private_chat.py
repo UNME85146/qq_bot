@@ -76,6 +76,7 @@ _market_command_service = MarketCommandService(
     providers=_market_providers,
     default_alert_threshold_percent=_config.markets.alert_threshold_percent,
     command_timeout_seconds=_config.markets.command_timeout_seconds,
+    provider_timeout_seconds=_config.markets.provider_timeout_seconds,
 )
 _image_service = ImageGenerationService(
     _config.image_generation,
@@ -487,12 +488,26 @@ async def _try_handle_private_market_feature(
     result = await _market_command_service.handle(message)
     if result is None:
         return False
-    send_error = lambda exc, index, bubble: _record_send_error(
-        message.trace_id,
-        exc,
-        index,
-        "send_private_feature_reply_failed",
-    )
+    sent_bubbles: list[str] = []
+    sent_message_ids: list[str] = []
+    send_failed = False
+
+    async def send_error(exc, index, bubble):
+        nonlocal send_failed
+        send_failed = True
+        await _record_send_error(
+            message.trace_id,
+            exc,
+            index,
+            "send_private_feature_reply_failed",
+        )
+
+    async def on_sent(index, bubble, sent_message_id):
+        del index
+        sent_bubbles.append(str(bubble))
+        if sent_message_id:
+            sent_message_ids.append(str(sent_message_id))
+
     structured = getattr(result, "structured", None)
     if structured is not None:
         await send_structured_information(
@@ -500,9 +515,15 @@ async def _try_handle_private_market_feature(
             event,
             structured.messages,
             fallback_messages=structured.fallback_messages,
+            overflow_message_groups=getattr(
+                structured,
+                "overflow_message_groups",
+                (),
+            ),
             scope_type="private",
             reply_config=_config.reply,
             on_send_error=send_error,
+            on_sent=on_sent,
         )
     else:
         await send_reply_bubbles(
@@ -512,13 +533,24 @@ async def _try_handle_private_market_feature(
             scope_type="private",
             reply_config=_config.reply,
             on_send_error=send_error,
+            on_sent=on_sent,
         )
+    delivery_status = (
+        "sent"
+        if sent_bubbles and not send_failed
+        else "partial"
+        if sent_bubbles
+        else "failed"
+    )
     await _conversation_service.record_reply_audit(
         message,
         action="reply",
         reason=result.reason,
         model_called=False,
         safety_blocked=False,
+        response_text="\n".join(sent_bubbles) if sent_bubbles else None,
+        delivery_status=delivery_status,
+        sent_message_ids=tuple(sent_message_ids),
     )
     return True
 

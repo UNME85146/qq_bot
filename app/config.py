@@ -371,10 +371,16 @@ def _load_news_config(raw: dict[str, Any]) -> NewsConfig:
 
 
 def _load_codex_runway_config(raw: dict[str, Any]) -> CodexRunwayConfig:
+    raw_send_times = raw.get("sendTimes", ["00:30", "08:00", "18:00"])
+    if not isinstance(raw_send_times, list):
+        raise ValueError("codexRunway.sendTimes must be an array")
     config = CodexRunwayConfig(
         enabled=bool(raw.get("enabled", False)),
         recipient_user_id=str(raw.get("recipientUserId", "")).strip(),
         interval_seconds=int(raw.get("intervalSeconds", 14_400)),
+        send_times=tuple(str(value).strip() for value in raw_send_times),
+        timezone=str(raw.get("timezone", "Asia/Shanghai")).strip(),
+        lookback_seconds=int(raw.get("lookbackSeconds", 36_000)),
         request_timeout_seconds=float(raw.get("requestTimeoutSeconds", 20.0)),
         max_items=int(raw.get("maxItems", 5)),
         excerpt_chars=int(raw.get("excerptChars", 160)),
@@ -394,10 +400,18 @@ def _load_codex_runway_config(raw: dict[str, Any]) -> CodexRunwayConfig:
         raise ValueError("codexRunway.recipientUserId must be a numeric QQ id")
     if config.interval_seconds <= 0:
         raise ValueError("codexRunway.intervalSeconds must be positive")
+    if config.send_times != ("00:30", "08:00", "18:00"):
+        raise ValueError(
+            "codexRunway.sendTimes must be exactly 00:30, 08:00, 18:00"
+        )
+    if config.timezone != "Asia/Shanghai":
+        raise ValueError("codexRunway.timezone must be Asia/Shanghai")
+    if config.lookback_seconds <= 0:
+        raise ValueError("codexRunway.lookbackSeconds must be positive")
     if config.request_timeout_seconds <= 0:
         raise ValueError("codexRunway.requestTimeoutSeconds must be positive")
-    if not 1 <= config.max_items <= 10:
-        raise ValueError("codexRunway.maxItems must be between 1 and 10")
+    if not 0 <= config.max_items <= 50:
+        raise ValueError("codexRunway.maxItems must be between 0 and 50")
     if not 60 <= config.excerpt_chars <= 500:
         raise ValueError("codexRunway.excerptChars must be between 60 and 500")
     if not 500 <= config.max_message_chars <= 4000:

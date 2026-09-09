@@ -400,9 +400,14 @@ class NewsConfig:
 class CodexRunwayConfig:
     enabled: bool = False
     recipient_user_id: str = ""
+    # Kept for private-config migration; scheduling uses send_times.
     interval_seconds: int = 14_400
+    send_times: tuple[str, ...] = ("00:30", "08:00", "18:00")
+    timezone: str = "Asia/Shanghai"
+    lookback_seconds: int = 36_000
     request_timeout_seconds: float = 20.0
     max_items: int = 5
+    # Legacy display limits retained for config compatibility and ignored by the monitor.
     excerpt_chars: int = 160
     max_message_chars: int = 1800
     status_url: str = "https://www.codexrunway.com/api/status.json"

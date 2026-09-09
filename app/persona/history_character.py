@@ -224,7 +224,16 @@ def build_behavior_profile(metrics: HistoryCharacterMetrics) -> dict[str, list[s
     ]
     if metrics.thread_bursts:
         interaction_habits.append("存在连续补充同一话题的习惯，适合偶尔分两小句追补")
-    if metrics.continuation_replies:
+    continuation_ratio = metrics.continuation_replies / max(1, metrics.valid_text_count)
+    if (
+        metrics.valid_text_count >= 20
+        and metrics.continuation_replies >= 10
+        and continuation_ratio >= 0.5
+    ):
+        interaction_habits.append(
+            "连续追问和补充较多，优先承接最新一句，不重复开场或前文定义"
+        )
+    elif metrics.continuation_replies:
         interaction_habits.append("习惯紧跟别人消息接话，优先像群友插话而不是正式答题")
     if metrics.repeated_short_expression_count:
         interaction_habits.append(

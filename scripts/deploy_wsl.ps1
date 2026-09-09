@@ -7,7 +7,7 @@ param(
     [string]$Root = "/opt/qq_bot",
     [string]$Service = "qq-bot.service",
     [string]$NapCatContainer = "napcat",
-    [string]$VideoCacheHost = "/opt/napcat/cache/qq-bot-media",
+    [string]$VideoCacheHost = "/home/maintain/napcat/cache/qq-bot-media",
     [string]$VideoCacheContainer = "/app/napcat/cache/qq-bot-media",
     [string]$PersonaProfile = "config/persona_profile.local.json"
 )

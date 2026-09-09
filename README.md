@@ -15,9 +15,9 @@ This GitHub repository is a sanitized public export. The private development tre
 - Current group display names and explicit "do not use this phrase/name" preferences are persisted separately from historical style. Question-like pending rows expire after 30 days by default without being deleted or marked answered.
 - Dedicated structured reply mode for help, market, and search results. Full information messages are attempted first and are summarized once only when OneBot explicitly rejects their length.
 - Information-feature audits store the actual successfully sent bubble text, delivery status, and available OneBot message IDs in schema v4.
-- A-share provider fallback with closed/open/half-open circuit recovery. A-share and US-share reports return 20 sector messages with 10 stocks per sector, including name, code, previous close, current price, and percentage change. When a sector does not contain five actual gainers and five actual losers, the report explicitly labels the top/bottom five as relative leaders/laggards.
+- A-share provider fallback with closed/open/half-open circuit recovery. Individual A-shares can be queried by code, Chinese short name, company name, or a full-width/half-width parenthesized alias. A-share and US-share reports return 20 sector messages with 10 stocks per sector, including name, code, previous close, current price, and percentage change. When a sector does not contain five actual gainers and five actual losers, the report explicitly labels the top/bottom five as relative leaders/laggards.
 - Automatic Douyin/Bilibili download, categorized news commands, news subscriptions, and scheduled news delivery are disabled. Historical provider and maintenance modules remain available for rollback and audit work but are not routed from group messages.
-- Optional four-hour Codex Runway summaries and a daily local-rendered usage-ranking image are disabled by default and require an explicitly configured recipient and credential file.
+- Optional Codex Runway monitoring waits for fixed `Asia/Shanghai` slots at `00:30`, `08:00`, and `18:00`. Trusted X/Twitter text is translated completely into Chinese without application-level truncation; transport splitting occurs only after an explicit OneBot length rejection. The monitor and the daily local-rendered usage-ranking image are disabled by default.
 - OpenAI-compatible speech and image endpoints are optional. Speech supports either binary `/audio/speech` or Chat Completions audio selected by `speech.apiMode`; Chat Audio responses are size-, format-, Base64-, and transcript-validated. Explicit voice commands can be enabled while random voice replies remain disabled, and QQ record delivery is attempted once to avoid duplicate audio after an ambiguous timeout. The historical local TTS service is not shipped.
 
 ## Requirements
@@ -81,6 +81,7 @@ Group information entry points:
 ```text
 /help
 #A股          #美股
+#比亚迪       #牧原股份（牧原）
 #chat 查一下 <query> [--page N]
 #chat 帮我查一下 <query> [--page N]
 #画图 <prompt>  #改图 <instruction>

@@ -23,7 +23,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Check QQ Chat Exporter status and local readable history coverage.",
     )
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="your-server-ip")
     parser.add_argument("--port", type=int, default=40653)
     parser.add_argument("--timeout", type=float, default=3.0)
     parser.add_argument(

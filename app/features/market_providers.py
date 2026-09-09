@@ -6,10 +6,12 @@ import math
 import re
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote as url_quote
 
 import httpx
 
@@ -27,6 +29,19 @@ from app.models import MarketProviderConfig, MarketsConfig
 _BEIJING_TIME_ZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 _YFINANCE_BATCH_CHUNK_SIZE = 25
 _YFINANCE_BATCH_CONCURRENCY = 4
+_SINA_SUGGEST_MAX_BYTES = 256 * 1024
+_SINA_SUGGEST_URL_PREFIX = (
+    "https://suggest3.sinajs.cn/suggest/type=11,12,13,14,15&key="
+)
+_AKSHARE_NAME_COLUMNS = (
+    "名称",
+    "股票简称",
+    "证券简称",
+    "简称",
+    "公司名称",
+    "公司简称",
+    "公司",
+)
 
 
 class MarketProviderUnavailableError(RuntimeError):
@@ -125,6 +140,17 @@ class AkShareMarketProvider:
     async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
         return await _quotes_in_isolated_process("akshare", market, symbols)
 
+    async def quote_by_name(
+        self,
+        market: str,
+        candidates: Sequence[str],
+    ) -> MarketQuote:
+        return await _quote_name_in_isolated_process(
+            "akshare",
+            market,
+            tuple(str(candidate) for candidate in candidates),
+        )
+
     @staticmethod
     def _quote_sync(market: str, symbol: str) -> MarketQuote:
         import akshare as ak
@@ -138,6 +164,19 @@ class AkShareMarketProvider:
 
         frame = ak.stock_zh_a_spot_em()
         return _akshare_quotes_from_frame(market, frame, symbols, strict=False)
+
+    @staticmethod
+    def _quote_by_name_sync(
+        market: str,
+        candidates: Sequence[str],
+    ) -> MarketQuote:
+        import akshare as ak
+
+        frame = ak.stock_zh_a_spot_em()
+        matched = _akshare_name_match(frame, candidates)
+        if matched.empty:
+            raise RuntimeError("stock name was not found")
+        return _akshare_quote_from_row(market, matched.iloc[0], requested_symbol="")
 
 
 def _akshare_quotes_from_frame(
@@ -153,54 +192,87 @@ def _akshare_quotes_from_frame(
         raw_code, _separator, raw_suffix = raw_symbol.partition(".")
         is_code_query = raw_code.isdigit()
         code = raw_code.zfill(6) if is_code_query else ""
-        raw_symbol = symbol.strip().upper()
         matched = (
             frame.loc[frame["代码"].astype(str).str.zfill(6) == code]
             if is_code_query
             else frame.iloc[0:0]
         )
         if matched.empty and not is_code_query:
-            names = frame["名称"].astype(str).str.strip()
-            exact = frame.loc[names == symbol.strip()]
-            starts_with = frame.loc[names.str.startswith(symbol.strip())]
-            contains = frame.loc[names.str.contains(symbol.strip(), regex=False)]
-            matched = (
-                exact
-                if not exact.empty
-                else starts_with
-                if not starts_with.empty
-                else contains
-            )
+            matched = _akshare_name_match(frame, (symbol,))
         if matched.empty:
             if strict:
                 raise RuntimeError("stock symbol was not found")
             continue
-        row = matched.iloc[0]
-        code = str(row["代码"]).zfill(6)
-        suffix = raw_suffix if raw_suffix in {"SH", "SZ", "BJ"} else _a_share_suffix(code)
-        canonical_symbol = f"{code}.{suffix}"
-        raw_name = str(row["名称"]).strip() if "名称" in row else ""
-        name = raw_name or None
-        price = _coerce_float(row["最新价"])
-        if price is None:
-            raise RuntimeError("stock quote was unavailable")
-        previous = _coerce_float(row["昨收"]) if "昨收" in row else None
-        raw_change = row["涨跌幅"] if "涨跌幅" in row else None
-        change = _coerce_float(raw_change)
         quotes.append(
-            MarketQuote(
-                market=market,
-                symbol=canonical_symbol,
-                price=price,
-                previous_close=previous,
-                change_percent=change,
-                source="东方财富 via AkShare",
-                observed_at=datetime.now(_BEIJING_TIME_ZONE).isoformat(),
-                delayed=True,
-                name=name,
+            _akshare_quote_from_row(
+                market,
+                matched.iloc[0],
+                requested_symbol=raw_symbol if is_code_query else "",
             )
         )
     return quotes
+
+
+def _akshare_name_match(frame, candidates: Sequence[str]):
+    columns = [column for column in _AKSHARE_NAME_COLUMNS if column in frame.columns]
+    if not columns:
+        return frame.iloc[0:0]
+    normalized_columns = {
+        column: frame[column].map(_normalize_name_value)
+        for column in columns
+    }
+    for candidate in candidates:
+        normalized_candidate = _normalize_name_value(candidate)
+        if not normalized_candidate:
+            continue
+        for mode in ("exact", "prefix", "contains"):
+            for column in columns:
+                values = normalized_columns[column]
+                if mode == "exact":
+                    mask = values == normalized_candidate
+                elif mode == "prefix":
+                    mask = values.str.startswith(normalized_candidate)
+                else:
+                    mask = values.str.contains(normalized_candidate, regex=False)
+                matched = frame.loc[mask]
+                if not matched.empty:
+                    return matched
+    return frame.iloc[0:0]
+
+
+def _normalize_name_value(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "")).strip()
+
+
+def _akshare_quote_from_row(market: str, row, *, requested_symbol: str) -> MarketQuote:
+    code = str(row["代码"]).strip().zfill(6)
+    raw_symbol = requested_symbol.upper()
+    _raw_code, _separator, raw_suffix = raw_symbol.partition(".")
+    suffix = raw_suffix if raw_suffix in {"SH", "SZ", "BJ"} else _a_share_suffix(code)
+    canonical_symbol = f"{code}.{suffix}"
+    raw_name = ""
+    for column in _AKSHARE_NAME_COLUMNS:
+        if column in row.index:
+            raw_name = _normalize_name_value(row[column])
+            if raw_name:
+                break
+    price = _coerce_float(row["最新价"])
+    if price is None:
+        raise RuntimeError("stock quote was unavailable")
+    previous = _coerce_float(row["昨收"]) if "昨收" in row.index else None
+    raw_change = row["涨跌幅"] if "涨跌幅" in row.index else None
+    change = _coerce_float(raw_change)
+    return MarketQuote(
+        market=market,
+        symbol=canonical_symbol,
+        price=price,
+        previous_close=previous,
+        change_percent=change,
+        source="东方财富 via AkShare",
+        observed_at=datetime.now(_BEIJING_TIME_ZONE).isoformat(),
+        delayed=True,
+        name=raw_name or None,
+    )
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -249,6 +321,49 @@ async def _quote_in_isolated_process(
             "invalid_response",
             category="invalid_response",
         ) from exc
+
+
+async def _quote_name_in_isolated_process(
+    provider: str,
+    market: str,
+    candidates: tuple[str, ...],
+) -> MarketQuote:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "app.features.market_worker",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        cwd=_PROJECT_ROOT,
+    )
+    request = json.dumps(
+        {
+            "provider": provider,
+            "market": market,
+            "nameCandidates": list(candidates),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        stdout, _stderr = await process.communicate(request)
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    response = _last_worker_payload(stdout)
+    if process.returncode != 0 or not response.get("ok"):
+        category = str(response.get("category") or "provider_error")
+        raise MarketProviderUnavailableError(category, category=category)
+    quote = response.get("quote")
+    if not isinstance(quote, dict):
+        raise MarketProviderUnavailableError("invalid_response", category="invalid_response")
+    try:
+        return MarketQuote(**quote)
+    except (TypeError, ValueError) as exc:
+        raise MarketProviderUnavailableError("invalid_response", category="invalid_response") from exc
 
 
 async def _quotes_in_isolated_process(
@@ -330,6 +445,45 @@ class SinaMarketProvider:
             raise ValueError("empty sina quote")
         return quotes[0]
 
+    async def quote_by_name(
+        self,
+        market: str,
+        candidates: Sequence[str],
+    ) -> MarketQuote:
+        if market != "a_share":
+            raise ValueError("Sina name lookup only supports A shares")
+        symbol = await self._resolve_name(candidates)
+        return await self.quote(market, symbol)
+
+    async def _resolve_name(self, candidates: Sequence[str]) -> str:
+        headers = {
+            "User-Agent": "Mozilla/5.0 QQBotMarket/1.0",
+            "Referer": "https://finance.sina.com.cn/",
+        }
+        async with httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            transport=self._transport,
+            headers=headers,
+            follow_redirects=False,
+        ) as client:
+            for candidate in candidates:
+                normalized = _normalize_name_value(candidate)
+                if not normalized:
+                    continue
+                response = await client.get(
+                    _SINA_SUGGEST_URL_PREFIX
+                    + url_quote(normalized, safe="")
+                    + "&name=suggestdata"
+                )
+                response.raise_for_status()
+                if len(response.content) > _SINA_SUGGEST_MAX_BYTES:
+                    raise ValueError("Sina stock suggestion response is too large")
+                suggestions = _parse_sina_name_suggestions(response.content)
+                selected = _select_sina_name_suggestion(normalized, suggestions)
+                if selected is not None:
+                    return selected[1]
+        raise ValueError("Sina stock name was not found")
+
     async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
         request_symbols = [_sina_symbol(symbol) for symbol in symbols]
         async with httpx.AsyncClient(
@@ -407,6 +561,10 @@ class InstrumentedMarketProvider:
     def supports_quote_many(self) -> bool:
         return callable(getattr(self._provider, "quote_many", None))
 
+    @property
+    def supports_name_lookup(self) -> bool:
+        return callable(getattr(self._provider, "quote_by_name", None))
+
     async def quote(self, market: str, symbol: str) -> MarketQuote:
         for attempt in range(1, 3):
             started = time.perf_counter()
@@ -476,6 +634,46 @@ class InstrumentedMarketProvider:
         )
         return quotes
 
+    async def quote_by_name(
+        self,
+        market: str,
+        candidates: Sequence[str],
+    ) -> MarketQuote:
+        quote_by_name = getattr(self._provider, "quote_by_name", None)
+        if not callable(quote_by_name):
+            raise MarketProviderUnavailableError(
+                "market provider does not support name lookup",
+                category="unsupported",
+            )
+        started = time.perf_counter()
+        try:
+            async with asyncio.timeout(self._attempt_timeout_seconds):
+                quote = await quote_by_name(market, candidates)
+        except Exception as exc:
+            await self._health.record_attempt(
+                kind="market",
+                provider=self._provider_name,
+                target=self._target,
+                stage="quote_by_name",
+                success=False,
+                attempts=1,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                error_category=classify_provider_error(exc),
+                record_system_event=self._record_system_event,
+            )
+            raise
+        await self._health.record_attempt(
+            kind="market",
+            provider=self._provider_name,
+            target=self._target,
+            stage="quote_by_name",
+            success=True,
+            attempts=1,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            record_system_event=self._record_system_event,
+        )
+        return quote
+
     async def _record(
         self,
         *,
@@ -532,6 +730,10 @@ class FailoverMarketProvider:
     @property
     def supports_quote_many(self) -> bool:
         return any(callable(getattr(provider, "quote_many", None)) for _, _, provider in self._providers)
+
+    @property
+    def supports_name_lookup(self) -> bool:
+        return any(callable(getattr(provider, "quote_by_name", None)) for _, _, provider in self._providers)
 
     async def quote(self, market: str, symbol: str) -> MarketQuote:
         last_error: Exception | None = None
@@ -599,6 +801,71 @@ class FailoverMarketProvider:
                         quote = replace(quote, source=f"{quote.source}（备用源）")
                     return quote
         raise MarketProviderUnavailableError("all configured market providers failed") from last_error
+
+    async def quote_by_name(
+        self,
+        market: str,
+        candidates: Sequence[str],
+    ) -> MarketQuote:
+        last_error: Exception | None = None
+        for index, (name, target, provider) in enumerate(self._providers):
+            quote_by_name = getattr(provider, "quote_by_name", None)
+            if not callable(quote_by_name):
+                continue
+            breaker = self._breakers[name]
+            async with self._provider_gates[name]:
+                if not breaker.allow_request():
+                    await self._health.record_attempt(
+                        kind="market",
+                        provider=name,
+                        target=target,
+                        stage="quote_by_name",
+                        success=False,
+                        attempts=1,
+                        duration_ms=0,
+                        error_category="circuit_open",
+                        circuit_state=breaker.state,
+                        record_system_event=self._record_system_event,
+                    )
+                    continue
+                started = time.perf_counter()
+                try:
+                    async with asyncio.timeout(self._attempt_timeout_seconds):
+                        quote = await quote_by_name(market, candidates)
+                except Exception as exc:
+                    last_error = exc
+                    breaker.record_failure()
+                    await self._health.record_attempt(
+                        kind="market",
+                        provider=name,
+                        target=target,
+                        stage="quote_by_name",
+                        success=False,
+                        attempts=1,
+                        duration_ms=round((time.perf_counter() - started) * 1000),
+                        error_category=classify_provider_error(exc),
+                        circuit_state=breaker.state,
+                        record_system_event=self._record_system_event,
+                    )
+                    continue
+                breaker.record_success()
+                await self._health.record_attempt(
+                    kind="market",
+                    provider=name,
+                    target=target,
+                    stage="quote_by_name",
+                    success=True,
+                    attempts=1,
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    circuit_state=breaker.state,
+                    record_system_event=self._record_system_event,
+                )
+                if index > 0:
+                    quote = replace(quote, source=f"{quote.source}（备用源）")
+                return quote
+        raise MarketProviderUnavailableError(
+            "all configured market providers failed name lookup",
+        ) from last_error
 
     async def quote_many(self, market: str, symbols: list[str]) -> list[MarketQuote]:
         last_error: Exception | None = None
@@ -720,6 +987,45 @@ def _sina_symbol(symbol: str) -> str:
     if suffix == "BJ":
         return f"bj{code}"
     raise ValueError("unsupported A-share symbol")
+
+
+def _parse_sina_name_suggestions(content: bytes) -> list[tuple[str, str]]:
+    text = content.decode("gb18030", errors="strict")
+    match = re.fullmatch(r'\s*var\s+suggestdata="(?P<body>.*)";?\s*', text)
+    if match is None:
+        raise ValueError("Sina stock suggestion response is invalid")
+    suggestions: list[tuple[str, str]] = []
+    for entry in match.group("body").split(";"):
+        fields = entry.split(",")
+        if len(fields) < 4 or fields[1].strip() != "11":
+            continue
+        name = _normalize_name_value(fields[0])
+        raw_symbol = fields[3].strip().lower()
+        symbol_match = re.fullmatch(r"(?P<exchange>sh|sz|bj)(?P<code>\d{6})", raw_symbol)
+        if not name or symbol_match is None:
+            continue
+        suggestions.append(
+            (
+                name,
+                f"{symbol_match.group('code')}.{symbol_match.group('exchange').upper()}",
+            )
+        )
+    return suggestions
+
+
+def _select_sina_name_suggestion(
+    candidate: str,
+    suggestions: Sequence[tuple[str, str]],
+) -> tuple[str, str] | None:
+    for matcher in (
+        lambda name: name == candidate,
+        lambda name: name.startswith(candidate),
+        lambda name: candidate in name,
+    ):
+        for suggestion in suggestions:
+            if matcher(suggestion[0]):
+                return suggestion
+    return None
 
 
 def _a_share_suffix(code: str) -> str:

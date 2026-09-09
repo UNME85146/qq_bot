@@ -15,11 +15,17 @@ def main() -> int:
         market = str(payload.get("market") or "")
         symbol = str(payload.get("symbol") or "")
         symbols = payload.get("symbols")
+        name_candidates = payload.get("nameCandidates")
         if isinstance(symbols, list):
             requested_symbols = [str(item) for item in symbols]
         else:
             requested_symbols = []
-        if provider == "akshare":
+        if provider == "akshare" and isinstance(name_candidates, list):
+            candidates = tuple(str(item) for item in name_candidates if str(item).strip())
+            if not candidates:
+                raise ValueError("stock name candidates are empty")
+            quotes = [AkShareMarketProvider._quote_by_name_sync(market, candidates)]
+        elif provider == "akshare":
             quotes = (
                 AkShareMarketProvider._quotes_sync(market, requested_symbols)
                 if requested_symbols

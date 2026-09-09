@@ -110,14 +110,19 @@ def migrate_runtime_config(
         {
             "enabled": False,
             "recipientUserId": "",
-            "intervalSeconds": 14_400,
+            "sendTimes": ["00:30", "08:00", "18:00"],
+            "timezone": "Asia/Shanghai",
+            "lookbackSeconds": 36_000,
             "requestTimeoutSeconds": 20,
             "maxItems": 5,
-            "excerptChars": 160,
-            "maxMessageChars": 1800,
             "statusUrl": CODEX_RUNWAY_STATUS_URL,
         },
     )
+    for legacy_key in ("intervalSeconds", "excerptChars", "maxMessageChars"):
+        migrated["codexRunway"].pop(legacy_key, None)
+    migrated["codexRunway"]["sendTimes"] = ["00:30", "08:00", "18:00"]
+    migrated["codexRunway"]["timezone"] = "Asia/Shanghai"
+    migrated["codexRunway"]["lookbackSeconds"] = 36_000
     migrated["codexRunway"]["statusUrl"] = CODEX_RUNWAY_STATUS_URL
 
     migrated["usageRankingReport"] = _merge_defaults(

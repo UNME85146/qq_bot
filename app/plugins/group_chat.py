@@ -129,6 +129,7 @@ _market_command_service = MarketCommandService(
     providers=_market_providers,
     default_alert_threshold_percent=_config.markets.alert_threshold_percent,
     command_timeout_seconds=_config.markets.command_timeout_seconds,
+    provider_timeout_seconds=_config.markets.provider_timeout_seconds,
 )
 _search_command_service = GroupSearchCommandService(
     search_provider=create_search_provider(
@@ -298,6 +299,7 @@ async def _start_reminder_worker(bot: Bot) -> None:
                 _runtime_bot_proxy,
                 _config.codex_runway,
                 record_system_event=_conversation_service.record_system_event,
+                model_client=_conversation_service.model_client,
             )
         )
     if not _usage_ranking_worker_started:
@@ -703,6 +705,11 @@ async def _try_handle_group_information_feature(
             event,
             structured.messages,
             fallback_messages=structured.fallback_messages,
+            overflow_message_groups=getattr(
+                structured,
+                "overflow_message_groups",
+                (),
+            ),
             scope_type="group",
             reply_config=_config.reply,
             on_send_error=send_error,

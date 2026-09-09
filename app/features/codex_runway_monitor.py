@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from loguru import logger
 
+from app.features.structured_reply import is_message_too_long_error
+from app.model.llm_client import LlmClient
 from app.models import CodexRunwayConfig
 
 
@@ -51,11 +53,12 @@ def _load_tibo_time_zone() -> tzinfo:
 
 MAX_FEED_BYTES = 1_048_576
 STALE_AFTER = timedelta(hours=30)
+TRANSLATION_MAX_TOKENS = 16_000
+TRANSPORT_CHUNK_CHARS = 3_500
 TIBO_TIME_ZONE = _load_tibo_time_zone()
 DISPLAY_TIME_ZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 TRUSTED_SOURCE_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}
 VISIBLE_KINDS = {"reset_completed", "reset_scheduled"}
-DISCLAIMER = "非官方监测，仅供参考。"
 
 
 async def fetch_codex_runway_feed(
@@ -101,13 +104,49 @@ async def fetch_codex_runway_feed(
             await active_client.aclose()
 
 
+def seconds_until_next_codex_runway(
+    now: datetime,
+    *,
+    send_times: Sequence[str],
+    timezone_name: str = "Asia/Shanghai",
+) -> float:
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    zone = _runway_time_zone(timezone_name)
+    parsed_times = tuple(_parse_hhmm(value) for value in send_times)
+    if not parsed_times:
+        raise ValueError("send_times must not be empty")
+    local_now = now.astimezone(zone)
+    for day_offset in range(2):
+        scheduled_date = local_now.date() + timedelta(days=day_offset)
+        for scheduled_time in parsed_times:
+            scheduled = datetime.combine(
+                scheduled_date,
+                scheduled_time,
+                tzinfo=zone,
+            )
+            if scheduled <= local_now:
+                continue
+            return max(
+                0.0,
+                (scheduled.astimezone(UTC) - now.astimezone(UTC)).total_seconds(),
+            )
+    raise RuntimeError("could not find the next Codex Runway slot")
+
+
 def build_codex_runway_summary(
     feed: dict[str, Any],
     config: CodexRunwayConfig,
     *,
     now: datetime | None = None,
+    event_texts: Mapping[str, str] | None = None,
 ) -> str:
-    message, _, _ = _build_summary_details(feed, config, now=now)
+    message, _, _ = _build_summary_details(
+        feed,
+        config,
+        now=now,
+        event_texts=event_texts,
+    )
     return message
 
 
@@ -116,6 +155,7 @@ async def run_codex_runway_monitor_once(
     config: CodexRunwayConfig,
     *,
     record_system_event: Callable[..., Awaitable[None]],
+    model_client: LlmClient | None = None,
     now: datetime | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> bool:
@@ -124,11 +164,6 @@ async def run_codex_runway_monitor_once(
     current = _aware_utc(now)
     try:
         feed = await fetch_codex_runway_feed(config, client=client)
-        message, item_count, reset_state = _build_summary_details(
-            feed,
-            config,
-            now=current,
-        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -139,8 +174,30 @@ async def run_codex_runway_monitor_once(
             detail=f"category={_error_category(exc)}",
         )
         return False
+
+    selected = _selected_events(feed, config, current)
     try:
-        result = await bot.send_private_msg(
+        translated = await _translate_trusted_events(model_client, selected)
+        message, item_count, reset_state = _build_summary_details(
+            feed,
+            config,
+            now=current,
+            event_texts=translated,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("Codex Runway translation failed: {}", type(exc).__name__)
+        await record_system_event(
+            level="ERROR",
+            event="codex_runway_translation_failed",
+            detail=f"category={_error_category(exc)}",
+        )
+        return False
+
+    try:
+        result = await _send_complete_private_message(
+            bot,
             user_id=int(config.recipient_user_id),
             message=message,
         )
@@ -170,16 +227,26 @@ async def codex_runway_worker(
     config: CodexRunwayConfig,
     *,
     record_system_event: Callable[..., Awaitable[None]],
+    model_client: LlmClient | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     if not config.enabled:
         return
     while True:
+        delay = seconds_until_next_codex_runway(
+            now(),
+            send_times=config.send_times,
+            timezone_name=config.timezone,
+        )
+        await sleep(delay)
         try:
             await run_codex_runway_monitor_once(
                 bot,
                 config,
                 record_system_event=record_system_event,
+                model_client=model_client,
+                now=now(),
             )
         except asyncio.CancelledError:
             raise
@@ -190,7 +257,6 @@ async def codex_runway_worker(
                 event="codex_runway_worker_failed",
                 detail=f"category={_error_category(exc)}",
             )
-        await sleep(float(config.interval_seconds))
 
 
 def _build_summary_details(
@@ -198,6 +264,7 @@ def _build_summary_details(
     config: CodexRunwayConfig,
     *,
     now: datetime | None,
+    event_texts: Mapping[str, str] | None = None,
 ) -> tuple[str, int, str]:
     current = _aware_utc(now)
     available = _monitor_available(feed, current)
@@ -212,8 +279,12 @@ def _build_summary_details(
         reset_line = "否"
         reset_state = "no"
 
-    all_recent = _recent_events(feed, current, config.interval_seconds)
-    selected = all_recent[: config.max_items]
+    all_recent = _recent_events(feed, current, config.lookback_seconds)
+    selected = (
+        all_recent
+        if config.max_items <= 0
+        else all_recent[: config.max_items]
+    )
     last_check = _parse_datetime(feed.get("lastSuccessfulCheckAt"))
     checked_text = (
         last_check.astimezone(DISPLAY_TIME_ZONE).strftime("%Y-%m-%d %H:%M")
@@ -221,29 +292,152 @@ def _build_summary_details(
         else "未知"
     )
     lines = [
-        "【Codex Runway 四小时汇总】",
         f"今日是否已重置（Tibo 时区）：{reset_line}",
         f"监测截至：{checked_text}（北京时间）",
     ]
     if selected:
         suffix = (
             f"（最多显示{config.max_items}条）"
-            if len(all_recent) > config.max_items
+            if config.max_items > 0 and len(all_recent) > config.max_items
             else ""
         )
-        lines.append(f"近4小时新监测消息：{len(selected)}条{suffix}")
+        lines.append(f"近期新监测消息：{len(selected)}条{suffix}")
         lines.extend(
-            _format_event(index, event, config.excerpt_chars)
+            _format_event(
+                index,
+                event,
+                text_override=(event_texts or {}).get(_event_identity(event)),
+            )
             for index, event in enumerate(selected, start=1)
         )
     else:
-        lines.append("近4小时无新监测消息")
-    lines.append(DISCLAIMER)
-    message = "\n".join(lines)
-    if len(message) > config.max_message_chars:
-        marker = "\n内容超出上限，已截断。\n" + DISCLAIMER
-        message = message[: config.max_message_chars - len(marker)].rstrip() + marker
-    return message, len(selected), reset_state
+        lines.append("近期无新监测消息")
+    return "\n".join(lines), len(selected), reset_state
+
+
+def _selected_events(
+    feed: dict[str, Any],
+    config: CodexRunwayConfig,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    events = _recent_events(feed, now, config.lookback_seconds)
+    if config.max_items <= 0:
+        return events
+    return events[: config.max_items]
+
+
+async def _translate_trusted_events(
+    model_client: LlmClient | None,
+    events: Sequence[dict[str, Any]],
+) -> dict[str, str]:
+    translatable: list[tuple[str, str]] = []
+    translated: dict[str, str] = {}
+    for event in events:
+        text = _clean_event_text(event.get("text"))
+        if not text or not _trusted_source_url(event):
+            continue
+        identity = _event_identity(event)
+        if not _contains_non_chinese_text(text):
+            translated[identity] = text
+        else:
+            translatable.append((identity, text))
+    if not translatable:
+        return translated
+    if model_client is None:
+        raise ValueError("translation model is unavailable")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是 Codex Runway 推文中文翻译器。把每条 sourceText 完整翻译成简体中文，"
+                "不得摘要、删减、改写事实或输出解释。保留数字、时间和事实关系。"
+                "title 之外的正文值不得出现拉丁字母；只返回 JSON，格式为 "
+                "{\"items\":[{\"id\":\"...\",\"text\":\"完整中文正文\"}]}，"
+                "id 顺序必须与输入一致。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "items": [
+                        {"id": identity, "sourceText": text}
+                        for identity, text in translatable
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    generate_with_options = getattr(model_client, "generate_with_options", None)
+    if callable(generate_with_options):
+        generated = await generate_with_options(
+            messages,
+            max_tokens=TRANSLATION_MAX_TOKENS,
+            reasoning_effort="low",
+        )
+    else:
+        generated = await model_client.generate(messages)
+    raw = re.sub(
+        r"^```(?:json)?\s*|\s*```$",
+        "",
+        str(generated.text or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("translation response is not JSON") from exc
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or len(items) != len(translatable):
+        raise ValueError("translation response item count is invalid")
+    expected_ids = [identity for identity, _text in translatable]
+    actual_ids = [str(item.get("id")) for item in items if isinstance(item, dict)]
+    if actual_ids != expected_ids:
+        raise ValueError("translation response ids are invalid")
+    for item in items:
+        text = _clean_event_text(item.get("text"))
+        if not text or _contains_non_chinese_text(text):
+            raise ValueError("translation response is incomplete")
+        translated[str(item["id"])] = text
+    return translated
+
+
+async def _send_complete_private_message(
+    bot: Any,
+    *,
+    user_id: int,
+    message: str,
+) -> Any:
+    try:
+        return await bot.send_private_msg(user_id=user_id, message=message)
+    except Exception as exc:
+        if not is_message_too_long_error(exc):
+            raise
+        result: Any = None
+        for chunk in _split_transport_chunks(message):
+            result = await bot.send_private_msg(user_id=user_id, message=chunk)
+        return result
+
+
+def _split_transport_chunks(text: str) -> list[str]:
+    if len(text) <= TRANSPORT_CHUNK_CHARS:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= TRANSPORT_CHUNK_CHARS:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, TRANSPORT_CHUNK_CHARS + 1)
+        if cut <= 0:
+            cut = TRANSPORT_CHUNK_CHARS
+        else:
+            cut += 1
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    return chunks
 
 
 def _validate_feed(payload: Any) -> None:
@@ -288,9 +482,9 @@ def _completed_reset_types_today(feed: dict[str, Any], now: datetime) -> set[str
 def _recent_events(
     feed: dict[str, Any],
     now: datetime,
-    interval_seconds: int,
+    lookback_seconds: int,
 ) -> list[dict[str, Any]]:
-    cutoff = now - timedelta(seconds=interval_seconds)
+    cutoff = now - timedelta(seconds=lookback_seconds)
     candidates: list[tuple[datetime, dict[str, Any]]] = []
     seen: set[str] = set()
     for event in feed.get("events", []):
@@ -299,16 +493,7 @@ def _recent_events(
         announced = _parse_datetime(event.get("announcedAt"))
         if announced is None or announced < cutoff or announced > now:
             continue
-        source = event.get("source") if isinstance(event.get("source"), dict) else {}
-        identity = str(source.get("postId") or "").strip()
-        if not identity:
-            identity = "|".join(
-                (
-                    str(event.get("kind") or ""),
-                    announced.isoformat(),
-                    str(event.get("text") or ""),
-                )
-            )
+        identity = _event_identity(event, announced=announced)
         if identity in seen:
             continue
         seen.add(identity)
@@ -317,7 +502,31 @@ def _recent_events(
     return [event for _, event in candidates]
 
 
-def _format_event(index: int, event: dict[str, Any], excerpt_chars: int) -> str:
+def _event_identity(
+    event: dict[str, Any],
+    *,
+    announced: datetime | None = None,
+) -> str:
+    source = event.get("source") if isinstance(event.get("source"), dict) else {}
+    identity = str(source.get("postId") or "").strip()
+    if identity:
+        return identity
+    occurred = announced or _parse_datetime(event.get("announcedAt"))
+    return "|".join(
+        (
+            str(event.get("kind") or ""),
+            occurred.isoformat() if occurred else "",
+            str(event.get("text") or ""),
+        )
+    )
+
+
+def _format_event(
+    index: int,
+    event: dict[str, Any],
+    *,
+    text_override: str | None = None,
+) -> str:
     announced = _parse_datetime(event.get("announcedAt"))
     when = (
         announced.astimezone(DISPLAY_TIME_ZONE).strftime("%m-%d %H:%M")
@@ -325,10 +534,12 @@ def _format_event(index: int, event: dict[str, Any], excerpt_chars: int) -> str:
         else "时间未知"
     )
     label = _event_label(event)
-    excerpt = _compact_excerpt(event.get("text"), excerpt_chars)
+    text = _clean_event_text(
+        text_override if text_override is not None else event.get("text")
+    )
     lines = [f"{index}. {when} {label}"]
-    if excerpt:
-        lines.append(f"   {excerpt}")
+    if text:
+        lines.append(f"   {text}")
     source_url = _trusted_source_url(event)
     if source_url:
         lines.append(f"   来源：{source_url}")
@@ -347,11 +558,21 @@ def _event_label(event: dict[str, Any]) -> str:
     return f"{type_label}已完成"
 
 
-def _compact_excerpt(value: Any, limit: int) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
+def _clean_event_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _contains_non_chinese_text(value: str) -> bool:
+    return any(character.isalpha() and not _is_cjk(character) for character in value)
+
+
+def _is_cjk(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+    )
 
 
 def _trusted_source_url(event: dict[str, Any]) -> str:
@@ -366,6 +587,24 @@ def _trusted_source_url(event: dict[str, Any]) -> str:
     ):
         return ""
     return value
+
+
+def _runway_time_zone(name: str) -> tzinfo:
+    if name != "Asia/Shanghai":
+        raise ValueError("Codex Runway timezone must be Asia/Shanghai")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return DISPLAY_TIME_ZONE
+
+
+def _parse_hhmm(value: str) -> time:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{2}:\d{2}", value):
+        raise ValueError("Codex Runway send times must use HH:MM")
+    hour, minute = (int(part) for part in value.split(":"))
+    if hour > 23 or minute > 59:
+        raise ValueError("Codex Runway send times must use HH:MM")
+    return time(hour=hour, minute=minute)
 
 
 def _parse_datetime(value: Any) -> datetime | None:

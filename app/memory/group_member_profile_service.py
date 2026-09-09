@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Iterable, Mapping
 
 from app.models import GroupMemberProfile, NormalizedMessage, QQConfig
 from app.safety.safety_service import SafetyService
@@ -19,6 +20,72 @@ _METRIC_KEYS = (
     "at_mention_count",
     "reply_count",
 )
+
+
+def aggregate_group_member_records(
+    records: Iterable[Mapping[str, object]],
+    *,
+    safety_service: SafetyService,
+) -> tuple[dict[str, dict[str, object]], dict[str, int]]:
+    """Aggregate sanitized runtime rows into rebuildable member profiles."""
+    aggregates: dict[str, dict[str, object]] = {}
+    stats = {
+        "source_records": 0,
+        "eligible_records": 0,
+        "skipped_sensitive_records": 0,
+    }
+    for record in records:
+        stats["source_records"] += 1
+        user_id = str(record.get("user_id") or "").strip()
+        if not user_id:
+            continue
+        raw_text = str(record.get("text") or "")
+        if not safety_service.can_store_long_term_memory(raw_text):
+            stats["skipped_sensitive_records"] += 1
+            continue
+        stats["eligible_records"] += 1
+        aggregate = aggregates.setdefault(
+            user_id,
+            {
+                "display_name": None,
+                "metrics": {key: 0 for key in _METRIC_KEYS},
+                "message_count": 0,
+                "preference_notes": "",
+            },
+        )
+        metrics = aggregate["metrics"]
+        if not isinstance(metrics, dict):
+            raise RuntimeError("group member profile metrics aggregate is invalid")
+        text = _clean_display_text(raw_text)
+        media_type = str(record.get("media_type") or "").lower()
+        metrics["total_text_chars"] += len(text)
+        metrics["short_message_count"] += int(len(text) <= 12)
+        metrics["medium_message_count"] += int(12 < len(text) <= 40)
+        metrics["question_count"] += int(any(mark in text for mark in ("?", "？")))
+        metrics["punctuation_count"] += int(
+            bool(re.search(r"[，。！？!?、；;,.]", text))
+        )
+        metrics["media_message_count"] += int(bool(media_type))
+        metrics["sticker_message_count"] += int(
+            media_type in {"face", "sticker", "emoji", "mface", "marketface"}
+        )
+        metrics["at_mention_count"] += int(bool(record.get("mentioned_user_ids")))
+        metrics["reply_count"] += int(bool(record.get("reply_to_message_id")))
+        aggregate["message_count"] += 1
+        display_name = _clean_display_name(str(record.get("user_name") or ""))
+        if display_name:
+            aggregate["display_name"] = display_name
+        aggregate["preference_notes"] = _merge_preference_notes(
+            str(aggregate["preference_notes"] or ""),
+            _extract_preference_note(raw_text, safety_service),
+        )
+
+    for user_id, aggregate in aggregates.items():
+        metrics = aggregate["metrics"]
+        message_count = int(aggregate["message_count"])
+        aggregate["summary"] = _build_summary(metrics, message_count)
+        aggregates[user_id] = aggregate
+    return aggregates, stats
 
 
 class GroupMemberProfileService:

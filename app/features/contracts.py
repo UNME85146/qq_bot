@@ -10,6 +10,7 @@ class StructuredReply:
     page: int = 1
     total_pages: int = 1
     fallback_messages: tuple[str, ...] = ()
+    overflow_message_groups: tuple[tuple[str, ...], ...] = ()
 
     @property
     def truncated(self) -> bool:
@@ -99,6 +100,15 @@ class NewsProvider(Protocol):
 @runtime_checkable
 class MarketDataProvider(Protocol):
     async def quote(self, market: str, symbol: str) -> MarketQuote: ...
+
+
+@runtime_checkable
+class NameLookupMarketDataProvider(Protocol):
+    async def quote_by_name(
+        self,
+        market: str,
+        candidates: Sequence[str],
+    ) -> MarketQuote: ...
 
 
 @runtime_checkable

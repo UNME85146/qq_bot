@@ -24,7 +24,7 @@ DEFAULT_DISTRO = "Ubuntu-24.04"
 DEFAULT_ROOT = "/opt/qq_bot"
 DEFAULT_SERVICE = "qq-bot.service"
 DEFAULT_NAPCAT_CONTAINER = "napcat"
-DEFAULT_VIDEO_CACHE_HOST = "/opt/napcat/cache/qq-bot-media"
+DEFAULT_VIDEO_CACHE_HOST = "/home/maintain/napcat/cache/qq-bot-media"
 DEFAULT_VIDEO_CACHE_CONTAINER = "/app/napcat/cache/qq-bot-media"
 WSL_JOURNAL_PATH = "/var/lib/qq-bot-deploy/current.json"
 WRAPPER_PATHS = (
@@ -413,13 +413,9 @@ def napcat_identity(container):
 def is_main_qq_command(command):
     argv = command.split()
     return (
-        bool(argv)
-        and argv[0].endswith("/opt/QQ/qq")
-        and not any(item.startswith("--type=") for item in argv[1:])
-        and any(
-            argv[index] == "-q" and index + 1 < len(argv) and argv[index + 1].isdigit()
-            for index in range(len(argv))
-        )
+        len(argv) == 4
+        and argv[:3] == ["/opt/QQ/qq", "--no-sandbox", "-q"]
+        and argv[3].isdigit()
     )
 
 root = Path(os.environ["QQ_BOT_ROOT"]).resolve()

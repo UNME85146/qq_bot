@@ -155,10 +155,18 @@ def main() -> int:
         default=[],
         help="Readonly bot runtime SQLite DB containing group_message_index stream rows. Can be repeated.",
     )
+    parser.add_argument(
+        "--runtime-group-id",
+        help="Only include group_message_index rows from this group when reading runtime DBs.",
+    )
     parser.add_argument("--source-user-id", required=True, help="QQ user id to extract style from.")
     parser.add_argument("--output", required=True, help="Output persona_profile.local.json path.")
     parser.add_argument("--report-output", help="Optional JSON report path for source coverage and behavior stats.")
     parser.add_argument("--days", type=int, help="Only include records from the most recent number of days.")
+    parser.add_argument(
+        "--reference-time",
+        help="Aware ISO timestamp used as the window end; defaults to current UTC.",
+    )
     args = parser.parse_args()
 
     result = build_style_profile(
@@ -166,10 +174,12 @@ def main() -> int:
         input_root=Path(args.input_root) if args.input_root else None,
         input_files=[Path(path) for path in args.input_file],
         runtime_dbs=[Path(path) for path in args.runtime_db],
+        runtime_group_id=str(args.runtime_group_id) if args.runtime_group_id else None,
         source_user_id=str(args.source_user_id),
         output_path=Path(args.output),
         report_output_path=Path(args.report_output) if args.report_output else None,
         days=args.days,
+        reference_time=_parse_reference_time(args.reference_time),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -182,6 +192,7 @@ def build_style_profile(
     input_root: Path | None = None,
     input_files: list[Path] | None = None,
     runtime_dbs: list[Path] | None = None,
+    runtime_group_id: str | None = None,
     source_user_id: str,
     output_path: Path,
     report_output_path: Path | None = None,
@@ -211,6 +222,7 @@ def build_style_profile(
         "inputRoot": str(input_root) if input_root else None,
         "inputFiles": [str(path) for path in resolved_files],
         "runtimeDbs": [str(path) for path in resolved_runtime_dbs],
+        "runtimeGroupId": runtime_group_id,
         "sourceUserId": source_user_id,
         "exports": len(export_sources),
         "files": len(files),
@@ -225,6 +237,7 @@ def build_style_profile(
         "reportOutput": str(report_output_path) if report_output_path else None,
         "lookbackDays": days,
         "windowStart": cutoff_at.isoformat() if cutoff_at is not None else None,
+        "referenceTime": current_time.isoformat(),
     }
     valid_texts: list[str] = []
     behavior_stats: dict[str, Any] = {
@@ -250,7 +263,12 @@ def build_style_profile(
     }
 
     if resolved_runtime_dbs:
-        export_sources.extend(_read_runtime_db_sources(resolved_runtime_dbs))
+        export_sources.extend(
+            _read_runtime_db_sources(
+                resolved_runtime_dbs,
+                group_id=runtime_group_id,
+            )
+        )
     stats["exports"] = len(export_sources)
 
     if not files and not resolved_runtime_dbs:
@@ -272,7 +290,7 @@ def build_style_profile(
 
     for runtime_db in resolved_runtime_dbs:
         _consume_records(
-            _iter_runtime_db_records(runtime_db),
+            _iter_runtime_db_records(runtime_db, group_id=runtime_group_id),
             source_user_id=source_user_id,
             safety_service=safety_service,
             stats=stats,
@@ -303,6 +321,18 @@ def build_style_profile(
             encoding="utf-8",
         )
     return stats
+
+
+def _parse_reference_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("reference-time must be an ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("reference-time must include a timezone")
+    return parsed
 
 
 def _make_profile(
@@ -375,44 +405,47 @@ def _consume_records(
     valid_texts: list[str],
     cutoff_at: datetime | None = None,
 ) -> None:
-    previous_record: dict[str, Any] | None = None
+    previous_style_record: dict[str, Any] | None = None
     for record in records:
         if cutoff_at is not None:
             record_at = _record_datetime(record)
             if record_at is None or record_at < cutoff_at:
-                previous_record = None
+                previous_style_record = None
                 continue
         stats["totalRecords"] += 1
-
-        if str(_sender_uin(record)) != source_user_id:
-            previous_record = record
-            continue
-        stats["targetRecords"] += 1
-
-        if _is_system_or_recalled(record):
-            stats["skippedSystemOrRecalled"] += 1
-            previous_record = record
-            continue
-
+        is_target = str(_sender_uin(record)) == source_user_id
+        is_system = _is_system_or_recalled(record)
         raw_text = _normalize_text(_extract_text(record))
-        _observe_behavior_record(record, raw_text, behavior_stats, previous_record)
-        text = raw_text
-        if not text:
-            previous_record = record
-            continue
-        stats["nonEmptyTargetTexts"] += 1
+        is_style_text = bool(
+            not is_system
+            and raw_text
+            and not _is_pure_attachment(raw_text)
+            and _is_low_sensitive_style_text(raw_text, safety_service)
+        )
 
-        if _is_pure_attachment(text):
-            stats["skippedAttachments"] += 1
-            previous_record = record
-            continue
-        if not _is_low_sensitive_style_text(text, safety_service):
-            stats["skippedSensitive"] += 1
-            previous_record = record
-            continue
-        valid_texts.append(text)
-        _observe_valid_style_text(text, behavior_stats)
-        previous_record = record
+        if is_target:
+            stats["targetRecords"] += 1
+            if is_system:
+                stats["skippedSystemOrRecalled"] += 1
+            else:
+                _observe_behavior_record(record, raw_text, behavior_stats)
+                if raw_text:
+                    stats["nonEmptyTargetTexts"] += 1
+                    if _is_pure_attachment(raw_text):
+                        stats["skippedAttachments"] += 1
+                    elif not is_style_text:
+                        stats["skippedSensitive"] += 1
+                    else:
+                        valid_texts.append(raw_text)
+                        _observe_valid_style_text(raw_text, behavior_stats)
+                        _observe_valid_style_timing(
+                            record,
+                            behavior_stats,
+                            previous_style_record,
+                        )
+
+        if is_style_text:
+            previous_style_record = record
 
 
 def _discover_jsonl_files(
@@ -609,17 +642,26 @@ def _read_generic_source(
     }
 
 
-def _read_runtime_db_sources(paths: list[Path]) -> list[dict[str, Any]]:
-    return [_read_runtime_db_source(path) for path in paths]
+def _read_runtime_db_sources(
+    paths: list[Path],
+    *,
+    group_id: str | None = None,
+) -> list[dict[str, Any]]:
+    return [_read_runtime_db_source(path, group_id=group_id) for path in paths]
 
 
-def _read_runtime_db_source(path: Path) -> dict[str, Any]:
+def _read_runtime_db_source(
+    path: Path,
+    *,
+    group_id: str | None = None,
+) -> dict[str, Any]:
     source: dict[str, Any] = {
         "kind": "runtime_db",
         "path": str(path),
         "exists": path.exists(),
         "readableRecords": 0,
         "table": "group_message_index",
+        "groupId": group_id,
     }
     if not path.exists():
         source["error"] = "db_not_found"
@@ -628,18 +670,26 @@ def _read_runtime_db_source(path: Path) -> dict[str, Any]:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only=ON")
-            row = conn.execute("SELECT COUNT(*) AS count FROM group_message_index").fetchone()
+            where_sql = " WHERE group_id = ?" if group_id else ""
+            params = (group_id,) if group_id else ()
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count FROM group_message_index{where_sql}",
+                params,
+            ).fetchone()
             time_row = conn.execute(
-                "SELECT MIN(created_at) AS start, MAX(created_at) AS end FROM group_message_index"
+                f"SELECT MIN(created_at) AS start, MAX(created_at) AS end FROM group_message_index{where_sql}",
+                params,
             ).fetchone()
             group_rows = conn.execute(
-                """
+                f"""
                 SELECT group_id, COUNT(*) AS count
                 FROM group_message_index
+                {"WHERE group_id = ?" if group_id else ""}
                 GROUP BY group_id
                 ORDER BY count DESC
                 LIMIT 10
-                """
+                """,
+                params,
             ).fetchall()
         source["readableRecords"] = int(row["count"] if row is not None else 0)
         source["timeRange"] = dict(time_row) if time_row is not None else {}
@@ -789,7 +839,7 @@ def _iter_html_records(file_path: Path):
     yield from _iter_plain_lines_records(text.splitlines())
 
 
-def _iter_runtime_db_records(path: Path):
+def _iter_runtime_db_records(path: Path, *, group_id: str | None = None):
     if not path.exists():
         raise FileNotFoundError(f"Runtime DB does not exist: {path}")
     try:
@@ -797,12 +847,14 @@ def _iter_runtime_db_records(path: Path):
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only=ON")
             rows = conn.execute(
-                """
+                f"""
                 SELECT group_id, message_id, user_id, user_name, text, media_type,
                        sticker_asset_id, is_bot, created_at
                 FROM group_message_index
+                {"WHERE group_id = ?" if group_id else ""}
                 ORDER BY datetime(created_at), rowid
-                """
+                """,
+                (group_id,) if group_id else (),
             )
             for row in rows:
                 yield _runtime_row_to_record(dict(row))
@@ -1042,7 +1094,6 @@ def _observe_behavior_record(
     record: dict[str, Any],
     text: str,
     stats: dict[str, Any],
-    previous_record: dict[str, Any] | None = None,
 ) -> None:
     rendered = json.dumps(record, ensure_ascii=False)
     media_type = _record_media_type(record)
@@ -1053,8 +1104,6 @@ def _observe_behavior_record(
     group_id = record.get("group_id")
     if record.get("runtime_source") == "group_message_index" and group_id:
         stats["runtimeGroups"][str(group_id)] += 1
-    if STICKER_INTENT_PATTERN.search(text):
-        stats["stickerIntentTexts"][text] += 1
     if _has_media_marker(text, rendered):
         stats["mediaRecords"] += 1
     if _has_sticker_marker(text, rendered):
@@ -1063,6 +1112,13 @@ def _observe_behavior_record(
         stats["atMentions"] += 1
     if _has_reply_marker(text, rendered):
         stats["replyMarkers"] += 1
+
+
+def _observe_valid_style_timing(
+    record: dict[str, Any],
+    stats: dict[str, Any],
+    previous_record: dict[str, Any] | None,
+) -> None:
     created_at = _record_datetime(record)
     if created_at is not None:
         stats["sourceRecordsWithTime"] += 1
@@ -1090,6 +1146,8 @@ def _observe_valid_style_text(text: str, stats: dict[str, Any]) -> None:
         stats["punctuationMarks"].update(punctuation)
     if _is_short_style_phrase(text):
         stats["shortTexts"][text] += 1
+    if STICKER_INTENT_PATTERN.search(text):
+        stats["stickerIntentTexts"][text] += 1
 
 
 def _has_media_marker(text: str, rendered: str) -> bool:

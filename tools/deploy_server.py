@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--napcat-container", default="napcat")
     parser.add_argument(
         "--video-cache-host",
-        default="/opt/napcat/cache/qq-bot-media",
+        default="/home/maintain/napcat/cache/qq-bot-media",
     )
     parser.add_argument(
         "--video-cache-container",
@@ -130,7 +130,7 @@ def build_remote_script(
     run_tests: bool,
     restart_napcat: bool,
     keep_archive: bool,
-    video_cache_host: str = "/opt/napcat/cache/qq-bot-media",
+    video_cache_host: str = "/home/maintain/napcat/cache/qq-bot-media",
     video_cache_container: str = "/app/napcat/cache/qq-bot-media",
 ) -> str:
     sudo_assignment = ""

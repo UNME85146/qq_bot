@@ -63,7 +63,7 @@ AUTHORIZED_TARGET = {
     "root": "/opt/qq_bot",
     "service": "qq-bot.service",
     "napcatContainer": "napcat",
-    "videoCacheHost": "/opt/napcat/cache/qq-bot-media",
+    "videoCacheHost": "/home/maintain/napcat/cache/qq-bot-media",
     "videoCacheContainer": "/app/napcat/cache/qq-bot-media",
 }
 
@@ -821,13 +821,9 @@ def _parse_napcat_runtime_identity(output: str) -> tuple[int, int]:
 def _is_napcat_main_qq_command(command: str) -> bool:
     argv = command.split()
     return (
-        bool(argv)
-        and argv[0].endswith("/opt/QQ/qq")
-        and not any(item.startswith("--type=") for item in argv[1:])
-        and any(
-            argv[index] == "-q" and index + 1 < len(argv) and argv[index + 1].isdigit()
-            for index in range(len(argv))
-        )
+        len(argv) == 4
+        and argv[:3] == ["/opt/QQ/qq", "--no-sandbox", "-q"]
+        and argv[3].isdigit()
     )
 
 

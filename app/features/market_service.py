@@ -21,6 +21,12 @@ class _SectorSpec:
     company: str
 
 
+@dataclass(frozen=True)
+class _StockLookupQuery:
+    candidates: tuple[str, ...]
+    symbol: str | None = None
+
+
 _SECTOR_SPECS = {
     "a_share": (
         _SectorSpec("白酒", "600519.SH", "贵州茅台"),
@@ -119,6 +125,8 @@ _BATCH_SECTOR_SYMBOLS = {
     "us_share": dict(zip((spec.name for spec in _SECTOR_SPECS["us_share"]), _US_SHARE_SECTOR_SYMBOLS, strict=True)),
 }
 _WATCHLIST_PAGE_SIZE = 4
+_WATCHLIST_QUERY_CONCURRENCY = 8
+_STOCK_NAME_MAX_CHARS = 64
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 
 
@@ -138,13 +146,21 @@ class MarketCommandService:
         providers: dict[str, MarketDataProvider],
         default_alert_threshold_percent: float = 3.0,
         command_timeout_seconds: float = 20.0,
+        provider_timeout_seconds: float | None = None,
     ) -> None:
         self._repository = repository
         self._providers = providers
         self._default_threshold = default_alert_threshold_percent
         self._command_timeout_seconds = command_timeout_seconds
+        self._provider_timeout_seconds = (
+            provider_timeout_seconds
+            if provider_timeout_seconds is not None
+            else command_timeout_seconds
+        )
 
     async def handle(self, message: NormalizedMessage) -> MarketCommandResult | None:
+        if any(char in message.text for char in "\r\n\t"):
+            return None
         text = " ".join(message.text.strip().split())
         if text in {"#A股", "#美股"}:
             market = "a_share" if text == "#A股" else "us_share"
@@ -158,8 +174,9 @@ class MarketCommandService:
             text,
         )
         if watch_match is not None:
-            page = int(watch_match.group(2) or "1")
-            if page <= 0:
+            page_value = watch_match.group(2)
+            page = int(page_value) if page_value is not None else None
+            if page is not None and page <= 0:
                 return MarketCommandResult(
                     True,
                     "页码必须从 1 开始",
@@ -177,7 +194,7 @@ class MarketCommandService:
                 return await self._lookup_stock(query)
         return None
 
-    async def _lookup_stock(self, query: str) -> MarketCommandResult:
+    async def _lookup_stock(self, query: _StockLookupQuery) -> MarketCommandResult:
         provider = self._providers.get("a_share")
         if provider is None:
             return MarketCommandResult(
@@ -187,8 +204,15 @@ class MarketCommandService:
             )
         started = time.perf_counter()
         try:
+            if query.symbol is not None:
+                operation = provider.quote("a_share", query.symbol)
+            else:
+                quote_by_name = getattr(provider, "quote_by_name", None)
+                if not callable(quote_by_name):
+                    raise RuntimeError("stock name lookup is unavailable")
+                operation = quote_by_name("a_share", query.candidates)
             quote = await asyncio.wait_for(
-                provider.quote("a_share", query),
+                operation,
                 timeout=self._command_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -211,20 +235,8 @@ class MarketCommandService:
                 "个股查询失败：数据源返回格式无效",
                 "stock_lookup_failed",
             )
-        name = quote.name or query
-        change = _quote_change_percent(quote)
-        change_text = f"，涨跌 {change:+.2f}%" if change is not None else ""
-        previous_text = (
-            f"，昨收 {quote.previous_close:.2f}"
-            if quote.previous_close is not None
-            else ""
-        )
-        text = (
-            f"{name}（{quote.symbol}）：现价 {quote.price:.2f}"
-            f"{change_text}{previous_text}\n"
-            f"来源：{quote.source}，数据时间{_format_market_time(quote.observed_at)}；"
-            "数据可能延迟，仅供参考，不用于自动交易"
-        )
+        name = quote.name or query.candidates[0]
+        text = _format_stock_quote(quote, fallback_name=name)
         return MarketCommandResult(True, text, "stock_lookup")
 
     async def _overview(self, market: str, label: str) -> MarketCommandResult:
@@ -341,11 +353,13 @@ class MarketCommandService:
         except Exception:
             quotes = []
         elapsed = time.perf_counter() - started
-        by_symbol = {
-            str(quote.symbol).upper(): quote
-            for quote in quotes
-            if isinstance(quote, MarketQuote)
-        }
+        by_symbol: dict[str, MarketQuote] = {}
+        for quote in quotes:
+            if not isinstance(quote, MarketQuote):
+                continue
+            normalized_symbol = _normalize_stock_symbol(quote.symbol)
+            if normalized_symbol:
+                by_symbol[normalized_symbol] = quote
         blocks: list[str] = []
         complete = not timed_out
         for sector in sectors:
@@ -436,7 +450,7 @@ class MarketCommandService:
         message: NormalizedMessage,
         *,
         details: bool,
-        page: int,
+        page: int | None,
     ) -> MarketCommandResult:
         items = await self._repository.list_for_scope(
             message.user_id,
@@ -445,40 +459,96 @@ class MarketCommandService:
         )
         if not items:
             return MarketCommandResult(True, "你在当前会话还没有自选股", "stock_list_empty")
-        start = (page - 1) * _WATCHLIST_PAGE_SIZE
-        selected_items = items[start : start + _WATCHLIST_PAGE_SIZE]
-        blocks = [""] * len(items)
-        for offset, item in enumerate(selected_items):
-            provider = self._providers.get(item.market)
-            if provider is None:
-                blocks[start + offset] = f"{item.symbol}：行情功能未配置"
-                continue
-            try:
-                quote = await provider.quote(item.market, item.symbol)
-            except Exception:
-                blocks[start + offset] = f"{item.symbol}：行情获取失败"
-                continue
-            blocks[start + offset] = _format_watch_item(
-                item,
-                quote,
-                details=details,
-            )
-        structured = build_structured_reply(
-            header="我的股票",
-            blocks=blocks,
-            page=page,
-            page_size=_WATCHLIST_PAGE_SIZE,
-            next_command=(
-                f"#我的股票{' 详情' if details else ''} --page {page + 1}"
-            ),
-            footer="数据可能延迟，仅供参考，不用于自动交易",
+        start = 0 if page is None else (page - 1) * _WATCHLIST_PAGE_SIZE
+        selected_items = (
+            items
+            if page is None
+            else items[start : start + _WATCHLIST_PAGE_SIZE]
         )
+        selected_lines = await self._load_watch_lines(
+            selected_items,
+            details=details,
+        )
+        if page is None:
+            merged = "\n".join(selected_lines)
+            structured = StructuredReply(
+                messages=(merged,),
+                overflow_message_groups=(tuple(selected_lines),),
+            )
+        else:
+            blocks = [""] * len(items)
+            blocks[start : start + len(selected_lines)] = selected_lines
+            structured = build_structured_reply(
+                header="我的股票",
+                blocks=blocks,
+                page=page,
+                page_size=_WATCHLIST_PAGE_SIZE,
+                next_command=(
+                    f"#我的股票{' 详情' if details else ''} --page {page + 1}"
+                ),
+                footer="数据可能延迟，仅供参考，不用于自动交易",
+            )
         return MarketCommandResult(
             True,
             structured.text,
             "stock_list",
             structured=structured,
         )
+
+    async def _load_watch_lines(
+        self,
+        items: list[StockWatchItem],
+        *,
+        details: bool,
+    ) -> list[str]:
+        if not items:
+            return []
+        semaphore = asyncio.Semaphore(_WATCHLIST_QUERY_CONCURRENCY)
+
+        async def load(item: StockWatchItem) -> str:
+            provider = self._providers.get(item.market)
+            if provider is None:
+                return f"{item.symbol}：行情功能未配置"
+            try:
+                async with semaphore:
+                    quote = await asyncio.wait_for(
+                        provider.quote(item.market, item.symbol),
+                        timeout=self._provider_timeout_seconds,
+                    )
+            except asyncio.TimeoutError:
+                return f"{item.symbol}：行情获取超时"
+            except Exception:
+                return f"{item.symbol}：行情获取失败"
+            if not isinstance(quote, MarketQuote):
+                return f"{item.symbol}：行情获取失败"
+            return _format_watch_item(
+                item,
+                quote,
+                details=details,
+            )
+
+        tasks = [asyncio.create_task(load(item)) for item in items]
+        try:
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=self._command_timeout_seconds,
+                return_when=asyncio.ALL_COMPLETED,
+            )
+            lines = [f"{item.symbol}：行情获取超时" for item in items]
+            indexes = {task: index for index, task in enumerate(tasks)}
+            for task in done:
+                index = indexes[task]
+                try:
+                    lines[index] = task.result()
+                except BaseException:
+                    lines[index] = f"{items[index].symbol}：行情获取失败"
+            return lines
+        finally:
+            unfinished = [task for task in tasks if not task.done()]
+            for task in unfinished:
+                task.cancel()
+            if unfinished:
+                await asyncio.wait(unfinished, timeout=0.1)
 
 
 def _normalize_symbol(raw: str) -> tuple[str, str]:
@@ -493,17 +563,41 @@ def _normalize_symbol(raw: str) -> tuple[str, str]:
     raise ValueError("invalid symbol")
 
 
-def _normalize_lookup_query(raw: str) -> str | None:
+def _normalize_lookup_query(raw: str) -> _StockLookupQuery | None:
     value = raw.strip()
     if re.fullmatch(r"\d{5}", value):
         value = value.zfill(6)
     if re.fullmatch(r"\d{6}", value):
-        return _normalize_symbol(value)[0]
+        symbol = _normalize_symbol(value)[0]
+        return _StockLookupQuery((symbol,), symbol=symbol)
     if re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", value.upper()):
-        return value.upper()
-    if re.fullmatch(r"[\u4e00-\u9fff]{2,20}", value):
-        return value
+        symbol = value.upper()
+        return _StockLookupQuery((symbol,), symbol=symbol)
+    name_match = re.fullmatch(
+        r"(?P<primary>[\u4e00-\u9fff]{2,20})"
+        r"(?:[（(](?P<alias>[\u4e00-\u9fff]{1,20})[）)])?",
+        value,
+    )
+    if name_match is not None:
+        primary = name_match.group("primary")
+        alias = name_match.group("alias")
+        derived = () if alias else _derive_company_name_candidates(primary)
+        candidates = tuple(
+            dict.fromkeys(
+                item
+                for item in (primary, alias, *derived)
+                if item
+            )
+        )
+        return _StockLookupQuery(candidates)
     return None
+
+
+def _derive_company_name_candidates(value: str) -> tuple[str, ...]:
+    for suffix in ("有限责任公司", "股份有限公司", "有限公司", "股份公司", "股份"):
+        if value.endswith(suffix) and len(value) - len(suffix) >= 2:
+            return (value[: -len(suffix)],)
+    return ()
 
 
 def _parse_options(parts: list[str]) -> dict[str, float]:
@@ -560,7 +654,7 @@ def _format_batched_sector_report(
     for index, quote in enumerate(selected, start=1):
         change = _quote_change_percent(quote)
         change_text = f"{change:+.2f}%" if change is not None else "未知"
-        name = quote.name or quote.symbol
+        name, symbol = _normalize_stock_identity(quote)
         currency = "￥" if quote.market == "a_share" else "$"
         previous = (
             f"{quote.previous_close:.2f}{currency}"
@@ -569,7 +663,7 @@ def _format_batched_sector_report(
         )
         price = f"{currency}{quote.price:.2f}" if currency == "$" else f"{quote.price:.2f}￥"
         lines.append(
-            f"{index}、{name} 股票代码 {quote.symbol} 昨日收盘：{previous}，"
+            f"{index}、{name} 股票代码 {symbol} 昨日收盘：{previous}，"
             f"当前价格：{price}，涨跌：{change_text}"
         )
     if len(selected) < 10:
@@ -669,22 +763,61 @@ def _build_market_brief(
     return "\n".join(lines)
 
 
+def _format_stock_quote(
+    quote: MarketQuote,
+    *,
+    fallback_name: str | None = None,
+) -> str:
+    name, symbol = _normalize_stock_identity(quote, fallback_name=fallback_name)
+    label = (
+        f"{name}（{symbol}）"
+        if name != symbol
+        else symbol
+    )
+    parts = [f"{label}：现价 {quote.price:.2f}"]
+    change = _quote_change_percent(quote)
+    if change is not None:
+        parts.append(f"涨跌 {change:+.2f}%")
+    if quote.previous_close is not None:
+        parts.append(f"昨收 {quote.previous_close:.2f}")
+    return "，".join(parts)
+
+
+def _normalize_stock_identity(
+    quote: MarketQuote,
+    *,
+    fallback_name: str | None = None,
+) -> tuple[str, str]:
+    symbol = _normalize_stock_symbol(quote.symbol)
+    if not symbol:
+        symbol = "代码未知"
+    name = " ".join(
+        str(quote.name or fallback_name or symbol).split()
+    )[:_STOCK_NAME_MAX_CHARS]
+    if not name:
+        name = symbol
+    return name, symbol
+
+
+def _normalize_stock_symbol(value: object) -> str:
+    return "".join(str(value or "").split()).upper()[:24]
+
+
 def _format_watch_item(
     item: StockWatchItem,
     quote: MarketQuote,
     *,
     details: bool,
 ) -> str:
-    parts = [f"{item.symbol}：{quote.price:.2f}"]
-    if item.cost_price:
+    base = _format_stock_quote(quote, fallback_name=item.symbol)
+    if not details:
+        return base
+    parts = [base]
+    if item.cost_price is not None and item.cost_price > 0:
         profit_percent = (quote.price - item.cost_price) / item.cost_price * 100
         parts.append(f"持仓盈亏率 {profit_percent:+.2f}%")
-    change = _quote_change_percent(quote)
-    if change is not None:
-        parts.append(f"当日涨跌 {change:+.2f}%")
-    if details and item.quantity is not None:
+    if item.quantity is not None:
         parts.append(f"数量 {item.quantity:g}")
-    parts.append(f"{quote.source}，{quote.observed_at or '时间未知'}")
     return "，".join(parts)
 
 
