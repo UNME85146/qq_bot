@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -16,6 +17,10 @@ from urllib.parse import quote as url_quote
 import httpx
 
 from app.features.contracts import MarketDataProvider, MarketQuote
+from app.features.hithink_market_provider import (
+    HITHINK_OFFICIAL_BASE_URL,
+    HiThinkMarketProvider,
+)
 from app.features.provider_health import (
     CircuitBreaker,
     ProviderHealthRegistry,
@@ -153,16 +158,14 @@ class AkShareMarketProvider:
 
     @staticmethod
     def _quote_sync(market: str, symbol: str) -> MarketQuote:
-        import akshare as ak
-
-        frame = ak.stock_zh_a_spot_em()
+        if market == "a_share" and _is_a_share_code_symbol(symbol):
+            return _akshare_tencent_code_quote(market, symbol)
+        frame = _akshare_tencent_frame(market)
         return _akshare_quotes_from_frame(market, frame, [symbol], strict=True)[0]
 
     @staticmethod
     def _quotes_sync(market: str, symbols: list[str]) -> list[MarketQuote]:
-        import akshare as ak
-
-        frame = ak.stock_zh_a_spot_em()
+        frame = _akshare_tencent_frame(market)
         return _akshare_quotes_from_frame(market, frame, symbols, strict=False)
 
     @staticmethod
@@ -170,13 +173,91 @@ class AkShareMarketProvider:
         market: str,
         candidates: Sequence[str],
     ) -> MarketQuote:
-        import akshare as ak
-
-        frame = ak.stock_zh_a_spot_em()
+        frame = _akshare_tencent_frame(market)
         matched = _akshare_name_match(frame, candidates)
         if matched.empty:
             raise RuntimeError("stock name was not found")
         return _akshare_quote_from_row(market, matched.iloc[0], requested_symbol="")
+
+
+def _akshare_tencent_frame(market: str):
+    if market != "a_share":
+        raise ValueError("AkShare only supports A shares")
+    import akshare as ak
+
+    raw = ak.stock_zh_a_spot_tx()
+    rows = _normalize_akshare_tencent_rows(raw.to_dict("records"))
+    if not rows:
+        raise RuntimeError("AkShare returned no valid A-share prices")
+    return type(raw)(rows)
+
+
+def _is_a_share_code_symbol(symbol: str) -> bool:
+    return re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", symbol.strip().upper()) is not None
+
+
+def _akshare_tencent_code_quote(market: str, symbol: str) -> MarketQuote:
+    if market != "a_share":
+        raise ValueError("AkShare only supports A shares")
+    import requests
+
+    normalized = symbol.strip().upper()
+    code, exchange = normalized.split(".")
+    response = requests.get(
+        "https://qt.gtimg.cn/q=" + exchange.lower() + code,
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.content.decode("gbk", errors="replace")
+    match = re.search(r'v_[^=]+="([^"]*)"', payload)
+    if match is None:
+        raise RuntimeError("Tencent returned an invalid quote")
+    fields = match.group(1).split("~")
+    if len(fields) < 8 or fields[2] != code:
+        raise RuntimeError("Tencent did not return the requested stock")
+    price = _coerce_float(fields[3])
+    previous = _coerce_float(fields[4])
+    volume = _coerce_float(fields[6])
+    if price is None or price <= 0 or previous is None or previous <= 0:
+        raise RuntimeError("Tencent returned no current quote")
+    # The quote endpoint keeps the last price for suspended symbols; zero volume
+    # with no price movement is treated as unavailable instead of current data.
+    if volume == 0 and price == previous:
+        raise RuntimeError("Tencent quote is suspended or unavailable")
+    return MarketQuote(
+        market=market,
+        symbol=f"{code}.{exchange}",
+        name=fields[1].strip(),
+        price=price,
+        previous_close=previous,
+        change_percent=((price - previous) / previous * 100) if previous else None,
+        source="腾讯证券 via AkShare",
+        observed_at=datetime.now(_BEIJING_TIME_ZONE).isoformat(),
+        delayed=True,
+    )
+
+
+def _normalize_akshare_tencent_rows(records: list[dict]) -> list[dict]:
+    rows = []
+    for record in records:
+        symbol = re.fullmatch(r"(sh|sz|bj)([0-9]{6})", str(record.get("code", "")))
+        price = _coerce_float(record.get("zxj"))
+        # Tencent may retain the last traded price while state=S is suspended.
+        if symbol is None or record.get("state") not in {"", None} or price is None or price <= 0:
+            continue
+        change_amount = _coerce_float(record.get("zd"))
+        previous = round(price - change_amount, 4) if change_amount is not None else None
+        if previous is not None and previous <= 0:
+            previous = None
+        rows.append({
+            "代码": symbol.group(2),
+            "交易所": symbol.group(1).upper(),
+            "名称": str(record.get("name") or ""),
+            "最新价": price,
+            "昨收": previous,
+            "涨跌幅": _coerce_float(record.get("zdf")),
+        })
+    return rows
 
 
 def _akshare_quotes_from_frame(
@@ -248,7 +329,13 @@ def _akshare_quote_from_row(market: str, row, *, requested_symbol: str) -> Marke
     code = str(row["代码"]).strip().zfill(6)
     raw_symbol = requested_symbol.upper()
     _raw_code, _separator, raw_suffix = raw_symbol.partition(".")
-    suffix = raw_suffix if raw_suffix in {"SH", "SZ", "BJ"} else _a_share_suffix(code)
+    actual_suffix = str(row.get("交易所", ""))
+    if actual_suffix in {"SH", "SZ", "BJ"}:
+        if raw_suffix and raw_suffix != actual_suffix:
+            raise ValueError("stock exchange does not match the directory")
+        suffix = actual_suffix
+    else:
+        suffix = raw_suffix if raw_suffix in {"SH", "SZ", "BJ"} else _a_share_suffix(code)
     canonical_symbol = f"{code}.{suffix}"
     raw_name = ""
     for column in _AKSHARE_NAME_COLUMNS:
@@ -257,7 +344,7 @@ def _akshare_quote_from_row(market: str, row, *, requested_symbol: str) -> Marke
             if raw_name:
                 break
     price = _coerce_float(row["最新价"])
-    if price is None:
+    if price is None or price <= 0:
         raise RuntimeError("stock quote was unavailable")
     previous = _coerce_float(row["昨收"]) if "昨收" in row.index else None
     raw_change = row["涨跌幅"] if "涨跌幅" in row.index else None
@@ -268,7 +355,7 @@ def _akshare_quote_from_row(market: str, row, *, requested_symbol: str) -> Marke
         price=price,
         previous_close=previous,
         change_percent=change,
-        source="东方财富 via AkShare",
+        source="腾讯证券 via AkShare",
         observed_at=datetime.now(_BEIJING_TIME_ZONE).isoformat(),
         delayed=True,
         name=raw_name or None,
@@ -969,12 +1056,22 @@ def _build_market_provider(
 ) -> tuple[str, str, MarketDataProvider] | None:
     name = config.provider.strip().lower()
     if name == "akshare":
-        return name, config.base_url or "akshare://eastmoney", AkShareMarketProvider()
+        return name, config.base_url or "akshare://tencent", AkShareMarketProvider()
     if name == "yfinance":
         return name, config.base_url or "yfinance://yahoo", YFinanceMarketProvider()
     if name == "sina":
         base_url = config.base_url or "https://hq.sinajs.cn"
         return name, base_url, SinaMarketProvider(base_url)
+    if name == "hithink":
+        api_key_env = config.api_key_env or "QQ_BOT_HITHINK_API_KEY"
+        api_key = os.getenv(api_key_env)
+        if not api_key:
+            raise ValueError("HiThink API key is not configured")
+        base_url = config.base_url or HITHINK_OFFICIAL_BASE_URL
+        return name, base_url, HiThinkMarketProvider(
+            api_key=api_key,
+            base_url=base_url,
+        )
     return None
 
 

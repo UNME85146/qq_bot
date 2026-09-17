@@ -154,15 +154,22 @@ def migrate_runtime_config(
             "circuitRecoverySeconds": 60,
             "aShareFallbacks": [
                 {
-                    "provider": "sina",
-                    "baseUrl": "https://hq.sinajs.cn",
+                    "provider": "akshare",
+                    "baseUrl": "",
                     "apiKeyEnv": "",
                 }
             ],
         },
     )
     markets["enabled"] = True
-    markets["aShare"] = _provider_with_default(markets.get("aShare"), "akshare")
+    markets["aShare"] = {
+        "provider": "hithink",
+        "baseUrl": "",
+        "apiKeyEnv": "QQ_BOT_HITHINK_API_KEY",
+    }
+    markets["aShareFallbacks"] = [
+        {"provider": "akshare", "baseUrl": "", "apiKeyEnv": ""}
+    ]
     markets["usShare"] = _provider_with_default(markets.get("usShare"), "yfinance")
     migrated["markets"] = markets
 

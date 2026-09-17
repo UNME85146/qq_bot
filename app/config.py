@@ -499,7 +499,7 @@ def _load_market_provider_config(raw: dict[str, Any]) -> MarketProviderConfig:
 
 
 def _load_markets_config(raw: dict[str, Any]) -> MarketsConfig:
-    raw_fallbacks = raw.get("aShareFallbacks", [{"provider": "sina"}])
+    raw_fallbacks = raw.get("aShareFallbacks", [{"provider": "akshare"}])
     if not isinstance(raw_fallbacks, list):
         raise ValueError("markets.aShareFallbacks must be an array")
     config = MarketsConfig(
@@ -510,7 +510,10 @@ def _load_markets_config(raw: dict[str, Any]) -> MarketsConfig:
         provider_timeout_seconds=float(raw.get("providerTimeoutSeconds", 15.0)),
         circuit_failure_threshold=int(raw.get("circuitFailureThreshold", 3)),
         circuit_recovery_seconds=float(raw.get("circuitRecoverySeconds", 60.0)),
-        a_share=_load_market_provider_config(raw.get("aShare", {})),
+        a_share=_load_market_provider_config(raw.get("aShare", {
+            "provider": "hithink",
+            "apiKeyEnv": "QQ_BOT_HITHINK_API_KEY",
+        })),
         a_share_fallbacks=tuple(
             _load_market_provider_config(item)
             for item in raw_fallbacks

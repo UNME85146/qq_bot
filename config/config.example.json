@@ -146,14 +146,14 @@
     "circuitFailureThreshold": 3,
     "circuitRecoverySeconds": 60,
     "aShare": {
-      "provider": "akshare",
+      "provider": "hithink",
       "baseUrl": "",
-      "apiKeyEnv": ""
+      "apiKeyEnv": "QQ_BOT_HITHINK_API_KEY"
     },
     "aShareFallbacks": [
       {
-        "provider": "sina",
-        "baseUrl": "https://hq.sinajs.cn",
+        "provider": "akshare",
+        "baseUrl": "",
         "apiKeyEnv": ""
       }
     ],

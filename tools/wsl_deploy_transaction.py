@@ -63,7 +63,7 @@ AUTHORIZED_TARGET = {
     "root": "/opt/qq_bot",
     "service": "qq-bot.service",
     "napcatContainer": "napcat",
-    "videoCacheHost": "/home/maintain/napcat/cache/qq-bot-media",
+    "videoCacheHost": "/opt/napcat/cache/qq-bot-media",
     "videoCacheContainer": "/app/napcat/cache/qq-bot-media",
 }
 
@@ -626,6 +626,7 @@ def _prestage_and_test(
         "PYTHONPATH": str(release),
         "QQ_BOT_CONFIG_PATH": str(config),
         "QQ_BOT_MODEL_API_KEY": "deployment-import-placeholder",
+        "QQ_BOT_HITHINK_API_KEY": "deployment-import-placeholder",
     }
     staged_profile = release / "config/persona_profile.local.json"
     if staged_profile.exists() or staged_profile.is_symlink():

@@ -15,7 +15,7 @@ This GitHub repository is a sanitized public export. The private development tre
 - Current group display names and explicit "do not use this phrase/name" preferences are persisted separately from historical style. Question-like pending rows expire after 30 days by default without being deleted or marked answered.
 - Dedicated structured reply mode for help, market, and search results. Full information messages are attempted first and are summarized once only when OneBot explicitly rejects their length.
 - Information-feature audits store the actual successfully sent bubble text, delivery status, and available OneBot message IDs in schema v4.
-- A-share provider fallback with closed/open/half-open circuit recovery. Individual A-shares can be queried by code, Chinese short name, company name, or a full-width/half-width parenthesized alias. A-share and US-share reports return 20 sector messages with 10 stocks per sector, including name, code, previous close, current price, and percentage change. When a sector does not contain five actual gainers and five actual losers, the report explicitly labels the top/bottom five as relative leaders/laggards.
+- A-share quotes use HiThink as the primary provider and AkShare only as the fallback, with closed/open/half-open circuit recovery. The public template keeps `QQ_BOT_HITHINK_API_KEY` empty; configure it only in an ignored `.env` file or service manager. AkShare fallback uses Tencent Securities for batch and name lookups, while a canonical `000001.SZ`-style code uses the Tencent quote fast path. Missing, non-positive, or suspended prices are unavailable rather than reported as current. Individual A-shares can be queried by code, Chinese short name, company name, or a full-width/half-width parenthesized alias. A-share and US-share reports return 20 sector messages with 10 stocks per sector, including name, code, previous close, current price, and percentage change. When a sector does not contain five actual gainers and five actual losers, the report explicitly labels the top/bottom five as relative leaders/laggards.
 - Automatic Douyin/Bilibili download, categorized news commands, news subscriptions, and scheduled news delivery are disabled. Historical provider and maintenance modules remain available for rollback and audit work but are not routed from group messages.
 - Optional Codex Runway monitoring waits for fixed `Asia/Shanghai` slots at `00:30`, `08:00`, and `18:00`. Trusted X/Twitter text is translated completely into Chinese without application-level truncation; transport splitting occurs only after an explicit OneBot length rejection. The monitor and the daily local-rendered usage-ranking image are disabled by default.
 - OpenAI-compatible speech and image endpoints are optional. Speech supports either binary `/audio/speech` or Chat Completions audio selected by `speech.apiMode`; Chat Audio responses are size-, format-, Base64-, and transcript-validated. Explicit voice commands can be enabled while random voice replies remain disabled, and QQ record delivery is attempted once to avoid duplicate audio after an ambiguous timeout. The historical local TTS service is not shipped.
@@ -26,7 +26,7 @@ This GitHub repository is a sanitized public export. The private development tre
 - NoneBot2 with the OneBot v11 adapter
 - A OneBot implementation such as NapCat using reverse WebSocket
 - `ffmpeg` for bounded GIF/WebP image preprocessing and historical media tooling
-- Optional market dependencies: AkShare and yfinance
+- Optional market dependencies: AkShare (Tencent Securities fallback) and yfinance; HiThink uses the built-in HTTP client
 - Optional video dependencies: yt-dlp and socksio
 
 ## Quick Start
@@ -56,9 +56,9 @@ Configure placeholders in `config/config.json`:
 - `BOT_QQ`, `ROOT_QQ`, `OWNER_QQ`, and `ALLOWED_GROUP_ID`
 - `model.baseUrl`, `model.name`, and the API-key environment variable name
 - OneBot reverse WebSocket host, port, and token environment variable
-- Optional market providers, search provider, speech, image, Codex Runway, and usage-ranking settings
+- Optional market providers, search provider, speech, image, Codex Runway, and usage-ranking settings; the template configures HiThink as the A-share primary provider and AkShare as the only fallback
 
-Set secrets only in `.env` or your service manager. Do not put literal credentials in JSON templates, scripts, shell history, logs, or commits.
+Set secrets only in `.env` or your service manager. The supplied `.env.example` keeps every credential value, including `QQ_BOT_HITHINK_API_KEY`, empty. Do not put literal credentials in JSON templates, scripts, shell history, logs, or commits.
 
 `config/persona_profile.example.json` contains numeric demonstration metrics only so the public example can be validated. For a real deployment, generate your own ignored `persona_profile.local.json`, point `persona.profilePath` to it, and keep source identifiers and raw history out of version control. Runtime has no automatic example-profile fallback.
 
@@ -149,6 +149,7 @@ The private repository carries the full test suite. A public-export smoke check 
 ```powershell
 .\.venv\Scripts\python -m compileall app bot.py tools
 $env:QQ_BOT_MODEL_API_KEY = "placeholder-for-import-check"
+$env:QQ_BOT_HITHINK_API_KEY = "placeholder-for-import-check"
 $env:QQ_BOT_CONFIG_PATH = "config/config.example.json"
 .\.venv\Scripts\python -c "import bot; import nonebot; print(nonebot.get_driver().type)"
 ```

@@ -21,6 +21,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import load_config
+from app.features.hithink_market_provider import (
+    HITHINK_OFFICIAL_BASE_URL,
+    HiThinkMarketProvider,
+)
 from app.features.market_providers import (
     SinaMarketProvider,
 )
@@ -110,6 +114,9 @@ def build_provider_probe_specs(
                         name,
                         str(provider_config.base_url or ""),
                         timeout_seconds,
+                        api_key=values.get(
+                            provider_config.api_key_env or "QQ_BOT_HITHINK_API_KEY", ""
+                        ) if name == "hithink" else "",
                     ),
                 )
             )
@@ -240,6 +247,8 @@ def _market_probe_operation(
     provider: str,
     base_url: str,
     timeout_seconds: float,
+    *,
+    api_key: str = "",
 ) -> Callable[[], Awaitable[None]]:
     if provider in {"akshare", "yfinance"}:
         symbol = "000001.SZ" if provider == "akshare" else "^GSPC"
@@ -258,7 +267,16 @@ def _market_probe_operation(
         return isolated_operation
 
     async def operation() -> None:
-        if provider == "sina":
+        if provider == "hithink":
+            if not api_key:
+                raise ProviderProbeError("auth_error")
+            client = HiThinkMarketProvider(
+                api_key=api_key,
+                base_url=base_url or HITHINK_OFFICIAL_BASE_URL,
+                timeout_seconds=timeout_seconds,
+            )
+            symbol = "000001.SZ"
+        elif provider == "sina":
             client = SinaMarketProvider(
                 base_url or "https://hq.sinajs.cn",
                 timeout_seconds=timeout_seconds,
@@ -353,7 +371,8 @@ def _market_target(provider: str, base_url: str) -> str:
     if base_url:
         return base_url
     return {
-        "akshare": "akshare://eastmoney",
+        "hithink": HITHINK_OFFICIAL_BASE_URL,
+        "akshare": "akshare://tencent",
         "sina": "https://hq.sinajs.cn",
         "yfinance": "yfinance://yahoo",
     }.get(provider, f"{provider}://configured")
