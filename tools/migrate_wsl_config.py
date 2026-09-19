@@ -12,6 +12,9 @@ from typing import Any
 WIKIMEDIA_CORE_ZH = "https://api.wikimedia.org/core/v1/wikipedia/zh/search/page"
 CODEX_RUNWAY_STATUS_URL = "https://www.codexrunway.com/api/status.json"
 USAGE_RANKING_BASE_URL = "https://api.example.com"
+# This module is copied into the standalone WSL deployment bundle.
+CODEX_RUNWAY_INTERVAL_SECONDS = 21_600
+USAGE_RANKING_SEND_TIME = "17:15"
 
 DEFAULT_NEWS_FEEDS = {
     "politics": ("https://feeds.bbci.co.uk/news/world/rss.xml",),
@@ -110,7 +113,7 @@ def migrate_runtime_config(
         {
             "enabled": False,
             "recipientUserId": "",
-            "sendTimes": ["00:30", "08:00", "18:00"],
+            "intervalSeconds": CODEX_RUNWAY_INTERVAL_SECONDS,
             "timezone": "Asia/Shanghai",
             "lookbackSeconds": 36_000,
             "requestTimeoutSeconds": 20,
@@ -118,9 +121,9 @@ def migrate_runtime_config(
             "statusUrl": CODEX_RUNWAY_STATUS_URL,
         },
     )
-    for legacy_key in ("intervalSeconds", "excerptChars", "maxMessageChars"):
+    for legacy_key in ("sendTimes", "excerptChars", "maxMessageChars"):
         migrated["codexRunway"].pop(legacy_key, None)
-    migrated["codexRunway"]["sendTimes"] = ["00:30", "08:00", "18:00"]
+    migrated["codexRunway"]["intervalSeconds"] = CODEX_RUNWAY_INTERVAL_SECONDS
     migrated["codexRunway"]["timezone"] = "Asia/Shanghai"
     migrated["codexRunway"]["lookbackSeconds"] = 36_000
     migrated["codexRunway"]["statusUrl"] = CODEX_RUNWAY_STATUS_URL
@@ -130,7 +133,7 @@ def migrate_runtime_config(
         {
             "enabled": False,
             "recipientUserId": "",
-            "sendTime": "17:30",
+            "sendTime": USAGE_RANKING_SEND_TIME,
             "timezone": "Asia/Shanghai",
             "limit": 50,
             "requestTimeoutSeconds": 20,
@@ -141,6 +144,7 @@ def migrate_runtime_config(
         },
     )
     migrated["usageRankingReport"]["baseUrl"] = USAGE_RANKING_BASE_URL
+    migrated["usageRankingReport"]["sendTime"] = USAGE_RANKING_SEND_TIME
     migrated["usageRankingReport"]["timezone"] = "Asia/Shanghai"
 
     markets = _merge_defaults(

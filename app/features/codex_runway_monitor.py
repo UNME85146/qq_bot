@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
+from contextlib import suppress
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
+from time import monotonic
 from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,7 +17,8 @@ from loguru import logger
 
 from app.features.structured_reply import is_message_too_long_error
 from app.model.llm_client import LlmClient
-from app.models import CodexRunwayConfig
+from app.models import CODEX_RUNWAY_INTERVAL_SECONDS, CodexRunwayConfig
+from app.storage.repositories import ScheduledDeliveryRepository
 
 
 class _PacificFallbackTimeZone(tzinfo):
@@ -105,33 +109,12 @@ async def fetch_codex_runway_feed(
 
 
 def seconds_until_next_codex_runway(
-    now: datetime,
+    now: float,
     *,
-    send_times: Sequence[str],
-    timezone_name: str = "Asia/Shanghai",
+    started_at: float,
 ) -> float:
-    if now.tzinfo is None:
-        raise ValueError("now must be timezone-aware")
-    zone = _runway_time_zone(timezone_name)
-    parsed_times = tuple(_parse_hhmm(value) for value in send_times)
-    if not parsed_times:
-        raise ValueError("send_times must not be empty")
-    local_now = now.astimezone(zone)
-    for day_offset in range(2):
-        scheduled_date = local_now.date() + timedelta(days=day_offset)
-        for scheduled_time in parsed_times:
-            scheduled = datetime.combine(
-                scheduled_date,
-                scheduled_time,
-                tzinfo=zone,
-            )
-            if scheduled <= local_now:
-                continue
-            return max(
-                0.0,
-                (scheduled.astimezone(UTC) - now.astimezone(UTC)).total_seconds(),
-            )
-    raise RuntimeError("could not find the next Codex Runway slot")
+    elapsed = max(0.0, now - started_at)
+    return CODEX_RUNWAY_INTERVAL_SECONDS - elapsed % CODEX_RUNWAY_INTERVAL_SECONDS
 
 
 def build_codex_runway_summary(
@@ -226,37 +209,68 @@ async def codex_runway_worker(
     bot: Any,
     config: CodexRunwayConfig,
     *,
+    deliveries: ScheduledDeliveryRepository,
+    started_at: float,
+    run_id: str,
     record_system_event: Callable[..., Awaitable[None]],
+    can_send: Callable[[], bool] = lambda: True,
     model_client: LlmClient | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    clock: Callable[[], float] = monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     if not config.enabled:
         return
+    interval = CODEX_RUNWAY_INTERVAL_SECONDS
+    slot = max(1, math.floor((clock() - started_at) / interval) + 1)
     while True:
-        delay = seconds_until_next_codex_runway(
-            now(),
-            send_times=config.send_times,
-            timezone_name=config.timezone,
+        deadline = started_at + slot * interval
+        while (remaining := deadline - clock()) > 0:
+            await sleep(remaining)
+        # Resume at the current interval, never replay a backlog of missed intervals.
+        slot = max(slot, math.floor((clock() - started_at) / interval))
+        connection_deadline = started_at + slot * interval + 60
+        while not can_send() and (remaining := connection_deadline - clock()) > 0:
+            await sleep(min(remaining, 1.0))
+        key = dict(
+            job_name="codex_runway",
+            recipient_user_id=config.recipient_user_id,
+            slot_key=f"{run_id}:{slot}",
         )
-        await sleep(delay)
+        retry_unstarted = False
         try:
-            await run_codex_runway_monitor_once(
-                bot,
-                config,
-                record_system_event=record_system_event,
-                model_client=model_client,
-                now=now(),
-            )
+            if not can_send():
+                await record_system_event(
+                    level="WARNING",
+                    event="codex_runway_connection_unavailable",
+                    detail=f"slot={slot}",
+                )
+            elif await deliveries.claim(**key):
+                if not can_send():
+                    await deliveries.release_unstarted(**key)
+                    retry_unstarted = clock() < connection_deadline
+                    continue
+                sent = await run_codex_runway_monitor_once(
+                    bot,
+                    config,
+                    record_system_event=record_system_event,
+                    model_client=model_client,
+                    now=now(),
+                )
+                await deliveries.finish(**key, sent=sent)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("Codex Runway worker iteration failed: {}", type(exc).__name__)
-            await record_system_event(
-                level="ERROR",
-                event="codex_runway_worker_failed",
-                detail=f"category={_error_category(exc)}",
-            )
+            with suppress(Exception):
+                await record_system_event(
+                    level="ERROR",
+                    event="codex_runway_worker_failed",
+                    detail=f"category={_error_category(exc)}",
+                )
+        finally:
+            if not retry_unstarted:
+                slot = max(slot + 1, math.floor((clock() - started_at) / interval) + 1)
 
 
 def _build_summary_details(
@@ -587,24 +601,6 @@ def _trusted_source_url(event: dict[str, Any]) -> str:
     ):
         return ""
     return value
-
-
-def _runway_time_zone(name: str) -> tzinfo:
-    if name != "Asia/Shanghai":
-        raise ValueError("Codex Runway timezone must be Asia/Shanghai")
-    try:
-        return ZoneInfo(name)
-    except ZoneInfoNotFoundError:
-        return DISPLAY_TIME_ZONE
-
-
-def _parse_hhmm(value: str) -> time:
-    if not isinstance(value, str) or not re.fullmatch(r"\d{2}:\d{2}", value):
-        raise ValueError("Codex Runway send times must use HH:MM")
-    hour, minute = (int(part) for part in value.split(":"))
-    if hour > 23 or minute > 59:
-        raise ValueError("Codex Runway send times must use HH:MM")
-    return time(hour=hour, minute=minute)
 
 
 def _parse_datetime(value: Any) -> datetime | None:

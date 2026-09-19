@@ -587,5 +587,23 @@ MIGRATIONS = (
         name="audit delivery evidence and member preferences",
         action=_migration_004_audit_and_member_preferences,
     ),
+    Migration(
+        version=5,
+        name="scheduled private delivery claims",
+        statements=(
+            """
+            CREATE TABLE scheduled_delivery_claims (
+              job_name TEXT NOT NULL,
+              recipient_user_id TEXT NOT NULL,
+              slot_key TEXT NOT NULL,
+              outcome TEXT NOT NULL DEFAULT 'claimed'
+                CHECK(outcome IN ('claimed', 'sent', 'failed_or_unknown')),
+              claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+              completed_at TEXT,
+              PRIMARY KEY(job_name, recipient_user_id, slot_key)
+            )
+            """,
+        ),
+    ),
 )
 LATEST_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)

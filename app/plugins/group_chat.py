@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -82,6 +83,7 @@ from app.storage.repositories import (
     GroupNewsSubscriptionRepository,
     StockWatchRepository,
     GroupPendingQuestionRepository,
+    ScheduledDeliveryRepository,
 )
 
 _config = load_config(os.getenv("QQ_BOT_CONFIG_PATH", "config/config.json"))
@@ -97,6 +99,7 @@ _permission_service = PermissionService(_config.qq)
 _group_mute_repository = GroupMuteStateRepository(_config.storage.database_path)
 _bot_sent_repository = BotSentMessageRepository(_config.storage.database_path)
 _pending_question_repository = GroupPendingQuestionRepository(_config.storage.database_path)
+_scheduled_delivery_repository = ScheduledDeliveryRepository(_config.storage.database_path)
 _pending_question_service = GroupPendingQuestionService(
     repository=_pending_question_repository,
 )
@@ -214,9 +217,15 @@ _reminder_worker_started = False
 _codex_runway_worker_started = False
 _usage_ranking_worker_started = False
 _runtime_bot: Bot | None = None
+_scheduled_started_at: float | None = None
+_scheduled_run_id = uuid4().hex
 
 
 class _RuntimeBotProxy:
+    @staticmethod
+    def is_connected() -> bool:
+        return _runtime_bot is not None
+
     @staticmethod
     def _current() -> Bot:
         if _runtime_bot is None:
@@ -271,10 +280,17 @@ class GroupRandomVoiceDecision:
 group_chat = on_message(priority=10, block=False)
 
 
+async def _capture_scheduled_startup() -> None:
+    global _scheduled_started_at
+    if _scheduled_started_at is None:
+        _scheduled_started_at = time.monotonic()
+
+
 async def _start_reminder_worker(bot: Bot) -> None:
     global _reminder_worker_started
     global _codex_runway_worker_started, _usage_ranking_worker_started, _runtime_bot
     _runtime_bot = bot
+    await _capture_scheduled_startup()
     if _reminder_worker_started:
         return
     _reminder_worker_started = True
@@ -298,6 +314,10 @@ async def _start_reminder_worker(bot: Bot) -> None:
             codex_runway_worker(
                 _runtime_bot_proxy,
                 _config.codex_runway,
+                deliveries=_scheduled_delivery_repository,
+                started_at=_scheduled_started_at,
+                run_id=_scheduled_run_id,
+                can_send=_runtime_bot_proxy.is_connected,
                 record_system_event=_conversation_service.record_system_event,
                 model_client=_conversation_service.model_client,
             )
@@ -308,6 +328,8 @@ async def _start_reminder_worker(bot: Bot) -> None:
             usage_ranking_report_worker(
                 _runtime_bot_proxy,
                 _config.usage_ranking_report,
+                deliveries=_scheduled_delivery_repository,
+                can_send=_runtime_bot_proxy.is_connected,
                 record_system_event=_conversation_service.record_system_event,
             )
         )
@@ -342,6 +364,7 @@ async def _scheduled_group_send_allowed(group_id: str) -> bool:
 
 try:
     driver = get_driver()
+    driver.on_startup(_capture_scheduled_startup)
     driver.on_bot_connect(_start_reminder_worker)
     driver.on_bot_disconnect(_clear_runtime_bot)
 except ValueError:

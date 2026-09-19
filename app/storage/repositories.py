@@ -1539,6 +1539,63 @@ class GroupPendingQuestionRepository:
         )
 
 
+class ScheduledDeliveryRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def claim(
+        self, *, job_name: str, recipient_user_id: str, slot_key: str
+    ) -> bool:
+        # Commit before any external send; even an ambiguous result consumes the slot.
+        async with connect_database(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO scheduled_delivery_claims (
+                  job_name, recipient_user_id, slot_key
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(job_name, recipient_user_id, slot_key) DO NOTHING
+                """,
+                (job_name, recipient_user_id, slot_key),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def finish(
+        self, *, job_name: str, recipient_user_id: str, slot_key: str, sent: bool
+    ) -> None:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                UPDATE scheduled_delivery_claims
+                SET outcome = ?, completed_at = datetime('now')
+                WHERE job_name = ? AND recipient_user_id = ? AND slot_key = ?
+                  AND outcome = 'claimed'
+                """,
+                (
+                    "sent" if sent else "failed_or_unknown",
+                    job_name,
+                    recipient_user_id,
+                    slot_key,
+                ),
+            )
+            await db.commit()
+
+    async def release_unstarted(
+        self, *, job_name: str, recipient_user_id: str, slot_key: str
+    ) -> None:
+        # Only the successful claimant may release, before starting any external work.
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                DELETE FROM scheduled_delivery_claims
+                WHERE job_name = ? AND recipient_user_id = ? AND slot_key = ?
+                  AND outcome = 'claimed'
+                """,
+                (job_name, recipient_user_id, slot_key),
+            )
+            await db.commit()
+
+
 class ScheduledTaskRepository:
     def __init__(self, database_path: str | Path) -> None:
         self._database_path = Path(database_path)

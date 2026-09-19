@@ -7,6 +7,7 @@ import re
 import stat
 import tempfile
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -15,8 +16,9 @@ import httpx
 from loguru import logger
 from PIL import Image, ImageDraw, ImageFont
 
-from app.models import UsageRankingReportConfig
+from app.models import USAGE_RANKING_SEND_TIME, UsageRankingReportConfig
 from app.plugins.send_helper import send_private_image_direct
+from app.storage.repositories import ScheduledDeliveryRepository
 
 
 REQUIRED_USER_FIELDS = {
@@ -48,7 +50,7 @@ def seconds_until_next_usage_report(
     local_now = now.astimezone(zone)
     hour, minute = (int(part) for part in send_time.split(":"))
     scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if local_now >= scheduled:
+    if local_now > scheduled:
         scheduled += timedelta(days=1)
     return (scheduled.astimezone(UTC) - now.astimezone(UTC)).total_seconds()
 
@@ -344,35 +346,78 @@ async def usage_ranking_report_worker(
     bot: Any,
     config: UsageRankingReportConfig,
     *,
+    deliveries: ScheduledDeliveryRepository,
     record_system_event: Callable[..., Awaitable[None]],
+    can_send: Callable[[], bool] = lambda: True,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     if not config.enabled:
         return
+    current = now()
+    scheduled = current + timedelta(seconds=seconds_until_next_usage_report(
+        current, send_time=USAGE_RANKING_SEND_TIME, timezone_name="Asia/Shanghai"
+    ))
     while True:
-        delay = seconds_until_next_usage_report(
-            now(),
-            send_time=config.send_time,
-            timezone_name=config.timezone,
+        # Bounded sleeps observe wall-clock corrections and never send on early wakeup.
+        while (remaining := (scheduled - now()).total_seconds()) > 0:
+            await sleep(min(remaining, 60.0))
+        connection_deadline = scheduled + timedelta(seconds=60)
+        while not can_send() and (remaining := (connection_deadline - now()).total_seconds()) > 0:
+            await sleep(min(remaining, 1.0))
+        current = now()
+        if current < scheduled:
+            continue
+        report_date = scheduled.astimezone(SHANGHAI_TIME_ZONE).date()
+        key = dict(
+            job_name="usage_ranking_report",
+            recipient_user_id=config.recipient_user_id,
+            slot_key=report_date.isoformat(),
         )
-        await sleep(delay)
+        retry_unstarted = False
         try:
-            await run_usage_ranking_report_once(
-                bot,
-                config,
-                record_system_event=record_system_event,
-                now=now(),
-            )
+            if not 0 <= (current - scheduled).total_seconds() < 60:
+                await record_system_event(
+                    level="WARNING",
+                    event="usage_ranking_report_slot_missed",
+                    detail=f"report_date={report_date.isoformat()}",
+                )
+            elif not can_send():
+                await record_system_event(
+                    level="WARNING",
+                    event="usage_ranking_report_connection_unavailable",
+                    detail=f"report_date={report_date.isoformat()}",
+                )
+            elif await deliveries.claim(**key):
+                current = now()
+                if not can_send() or not 0 <= (current - scheduled).total_seconds() < 60:
+                    await deliveries.release_unstarted(**key)
+                    retry_unstarted = current < connection_deadline
+                    continue
+                sent = await run_usage_ranking_report_once(
+                    bot,
+                    config,
+                    record_system_event=record_system_event,
+                    now=current,
+                )
+                await deliveries.finish(**key, sent=sent)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("Usage ranking worker failed: {}", type(exc).__name__)
-            await record_system_event(
-                level="ERROR",
-                event="usage_ranking_report_worker_failed",
-                detail=f"category={_error_category(exc)}",
-            )
+            with suppress(Exception):
+                await record_system_event(
+                    level="ERROR",
+                    event="usage_ranking_report_worker_failed",
+                    detail=f"category={_error_category(exc)}",
+                )
+        finally:
+            if not retry_unstarted:
+                current = now()
+                next_deadline = current + timedelta(seconds=seconds_until_next_usage_report(
+                    current, send_time=USAGE_RANKING_SEND_TIME, timezone_name="Asia/Shanghai"
+                ))
+                scheduled = max(scheduled + timedelta(days=1), next_deadline)
 
 
 def _read_refresh_token(path: Path) -> str:

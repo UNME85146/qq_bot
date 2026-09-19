@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+CODEX_RUNWAY_INTERVAL_SECONDS = 21_600
+USAGE_RANKING_SEND_TIME = "17:15"
+
+
 @dataclass(frozen=True)
 class QQConfig:
     self_id: str
@@ -400,9 +404,7 @@ class NewsConfig:
 class CodexRunwayConfig:
     enabled: bool = False
     recipient_user_id: str = ""
-    # Kept for private-config migration; scheduling uses send_times.
-    interval_seconds: int = 14_400
-    send_times: tuple[str, ...] = ("00:30", "08:00", "18:00")
+    interval_seconds: int = CODEX_RUNWAY_INTERVAL_SECONDS
     timezone: str = "Asia/Shanghai"
     lookback_seconds: int = 36_000
     request_timeout_seconds: float = 20.0
@@ -417,7 +419,7 @@ class CodexRunwayConfig:
 class UsageRankingReportConfig:
     enabled: bool = False
     recipient_user_id: str = ""
-    send_time: str = "17:30"
+    send_time: str = USAGE_RANKING_SEND_TIME
     timezone: str = "Asia/Shanghai"
     limit: int = 50
     request_timeout_seconds: float = 20.0
