@@ -174,7 +174,7 @@ Passing local tests or probes does not prove live QQ delivery, provider success,
 2. **Install private runtime.** Install Python 3.12 venv support, Docker, `ffmpeg`, `fontconfig`, and a verified `cloudflared` binary. Place the frozen source under a private runtime root and install the reviewed `.[market,video,dashboard]` dependencies with pinned constraints. Create `.env` and `config/config.json` from examples, set `0600`, populate real values only there, configure OneBot reverse WS on `127.0.0.1:8081` and HTTP API root on loopback `3100`. Restore DB, profile, and checked stickers into their private runtime locations.
 3. **Prepare pinned NapCat.** Pull an architecture-checked, digest-pinned image. Before host-network startup configure WebUI `127.0.0.1:6099`, OneBot HTTP `127.0.0.1:3100` with a matching token, and reverse WS `ws://127.0.0.1:8081/onebot/v11/ws`. Use separate `config`, `QQ`, and `cache` mounts. The production limits are 3 GiB RAM, 4 GiB RAM+swap, 2 CPUs, 512 PIDs, and `10m` x 3 JSON logs. Never expose these control ports or reuse another machine's login cache.
 4. **Install dashboard and tunnel.** Run `.venv/bin/python tools/dashboard_password.py <private-hash-file>` interactively with a password of at least 16 characters. Configure `qqbot-dashboard.service` with the exact HTTPS origin, private password hash, NapCat root, and separate `0600` OneBot/WebUI token copies; its process binds only `127.0.0.1:3011`, without Docker or sudo access. Use a Cloudflare Tunnel ingress rule from the operator's hostname to `http://127.0.0.1:3011` followed by `http_status:404`; validate ingress. Start the dashboard first, then stop/disable only the retired site/tunnel and enable the new tunnel. Check public `/login=200`, anonymous `/api/status=401` and `/api/qq/qr=401`.
-5. **Establish one QQ session.** Keep the previous WSL Bot/NapCat stopped; start `qq-bot.service` and the pinned container, then sign in on the HTTPS dashboard and scan a fresh QR. The page polls every 10 seconds and shows an existing QR at most 180 seconds old when QQ is not online. It does **not** generate another QR automatically; use **Refresh QR** if missing/expired. Online QQ hides the QR. Run `tools/inspect_runtime_status.py --summary --require-ready --limit 5`, verify three consecutive ready probes, DB integrity, container/image identity, loopback ports, sticker hashes, and the user-visible QQ login. Scheduled six-hour summaries and the 17:15 Beijing screenshot need their own natural-time acceptance.
+5. **Establish one QQ session.** Before promoting the remote QQ login, disable and stop the retired WSL `qq-bot.service`, change its NapCat container to `restart=no` and stop it, remove the matching Windows WSL autostart task/holder, then terminate the old distro. A Windows-only autostart removal is insufficient: manually booting WSL can otherwise start a second QQ session. Verify the internal settings after any controlled WSL boot. Start the remote `qq-bot.service` and pinned container, then sign in on the HTTPS dashboard and scan a fresh QR. The page polls every 10 seconds and shows an existing QR at most 180 seconds old when QQ is not online. It does **not** generate another QR automatically; use **Refresh QR** if missing/expired. Online QQ hides the QR. Run `tools/inspect_runtime_status.py --summary --require-ready --limit 5`, verify three consecutive ready probes, DB integrity, container/image identity, loopback ports, sticker hashes, and the user-visible QQ login. Scheduled six-hour summaries and the 17:15 Beijing screenshot need their own natural-time acceptance.
 6. **Clean up and retain rollback.** Generate a separate SHA-256-bound, exact-target cleanup plan after acceptance; delete retired site/staging, unused caches, apt downloads, and unreferenced old images once. Verify the receipt, target absence, current image, Bot/QQ readiness, and DB again. Do not prune current NapCat `config/QQ/cache`, credentials, logs, database, venv, or retained rollback archives. If deletion partly succeeds, verify recovery read-only rather than replaying. For rollback, first stop the remote QQ writer, restore the verified prior data/units/route, and recheck login. Publish only secret-scanned private code and a separate sanitized public export.
 
 <a id="chinese"></a>
@@ -223,20 +223,20 @@ Windows PowerShell 可改用 `python -m venv .venv`、`.\.venv\Scripts\python -m
 
 ## Ubuntu 24.04 生产部署与回滚
 
-This is a public-safe deployment sequence. Replace all example paths and domains with privately configured values; never commit real hostnames, QQ IDs, tokens, password hashes, databases, stickers, or login cache. The Bot, NapCat, authenticated dashboard, and HTTPS tunnel run on one server. A stopped previous runtime can be retained for rollback, but only one QQ session may run at a time.
+本节是公开安全的部署流程，所有路径与域名均为示例；真实主机名、QQ 标识、Token、口令哈希、数据库、素材和登录缓存不能进入仓库。Bot、NapCat、鉴权后台与 HTTPS tunnel 位于同一生产服务器。可保留已停止的旧环境供回滚，但任何时刻只能有一份 QQ 会话。
 
-### 1. Freeze source, backups, and prerequisites
+### 1. 冻结源码、备份与先决条件
 
-1. Confirm SSH identity, capacity, existing services, and listening ports. Record which old website/tunnel is being replaced; do not disturb unrelated workloads.
-2. Freeze one reviewed source revision, dependency constraints, and a SHA-256 manifest in a staging directory. Stop the old Bot/NapCat before taking a final consistent SQLite backup with `sqlite3.Connection.backup()`; verify `PRAGMA quick_check` and schema. Do not archive a live database directory or migrate QQ login cache.
-3. Transfer the backed-up database, validated low-sensitivity persona profile, and sticker archive privately. Extract stickers to an isolated directory, reject symlinks/path traversal, compare per-file hashes/counts, and only then place them in the runtime. Raw chats, tokens, and profile provenance never belong in the public export.
-4. Back up the replaced site's files/units/database before cutover, and keep the stopped source runtime until live QQ login and post-deployment checks succeed.
+1. 核对 SSH 身份、容量、现有服务与端口；记录将被替换的旧网页/tunnel，不影响无关工作负载。
+2. 在 staging 中冻结经审阅的源码版本、依赖约束与 SHA-256 清单。源端停 Bot/NapCat 后以 `sqlite3.Connection.backup()` 生成一致数据库副本，并检查 `PRAGMA quick_check` 与 schema；不得直接归档在线数据库目录或迁移 QQ 登录缓存。
+3. 私下传输备份数据库、已校验低敏画像与表情包归档。素材先在隔离目录解包，拒绝符号链接/路径穿越，逐文件核对数量与哈希后再放入运行目录；原始聊天、Token 与画像来源不进入公开仓库。
+4. 切换前备份旧网站文件、unit 与数据库；直到真实 QQ 登录和部署后验收通过才考虑清理停用源环境。
 
-Install Ubuntu Python 3.12 virtualenv support, Docker, `ffmpeg`, `fontconfig`, and a verified `cloudflared` binary through approved sources. Check the architecture and digest of a pinned NapCat release before use; a moving `latest` tag is not a release lock. Do not expose dashboard, WebUI, or OneBot ports to the public Internet.
+从可信渠道安装 Ubuntu Python 3.12 venv、Docker、`ffmpeg`、`fontconfig` 和经验证的 `cloudflared`。使用前检查 NapCat 固定版本的架构与摘要，动态 `latest` 标签不构成版本锁；后台、WebUI 和 OneBot 原生端口不暴露到公网。
 
-### 2. Install the Bot and its private configuration
+### 2. 安装 Bot 与私有配置
 
-In an illustrative layout, use `BOT_ROOT=/opt/qq_bot` and `NAPCAT_ROOT=/opt/napcat`; a dedicated unprivileged service user owns these directories. Install the frozen source and prepare its environment:
+示例目录为 `BOT_ROOT=/opt/qq_bot`、`NAPCAT_ROOT=/opt/napcat`，由独立的非特权服务用户持有。安装冻结源码并准备环境：
 
 ```bash
 cd "$BOT_ROOT"
@@ -248,26 +248,26 @@ chmod 600 .env config/config.json
 mkdir -p data/stickers logs runtime_artifacts/secrets
 ```
 
-Set `.env` and `config/config.json` privately: QQ allowlists, model endpoint/key, optional HiThink key, and matching strong OneBot tokens. Set the reverse WebSocket listener to `127.0.0.1:8081` and update `onebot.apiRoot` to the chosen loopback HTTP port (this deployment pattern uses `3100`). Install the validated persona profile under `0600` permissions, set its configured path, restore the SQLite backup under `data/`, and verify sticker hashes. Do not print secret values in logs or shell output.
+私下配置 `.env` 和 `config/config.json`：QQ 白名单、模型端点/密钥、可选同花顺密钥与一致的强 OneBot Token。反向 WS 监听 `127.0.0.1:8081`，`onebot.apiRoot` 指向本机 HTTP 端口（此示例为 `3100`）。校验后的画像置于 `0600` 文件并设置路径，恢复 SQLite 副本到 `data/`，核对表情包哈希；日志和命令输出不能打印密钥。
 
-### 3. Configure NapCat before enabling host networking
+### 3. 先配置 NapCat，再启用 host 网络
 
-Create private `config`, `QQ`, and `cache` bind-mount directories under `NAPCAT_ROOT`. Stage the pinned image's configuration before starting it with `--network host`: WebUI binds `127.0.0.1:6099`, OneBot HTTP binds `127.0.0.1:3100` with the configured token, and reverse WebSocket connects to `ws://127.0.0.1:8081/onebot/v11/ws`. Give the dashboard service user separate private `0600` copies of WebUI/OneBot tokens; it must not need access to NapCat's UID-owned config directory or Docker socket. Do not copy login state from another host.
+在 `NAPCAT_ROOT` 建立私有 `config`、`QQ`、`cache` 挂载目录；`--network host` 启动前先配置固定镜像。WebUI 绑定 `127.0.0.1:6099`，带 Token 的 OneBot HTTP 绑定 `127.0.0.1:3100`，反向 WS 指向 `ws://127.0.0.1:8081/onebot/v11/ws`。后台用户只读独立的 `0600` WebUI/OneBot Token 副本，不访问 NapCat UID 目录或 Docker socket；不复制其他机器登录态。
 
-Use a pinned image ID, bind mounts for those three directories, a restart policy, 3 GiB memory, 4 GiB memory+swap, 2 CPUs, 512 PIDs, and bounded JSON logs (`10m` x 3). Verify actual image ID, mounts, and loopback listeners after startup. Preserve the current NapCat `QQ`, `config`, and `cache` directories during cleanup: they can hold login and QR/runtime state.
+容器使用固定镜像 ID、三个挂载目录、重启策略、3 GiB 内存、4 GiB 内存加 swap、2 CPU、512 PID 和 `10m` × 3 日志上限。启动后核对实际镜像、挂载与 loopback 监听。清理时保护 NapCat 的 `QQ`、`config` 和缓存**根目录**；缓存文件需单独核实过期/未引用及 QQ 登录状态后才能删除。
 
-### 4. Install the dashboard and HTTPS tunnel
+### 4. 安装后台与 HTTPS tunnel
 
-Create the dashboard password hash interactively; the command accepts a password of at least 16 characters twice and writes a private `0600` scrypt hash. Do not pass a password on the command line:
+交互式输入至少 16 字符口令两次，生成私有 `0600` scrypt 哈希，不把密码放在命令参数中：
 
 ```bash
 cd "$BOT_ROOT"
 .venv/bin/python tools/dashboard_password.py "$BOT_ROOT/runtime_artifacts/secrets/dashboard-admin.hash"
 ```
 
-Run `tools/run_dashboard.py` in `qqbot-dashboard.service` as the unprivileged service user. Set `QQ_BOT_DASHBOARD_ORIGIN` to the exact HTTPS origin, `QQ_BOT_DASHBOARD_PASSWORD_HASH_FILE` to the private hash, `QQ_BOT_NAPCAT_ROOT` to the private NapCat root, `QQ_BOT_DASHBOARD_ONEBOT_HTTP_PORT=3100`, and the separate `QQ_BOT_DASHBOARD_ONEBOT_TOKEN_FILE` and `QQ_BOT_DASHBOARD_WEBUI_TOKEN_FILE` paths. Use `PYTHON_DOTENV_DISABLED=1`, `UMask=0077`, `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectSystem=strict`, and `MemoryMax=512M`. The dashboard listens only on `127.0.0.1:3011` and requires HTTPS-origin authentication; do not grant sudo or Docker-socket access.
+用非特权服务用户在 `qqbot-dashboard.service` 运行 `tools/run_dashboard.py`。设置精确 HTTPS 来源 `QQ_BOT_DASHBOARD_ORIGIN`、私有哈希文件、NapCat 根目录、`QQ_BOT_DASHBOARD_ONEBOT_HTTP_PORT=3100` 和独立的 OneBot/WebUI Token 文件。使用 `PYTHON_DOTENV_DISABLED=1`、`UMask=0077`、`NoNewPrivileges=true`、`PrivateTmp=true`、`ProtectSystem=strict`、`MemoryMax=512M`。后台仅监听 `127.0.0.1:3011` 且要求 HTTPS 来源鉴权，不授予 Docker socket 或 sudo。
 
-Route only the dashboard through a private Cloudflare Tunnel credential and a validated ingress config; substitute an operator-controlled hostname:
+只将后台经私有 Cloudflare Tunnel 凭据和已校验的 ingress 对外提供，示例域名须替换为操作者控制的地址：
 
 ```yaml
 ingress:
@@ -276,11 +276,11 @@ ingress:
   - service: http_status:404
 ```
 
-Run `cloudflared tunnel ingress validate` before cutover. Install `qq-bot.service`, `qqbot-dashboard.service`, and `qqbot-dashboard-tunnel.service` with the vetted working directories and executable paths. Bring up the dashboard and verify its loopback `/login` before switching the public route. Then stop/disable **only** the retired website/tunnel, retain their verified archives and unit backups, and enable the dashboard tunnel. HTTPS `/login` must return `200`; anonymous `/api/status` and `/api/qq/qr` must return `401`. Keep dashboard `3011`, WebUI `6099`, OneBot HTTP `3100`, and reverse WS `8081` on loopback only.
+切换前运行 `cloudflared tunnel ingress validate`，按已审阅路径安装 `qq-bot.service`、`qqbot-dashboard.service` 与 `qqbot-dashboard-tunnel.service`。先启动后台并验证 loopback `/login`，再只停用旧网站及其 tunnel、保留归档和 unit 备份、启用新 tunnel。HTTPS `/login` 应为 `200`，匿名 `/api/status` 和 `/api/qq/qr` 应为 `401`。后台 `3011`、WebUI `6099`、OneBot HTTP `3100` 与反向 WS `8081` 仅在 loopback 监听。
 
-### 5. Establish one QQ login and verify the real path
+### 5. 建立唯一 QQ 登录并验证真实链路
 
-Keep the previous runtime stopped. Start the Bot and pinned NapCat container, confirm reverse WebSocket connectivity, log into the dashboard, and scan the fresh QR with the QQ client. The page polls status every 10 seconds. If QQ is not reported online, it requests an **existing** QR at most 180 seconds old; it does **not** automatically regenerate a missing/expired QR. Click **Refresh QR** when needed. While QQ is online the QR is hidden and both QR endpoints reject online requests.
+远端 QQ 登录前，旧 WSL 中先 `systemctl disable --now qq-bot.service`、将旧 NapCat 容器改为 `restart=no` 并停止，移除 Windows 对应的 WSL 自启任务和 holder，再终止旧发行版。**仅停 Windows 任务不够**：手工启动 WSL 时 systemd/Docker 仍可能拉起第二份 QQ。受控启动 WSL 后应复核内层状态，日常不要为监测远端而启动它。然后启动远端 Bot 和固定镜像 NapCat，确认反向 WS 连通，再登录后台、扫码。网页每 10 秒轮询；QQ 未被报告在线时只请求 180 秒内的**已有**二维码，缺失或过期不会自动生成，需点“刷新二维码”；在线时隐藏二维码并拒绝刷新请求。
 
 ```bash
 cd "$BOT_ROOT"
@@ -289,10 +289,10 @@ cd "$BOT_ROOT"
 systemctl show -p ActiveState -p NRestarts -p User qq-bot.service qqbot-dashboard.service qqbot-dashboard-tunnel.service
 ```
 
-Check three consecutive `ready=true` probes, current Docker image/container identity, WebUI/OneBot loopback, HTTPS access control, SQLite integrity, sticker hashes, and the user's actual QQ login. If enabled, observe the first natural six-hour summary and `17:15 Asia/Shanghai` screenshot separately; health probes are not QQ-delivery proof. Do not send synthetic QQ messages just to validate readiness.
+核对连续三次 `ready=true`、Docker 镜像/容器身份、WebUI/OneBot 的 loopback、HTTPS 鉴权、SQLite 完整性、素材哈希和用户 QQ 客户端实际登录。若启用定时任务，首个六小时汇总与北京时间 17:15 截图须分别等待自然到点验收；健康探针不能证明 QQ 投递，也不要合成 QQ 消息充数。
 
-### 6. Clean up with a bounded plan and retain rollback
+### 6. 有界清理与回滚保留
 
-After client login, prepare a separate SHA-256-bound cleanup plan listing exact paths/image references and protecting active services, the current image, database, credentials, NapCat login/cache, and retained backup packages. Remove only unused staging, retired website files/units, pip/node-gyp/apt downloads, unreferenced old images, and project test/build caches. Apply the plan once and independently verify target absence, protected units and image, database, and three ready probes. On a partial deletion or receipt failure, do read-only recovery checks rather than replaying deletion.
+用户登录后再准备独立的 SHA-256 清理计划，列出精确路径与镜像引用，保护活动服务/镜像、数据库、凭据、NapCat 登录目录/缓存根目录和保留的回滚包。只删除无用 staging、退役网站/旧 unit、pip/node-gyp/apt 下载、无引用镜像以及项目测试/构建缓存；缓存文件逐项核实过期和引用。计划一次执行，独立复核目标缺失、保护项、数据库及三次 ready；删除或写回执不完整时只做只读恢复核验，不重放。
 
-For rollback, stop the remote Bot and NapCat first so there is only one QQ session. Restore the vetted previous runtime or retired site from its verified archive, re-enable only the appropriate units and route, then validate DB and login again. Keep rollback archives out of Git. Test and secret-scan private code before pushing it; publish this GitHub repository only from a separate allowlist export with placeholders and empty example secrets.
+回滚须先停止远端 Bot/NapCat，保证 QQ 单会话，再从经验证的归档恢复旧运行环境/网站，只恢复相应 unit 和路由，重验数据库与登录。回滚归档不入 Git；私有代码先测试/扫密钥，公开 GitHub 只接收独立白名单脱敏导出，示例凭据保持空值。
