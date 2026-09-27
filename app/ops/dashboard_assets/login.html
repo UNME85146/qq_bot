@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>后台登录 · QQ Bot</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body class="login-page">
+  <header class="site-header"><span class="wordmark">QQ Bot</span><span class="header-caption">运行后台</span></header>
+  <main class="login-main">
+    <section class="login-panel" aria-labelledby="login-heading">
+      <span class="accent-line"></span>
+      <h1 id="login-heading">后台登录</h1>
+      <p class="muted">请输入运维口令，查看 QQ 在线情况和服务器资源。</p>
+      <form id="login-form">
+        <label for="password">运维口令</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <p id="login-error" class="error-message" role="alert" hidden></p>
+        <button type="submit" class="button-primary">登录后台</button>
+      </form>
+    </section>
+  </main>
+  <footer class="site-footer">此页面仅供授权运维使用</footer>
+</body>
+</html>

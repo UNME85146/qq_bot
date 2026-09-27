@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>运行状态 · QQ Bot</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body class="dashboard-page">
+  <header class="site-header"><span class="wordmark">QQ Bot</span><span class="header-caption">运行后台</span><button id="logout" class="button-subtle" type="button">退出登录</button></header>
+  <main class="dashboard-main">
+    <div class="page-heading"><div><h1>运行状态</h1><p class="muted">QQ 连接与主机资源</p></div><span id="last-check" class="muted">正在读取状态…</span></div>
+    <section class="status-band" aria-label="服务状态">
+      <div class="status-block"><span class="field-label">QQ 登录</span><strong id="qq-state" aria-live="polite">检测中</strong></div>
+      <div class="status-block"><span class="field-label">Bot 服务</span><strong id="bot-state" aria-live="polite">检测中</strong></div>
+      <div class="status-block"><span class="field-label">数据更新时间</span><strong id="update-time">—</strong></div>
+    </section>
+    <section class="metrics" aria-label="服务器资源">
+      <h2>服务器资源</h2>
+      <div class="metric-list">
+        <div class="metric-row"><div class="metric-title"><span>CPU</span><strong id="cpu-value">—</strong></div><div class="meter" role="progressbar" aria-label="CPU 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="cpu-meter"><span id="cpu-bar"></span></div></div>
+        <div class="metric-row"><div class="metric-title"><span>内存</span><strong id="memory-value">—</strong></div><div class="meter" role="progressbar" aria-label="内存使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="memory-meter"><span id="memory-bar"></span></div></div>
+        <div class="metric-row"><div class="metric-title"><span>磁盘</span><strong id="disk-value">—</strong></div><div class="meter" role="progressbar" aria-label="磁盘使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="disk-meter"><span id="disk-bar"></span></div></div>
+      </div>
+    </section>
+    <section id="qr-section" class="qr-section" hidden aria-labelledby="qr-heading">
+      <div class="section-heading"><div><h2 id="qr-heading">QQ 登录</h2><p class="muted">请使用手机 QQ 扫描二维码完成授权。</p></div><button id="qr-refresh" class="button-outline" type="button">刷新二维码</button></div>
+      <div class="qr-content"><img id="qr-image" alt="QQ 登录二维码" width="220" height="220" hidden><p id="qr-message" class="muted" role="status">正在查询二维码…</p></div>
+    </section>
+    <p id="status-error" class="error-message" role="alert" hidden></p>
+  </main>
+  <footer class="site-footer">数据每 10 秒自动更新 · 页面不保存 QQ 消息与密钥</footer>
+</body>
+</html>
