@@ -1,0 +1,11 @@
+{
+  "qq_path": "/opt/QQ/qq",
+  "quick_login_qq": "",
+  "default_host": "127.0.0.1",
+  "default_port": 13000,
+  "auth_token": "",
+  "debug": false,
+  "debug_pb": false,
+  "qq_console": false,
+  "qq_args": "--no-sandbox --disable-dev-shm-usage"
+}
