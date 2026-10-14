@@ -423,6 +423,7 @@ class SpeechConfig:
 @dataclass(frozen=True)
 class ImageGenerationConfig:
     enabled: bool = False
+    group_enabled: bool = False
     base_url: str = ""
     api_key_env: str = ""
     generation_endpoint: str = "/images/generations"
@@ -432,6 +433,14 @@ class ImageGenerationConfig:
     send_timeout_seconds: float = 60.0
     cache_dir: str = "runtime_artifacts/image-generation"
     edit_window_seconds: int = 180
+
+
+@dataclass(frozen=True)
+class GroupFeaturesConfig:
+    chat_enabled: bool = True
+    image_understanding_enabled: bool = True
+    markets_enabled: bool = True
+    search_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -457,6 +466,7 @@ class AppConfig:
     search: SearchConfig = field(default_factory=SearchConfig)
     speech: SpeechConfig = field(default_factory=SpeechConfig)
     image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)
+    group_features: GroupFeaturesConfig = field(default_factory=GroupFeaturesConfig)
 
 
 @dataclass(frozen=True)

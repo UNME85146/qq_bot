@@ -16,10 +16,21 @@ from app.features.contracts import ImageAsset
 from app.models import ImageGenerationConfig
 
 
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_BASE64_IMAGE_CHARS = 4 * ((MAX_IMAGE_BYTES + 2) // 3)
+
+
 class ImageProviderError(RuntimeError):
-    def __init__(self, category: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        category: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+    ) -> None:
         self.category = category
         self.retryable = retryable
+        self.status_code = status_code
         super().__init__(category)
 
 
@@ -107,7 +118,7 @@ class OpenAICompatibleImageProvider:
             encoded = item.get("b64_json") if isinstance(item, dict) else None
             image_url = item.get("url") if isinstance(item, dict) else None
             if encoded:
-                image_bytes = base64.b64decode(encoded, validate=True)
+                image_bytes = _decode_image_base64(encoded)
                 content_type = _detect_image_type(image_bytes)[0]
             elif isinstance(image_url, str) and image_url:
                 image_bytes, content_type = await self._download_image_url(image_url)
@@ -145,27 +156,35 @@ class OpenAICompatibleImageProvider:
             follow_redirects=False,
             transport=self._transport,
         ) as client:
-            response = await client.get(image_url)
-            if response.is_redirect or response.is_informational:
-                raise ValueError("image URL redirects are not allowed")
-            response.raise_for_status()
-            max_bytes = 8 * 1024 * 1024
-            content_length = response.headers.get("content-length")
-            if content_length and int(content_length) > max_bytes:
-                raise ValueError("image response is too large")
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > max_bytes:
+            async with client.stream("GET", image_url) as response:
+                if response.is_redirect or response.is_informational:
+                    raise ValueError("image URL redirects are not allowed")
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if content_length and int(content_length) > MAX_IMAGE_BYTES:
                     raise ValueError("image response is too large")
-                chunks.append(chunk)
-            body = b"".join(chunks)
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            detected_type, _ = _detect_image_type(body)
-            if content_type not in {"image/png", "image/jpeg", "image/webp"}:
-                content_type = detected_type
-            return body, content_type
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_IMAGE_BYTES:
+                        raise ValueError("image response is too large")
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                detected_type, _ = _detect_image_type(body)
+                if content_type not in {"image/png", "image/jpeg", "image/webp"}:
+                    content_type = detected_type
+                return body, content_type
+
+
+def _decode_image_base64(encoded: object) -> bytes:
+    if not isinstance(encoded, str) or len(encoded) > MAX_BASE64_IMAGE_CHARS:
+        raise ValueError("image response is too large")
+    image_bytes = base64.b64decode(encoded, validate=True)
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise ValueError("image response is too large")
+    return image_bytes
 
 
 def _detect_image_type(data: bytes) -> tuple[str, str]:
@@ -240,23 +259,35 @@ def _endpoint_url(base_url: str, endpoint: str) -> str:
 
 def _classify_response_error(response: httpx.Response) -> ImageProviderError:
     status_code = response.status_code
+    error_text = _response_error_text(response)
+    if _is_no_compatible_account_error(error_text):
+        return ImageProviderError(
+            "upstream_no_compatible_account",
+            retryable=False,
+            status_code=status_code,
+        )
     if status_code in {401, 403}:
-        return ImageProviderError("authentication", retryable=False)
+        return ImageProviderError("authentication", retryable=False, status_code=status_code)
     if status_code == 404:
-        return ImageProviderError("capability_unsupported", retryable=False)
+        return ImageProviderError("capability_unsupported", retryable=False, status_code=status_code)
     if status_code in {400, 409, 422}:
-        error_text = _response_error_text(response)
         if any(
             marker in error_text
             for marker in ("content_policy", "safety", "moderation", "policy violation")
         ):
-            return ImageProviderError("safety_rejected", retryable=False)
-        return ImageProviderError("model_or_parameter_unsupported", retryable=False)
+            return ImageProviderError("safety_rejected", retryable=False, status_code=status_code)
+        return ImageProviderError(
+            "model_or_parameter_unsupported",
+            retryable=False,
+            status_code=status_code,
+        )
     if status_code == 429:
-        return ImageProviderError("rate_limited", retryable=True)
+        return ImageProviderError("rate_limited", retryable=True, status_code=status_code)
     if status_code >= 500:
-        return ImageProviderError("provider_unavailable", retryable=True)
-    return ImageProviderError("request_failed", retryable=False)
+        # A 5xx can arrive after the provider accepted a billable request.
+        # Do not replay image generation or edit requests automatically.
+        return ImageProviderError("provider_unavailable", retryable=False, status_code=status_code)
+    return ImageProviderError("request_failed", retryable=False, status_code=status_code)
 
 
 def _response_error_text(response: httpx.Response) -> str:
@@ -269,4 +300,16 @@ def _response_error_text(response: httpx.Response) -> str:
         return ""
     return " ".join(
         str(error.get(field, "")).lower() for field in ("code", "type", "message")
+    )
+
+
+def _is_no_compatible_account_error(error_text: str) -> bool:
+    return any(
+        marker in error_text
+        for marker in (
+            "no available compatible account",
+            "no compatible account",
+            "no_available_compatible_account",
+            "no_compatible_account",
+        )
     )

@@ -134,8 +134,22 @@ FEATURE_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
     ("markets.enabled", "行情查询", "启用股票行情与提醒"),
     ("search.enabled", "联网搜索", "启用信息搜索功能"),
     ("imageGeneration.enabled", "图片生成", "启用图片生成与编辑"),
+    ("groupFeatures.chatEnabled", "群聊文字回复", "允许群内提问、@ 和上下文追问的文字回复"),
+    ("groupFeatures.imageUnderstandingEnabled", "群聊图片理解", "允许分析群内图片并生成回应"),
+    ("groupFeatures.marketsEnabled", "群聊行情查询", "允许群内行情命令和股票预警，需开启全局行情功能"),
+    ("groupFeatures.searchEnabled", "群聊联网搜索", "允许群内搜索与评价请求，需开启全局联网搜索"),
+    ("imageGeneration.groupEnabled", "群聊生图", "允许群内生成和修改图片，默认关闭，需开启全局图片生成"),
 )
 FEATURE_PATHS = {key: tuple(key.split(".", 1)) for key, _, _ in FEATURE_DEFINITIONS}
+GROUP_FEATURE_KEYS = {key for key in FEATURE_PATHS if key.startswith("groupFeatures.")} | {
+    "imageGeneration.groupEnabled", "speech.groupEnabled",
+}
+FEATURE_DEFAULTS = {
+    "speech.privateEnabled": True,
+    "speech.groupEnabled": True,
+    "speech.randomReplyEnabled": True,
+    **{key: True for key in FEATURE_PATHS if key.startswith("groupFeatures.")},
+}
 ALLOWED_REASONING_EFFORTS = {"", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MAX_MODEL_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -227,13 +241,12 @@ class SystemDashboardBackend:
             raise DashboardConfigError("imageGeneration configuration is invalid")
         features = []
         for key, label, description in FEATURE_DEFINITIONS:
-            block_name, field_name = FEATURE_PATHS[key]
-            block = raw.get(block_name, {})
             features.append({
                 "key": key,
                 "label": label,
                 "description": description,
-                "enabled": bool(block.get(field_name, False)) if isinstance(block, dict) else False,
+                "enabled": _feature_value(raw, key),
+                "scope": "group" if key in GROUP_FEATURE_KEYS else "global",
             })
         return {
             "model": {
@@ -679,7 +692,7 @@ def _validate_model_base_url(value: str) -> str:
 def _feature_value(raw: dict[str, Any], key: str) -> bool:
     block_name, field_name = FEATURE_PATHS[key]
     block = raw.get(block_name, {})
-    return bool(block.get(field_name, False)) if isinstance(block, dict) else False
+    return bool(block.get(field_name, FEATURE_DEFAULTS.get(key, False))) if isinstance(block, dict) else False
 
 
 def _apply_feature_patch(raw: dict[str, Any], features: list[dict[str, Any]] | dict[str, Any] | None) -> None:
@@ -690,7 +703,7 @@ def _apply_feature_patch(raw: dict[str, Any], features: list[dict[str, Any]] | d
         values = features
     elif isinstance(features, list):
         for item in features:
-            if not isinstance(item, dict) or set(item) - {"key", "enabled", "label", "description"} or "key" not in item or "enabled" not in item:
+            if not isinstance(item, dict) or set(item) - {"key", "enabled", "label", "description", "scope"} or "key" not in item or "enabled" not in item:
                 raise DashboardConfigError("features contains an invalid item")
             key = item["key"]
             if key in values:

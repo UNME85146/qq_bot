@@ -25,6 +25,7 @@ from app.models import (
     CodexRunwayConfig,
     ConversationSessionsConfig,
     ImageGenerationConfig,
+    GroupFeaturesConfig,
     LimitsConfig,
     LoggingConfig,
     MarketProviderConfig,
@@ -71,6 +72,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     search = _config_block(raw, "search")
     speech = _config_block(raw, "speech")
     image_generation = _config_block(raw, "imageGeneration")
+    group_features = _config_block(raw, "groupFeatures")
 
     api_key_env = str(model["apiKeyEnv"])
     api_key = os.getenv(api_key_env) or None
@@ -171,6 +173,12 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         search=_load_search_config(search),
         speech=_load_speech_config(speech),
         image_generation=_load_image_generation_config(image_generation),
+        group_features=GroupFeaturesConfig(
+            chat_enabled=bool(group_features.get("chatEnabled", True)),
+            image_understanding_enabled=bool(group_features.get("imageUnderstandingEnabled", True)),
+            markets_enabled=bool(group_features.get("marketsEnabled", True)),
+            search_enabled=bool(group_features.get("searchEnabled", True)),
+        ),
     )
 
 
@@ -526,6 +534,7 @@ def _load_speech_config(raw: dict[str, Any]) -> SpeechConfig:
 def _load_image_generation_config(raw: dict[str, Any]) -> ImageGenerationConfig:
     config = ImageGenerationConfig(
         enabled=bool(raw.get("enabled", False)),
+        group_enabled=bool(raw.get("groupEnabled", False)),
         base_url=str(raw.get("baseUrl", "")).rstrip("/"),
         api_key_env=str(raw.get("apiKeyEnv", "")).strip(),
         generation_endpoint=str(

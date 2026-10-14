@@ -213,6 +213,7 @@ function normalizeFeatures(raw) {
       label: String(item.label || labelForFeature(item.key || item.name || "")),
       description: String(item.description || "重启 Bot 后生效。"),
       enabled: Boolean(item.enabled),
+      scope: item.scope === "group" ? "group" : "global",
     })).filter((item) => item.key);
   }
   if (raw && typeof raw === "object") {
@@ -223,6 +224,7 @@ function normalizeFeatures(raw) {
         label: String(item.label || labelForFeature(key)),
         description: String(item.description || "重启 Bot 后生效。"),
         enabled: Boolean(typeof value === "object" ? item.enabled : value),
+        scope: item.scope === "group" ? "group" : "global",
       };
     });
   }
@@ -231,9 +233,14 @@ function normalizeFeatures(raw) {
 
 function renderFeatures(rawFeatures) {
   const features = normalizeFeatures(rawFeatures);
-  const list = byId("feature-list");
+  renderFeatureSection(features.filter((item) => item.scope !== "group"), "feature-list", "feature-count");
+  renderFeatureSection(features.filter((item) => item.scope === "group"), "group-feature-list", "group-feature-count");
+}
+
+function renderFeatureSection(features, listId, countId) {
+  const list = byId(listId);
   const enabledCount = features.filter((item) => item.enabled).length;
-  byId("feature-count").textContent = `${enabledCount} / ${features.length} 已开启`;
+  byId(countId).textContent = `${enabledCount} / ${features.length} 已开启`;
   list.replaceChildren();
   if (!features.length) {
     const empty = document.createElement("p");
@@ -253,7 +260,7 @@ function renderFeatures(rawFeatures) {
     input.checked = feature.enabled;
     input.addEventListener("change", () => {
       const enabled = [...list.querySelectorAll("input[type=checkbox]")].filter((item) => item.checked).length;
-      byId("feature-count").textContent = `${enabled} / ${features.length} 已开启`;
+      byId(countId).textContent = `${enabled} / ${features.length} 已开启`;
     });
     const slider = document.createElement("span");
     slider.className = "switch-track";

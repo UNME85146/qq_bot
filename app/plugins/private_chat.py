@@ -634,6 +634,7 @@ async def _try_handle_private_image_generation_feature(
         )
         return True
 
+    image_started = time.monotonic()
     sent = await _image_service.execute(
         message,
         command.prompt,
@@ -652,23 +653,30 @@ async def _try_handle_private_image_generation_feature(
             reason="private_image_edited" if command.edit else "private_image_generated",
             model_called=True,
             safety_blocked=False,
+            elapsed_ms=round((time.monotonic() - image_started) * 1000),
+            delivery_status="sent",
+            sent_message_ids=tuple(
+                value for value in (_extract_sent_message_id(sent),) if value is not None
+            ),
         )
         return True
 
-    failure_text = _image_service.failure_message(message.trace_id) or "图片处理失败：未知错误"
-    await send_reply_bubbles(
-        bot,
-        event,
-        failure_text,
-        scope_type="private",
-        reply_config=_config.reply,
-        on_send_error=lambda exc, index, bubble: _record_send_error(
-            message.trace_id,
-            exc,
-            index,
-            "send_private_image_status_failed",
-        ),
-    )
+    delivery_status = _image_service.failure_delivery_status(message.trace_id)
+    if delivery_status != "unknown":
+        failure_text = _image_service.failure_message(message.trace_id) or "图片处理失败：未知错误"
+        await send_reply_bubbles(
+            bot,
+            event,
+            failure_text,
+            scope_type="private",
+            reply_config=_config.reply,
+            on_send_error=lambda exc, index, bubble: _record_send_error(
+                message.trace_id,
+                exc,
+                index,
+                "send_private_image_status_failed",
+            ),
+        )
     _remember_private_non_random_outgoing(message.user_id, message.message_id)
     category = _image_service.failure_category(message.trace_id)
     await _conversation_service.record_reply_audit(
@@ -677,6 +685,9 @@ async def _try_handle_private_image_generation_feature(
         reason=f"private_image_{category or 'failed'}",
         model_called=category not in {"unconfigured", "empty_prompt", "no_recent_image", "edit_window_expired"},
         safety_blocked=category == "safety_rejected",
+        elapsed_ms=round((time.monotonic() - image_started) * 1000),
+        delivery_status=delivery_status,
+        sent_message_ids=(),
     )
     return True
 

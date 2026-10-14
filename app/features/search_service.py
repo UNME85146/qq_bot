@@ -31,6 +31,15 @@ class SearchCommandResult:
     structured: StructuredReply | None = None
 
 
+def is_search_command(text: str) -> bool:
+    normalized = " ".join(text.strip().split())
+    return bool(re.fullmatch(
+        r"#chat\s+(?:(?:帮我\s*)?查一下(?:\s+(.+?))?(?:\s+--page\s+(-?\d+))?|评价一下.*)",
+        normalized,
+        re.IGNORECASE,
+    ))
+
+
 class GroupSearchCommandService:
     def __init__(
         self,

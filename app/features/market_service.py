@@ -138,6 +138,18 @@ class MarketCommandResult:
     structured: StructuredReply | None = None
 
 
+def is_market_command(text: str) -> bool:
+    if any(char in text for char in "\r\n\t"):
+        return False
+    normalized = " ".join(text.strip().split())
+    if normalized in {"#A股", "#美股"} or normalized.startswith(("#股票添加 ", "#股票删除 ")):
+        return True
+    if re.fullmatch(r"#我的股票(?:\s+(详情))?(?:\s+--page\s+(-?\d+))?", normalized):
+        return True
+    match = re.fullmatch(r"#([^\s#]{1,20})", normalized)
+    return match is not None and _normalize_lookup_query(match.group(1)) is not None
+
+
 class MarketCommandService:
     def __init__(
         self,

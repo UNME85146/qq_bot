@@ -61,6 +61,7 @@ class ImageGenerationService:
         self._expired_keys: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._failures: dict[str, tuple[str, str, int]] = {}
+        self._provider_http_status: dict[str, int | None] = {}
 
     async def execute(
         self,
@@ -110,41 +111,51 @@ class ImageGenerationService:
             return None
 
         stage = "edit" if edit else "generate"
+        retry_stage = "image_edit" if edit else "image_generate"
+        started_at = self._now()
+
+        async def invoke_provider(timeout: float) -> ImageAsset:
+            try:
+                if source is None:
+                    return await self._provider.generate(
+                        text,
+                        timeout_seconds=timeout,
+                        request_id=message.trace_id,
+                    )
+                return await self._provider.edit(
+                    source.asset.file_path,
+                    text,
+                    timeout_seconds=timeout,
+                    request_id=message.trace_id,
+                )
+            except ImageProviderError as exc:
+                self._provider_http_status[message.trace_id] = exc.status_code
+                raise
+
         try:
-            if source is None:
-                result = await run_with_retry(
-                    lambda timeout: self._provider.generate(
-                        text,
-                        timeout_seconds=timeout,
-                        request_id=message.trace_id,
-                    ),
-                    stage="image_generate",
-                    base_timeout_seconds=self._config.timeout_seconds,
-                    policy=self._retry_policy,
-                    classify=_classify_provider_error,
-                    sleep=self._retry_sleep,
-                )
-            else:
-                result = await run_with_retry(
-                    lambda timeout: self._provider.edit(
-                        source.asset.file_path,
-                        text,
-                        timeout_seconds=timeout,
-                        request_id=message.trace_id,
-                    ),
-                    stage="image_edit",
-                    base_timeout_seconds=self._config.timeout_seconds,
-                    policy=self._retry_policy,
-                    classify=_classify_provider_error,
-                    sleep=self._retry_sleep,
-                )
+            result = await run_with_retry(
+                invoke_provider,
+                stage=retry_stage,
+                base_timeout_seconds=self._config.timeout_seconds,
+                policy=self._retry_policy,
+                classify=_classify_provider_error,
+                sleep=self._retry_sleep,
+            )
         except RetryExhaustedError as exc:
             self._failures[message.trace_id] = (stage, exc.category, exc.attempts)
             if edit:
                 await self._remove_recent(key, mark_expired=False)
-            await self._record_failure(message, stage, exc.category, exc.attempts)
+            await self._record_failure(
+                message,
+                stage,
+                exc.category,
+                exc.attempts,
+                http_status=self._provider_http_status.pop(message.trace_id, None),
+                elapsed_ms=_elapsed_ms(started_at, self._now()),
+            )
             return None
 
+        self._provider_http_status.pop(message.trace_id, None)
         self._failures.pop(message.trace_id, None)
         return ImageGenerationResult(
             asset=result.value,
@@ -158,6 +169,7 @@ class ImageGenerationService:
         send: Callable[[], Awaitable[object]],
     ) -> object | None:
         key = _recent_key(message)
+        started_at = self._now()
         try:
             sent = await run_with_retry(
                 lambda _timeout: send(),
@@ -171,7 +183,14 @@ class ImageGenerationService:
             self._failures[message.trace_id] = ("send", exc.category, exc.attempts)
             await self._cleanup_asset(result.asset)
             await self._remove_recent(key, mark_expired=False)
-            await self._record_failure(message, "send", exc.category, exc.attempts)
+            await self._record_failure(
+                message,
+                "send",
+                exc.category,
+                exc.attempts,
+                http_status=None,
+                elapsed_ms=_elapsed_ms(started_at, self._now()),
+            )
             return None
 
         await self._remove_recent(key, mark_expired=False)
@@ -205,20 +224,36 @@ class ImageGenerationService:
             "capability_unsupported": "接口不支持图片生成或修改",
             "safety_rejected": "请求未通过安全检查",
             "model_or_parameter_unsupported": "模型或参数不支持",
+            "upstream_no_compatible_account": "上游图片账号不可用，请管理员检查中转站图片账号能力或模型分组",
             "rate_limited": f"接口连续{attempts}次限流",
             "provider_unavailable": f"服务连续{attempts}次不可用",
+            "provider_transport_unknown": "上游连接状态未知，未自动重试",
             "request_failed": "接口拒绝请求",
             "invalid_response": "接口返回的图片数据无效",
             "empty_image": "接口返回空图片",
             "cache_write_failed": "本地图片缓存写入失败",
             "source_image_missing": "原图片缓存不存在",
             "send_failed": f"QQ连续{attempts}次发送失败",
+            "delivery_unknown": "QQ发送状态未知，未自动重试",
         }
         return f"{label}失败：{reasons.get(category, '未知错误')}"
 
     def failure_category(self, trace_id: str) -> str | None:
         failure = self._failures.get(trace_id)
         return failure[1] if failure is not None else None
+
+    def failure_stage(self, trace_id: str) -> str | None:
+        failure = self._failures.get(trace_id)
+        return failure[0] if failure is not None else None
+
+    def failure_delivery_status(self, trace_id: str) -> str | None:
+        failure = self._failures.get(trace_id)
+        if failure is None:
+            return None
+        stage, category, _attempts = failure
+        if stage == "send" and category in {"timeout", "delivery_unknown"}:
+            return "unknown"
+        return "failed"
 
     async def close(self) -> None:
         for key in list(self._recent):
@@ -263,13 +298,20 @@ class ImageGenerationService:
         stage: str,
         category: str,
         attempts: int,
+        *,
+        http_status: int | None = None,
+        elapsed_ms: int | None = None,
     ) -> None:
         if self._record_system_event is None:
             return
         await self._record_system_event(
             level="ERROR",
             event="image_operation_failed",
-            detail=f"scope={message.scope_type}; stage={stage}; category={category}; attempts={attempts}",
+            detail=(
+                f"scope={message.scope_type}; stage={stage}; category={category}; attempts={attempts}; "
+                f"http_status={http_status if http_status is not None else 'none'}; "
+                f"elapsed_ms={elapsed_ms if elapsed_ms is not None else 'none'}"
+            ),
             trace_id=message.trace_id,
         )
 
@@ -277,6 +319,10 @@ class ImageGenerationService:
 def _recent_key(message: NormalizedMessage) -> str:
     scope_id = message.group_id or message.scope_id
     return f"{message.scope_type}:{scope_id}:{message.user_id}"
+
+
+def _elapsed_ms(started_at: float, finished_at: float) -> int:
+    return max(0, round((finished_at - started_at) * 1000))
 
 
 def parse_image_command(text: str) -> ImageCommand | None:
@@ -291,19 +337,26 @@ def parse_image_command(text: str) -> ImageCommand | None:
             prompt = re.sub(r"^[\s:：]+", "", normalized[len(prefix) :])
             return ImageCommand(prompt=prompt, edit=edit)
     natural_patterns = (
-        # A quantity marker makes the intent unambiguous without a space.
-        r"^(?:帮我|请你|给我)?(?:画|生成|制作)(?:一张|一幅)(?:图|图片|图像)?(.+)$",
+        r"^(?:请|请你|帮我|给我)?(?:画|生成|制作)(?:一张|一幅)(?:图片|图像|图)?(.+)$",
+        # Subject/quantity words make drawing intent clear while leaving bare
+        # prose such as ``一只猫`` on the ordinary chat route.
+        r"^(?:请|请你|帮我|给我)?画(?:一张|一幅|一只|一条|一匹|一位|一个|一座|一片|一束|一朵|一辆|一本|一间|一双|一枚)(.+)$",
+        r"^(?:请|请你|帮我|给我)?画个(.+)$",
+        r"^(?:请|请你|帮我|给我)?(?:生成|制作)(?:一张|一幅)(?:图片|图像|图)[：:\s]+(.+)$",
         r"^(?:来|给我来)(?:一张|一幅)(?:图|图片|图像)(.+)$",
-        # Keep bare ``生成报告`` and other ordinary sentences out of the route.
-        r"^(?:帮我|请你|给我)?(?:画|生成|制作)(?:图片|图像|图)[：:\s]+(.+)$",
+        r"^(?:请|请你|帮我|给我)?(?:画|生成|制作)(?:图片|图像|图)[：:\s]+(.+)$",
     )
     for pattern in natural_patterns:
         match = re.match(pattern, normalized, flags=re.IGNORECASE)
         if match:
-            prompt = match.group(1).lstrip(" ：:").strip()
-            if prompt:
+            prompt = match.group(1).lstrip(" ：:，,").strip()
+            if prompt and not _is_explanatory_diagram_request(prompt):
                 return ImageCommand(prompt=prompt, edit=False)
     return None
+
+
+def _is_explanatory_diagram_request(prompt: str) -> bool:
+    return any(marker in prompt for marker in ("流程图", "图表", "框图", "示意图", "解释", "说明", "报告"))
 
 
 def _classify_provider_error(exc: Exception) -> RetryClassification:
@@ -312,13 +365,21 @@ def _classify_provider_error(exc: Exception) -> RetryClassification:
         # request can create a second paid generation.
         return RetryClassification("timeout", False)
     if isinstance(exc, ImageProviderError):
-        return RetryClassification(exc.category, exc.retryable)
-    return RetryClassification("provider_unavailable", True)
+        # 429 is the only response whose request was explicitly rejected
+        # before a paid image result is expected. Everything else stays
+        # single-shot, even if an adapter accidentally marks it retryable.
+        return RetryClassification(exc.category, exc.retryable and exc.category == "rate_limited")
+    if isinstance(exc, (httpx.TransportError, OSError, ConnectionError)):
+        return RetryClassification("provider_transport_unknown", False)
+    return RetryClassification("provider_transport_unknown", False)
 
 
 def _classify_send_error(exc: Exception) -> RetryClassification:
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)):
+    if isinstance(
+        exc,
+        (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError, ConnectionError),
+    ):
         # OneBot may have accepted the message before the client timed out;
         # replaying it would duplicate a media delivery.
-        return RetryClassification("timeout", False)
-    return RetryClassification("send_failed", True)
+        return RetryClassification("delivery_unknown", False)
+    return RetryClassification("send_failed", False)

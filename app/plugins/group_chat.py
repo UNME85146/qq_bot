@@ -25,10 +25,10 @@ from app.features.reminder_service import (
 )
 from app.features.codex_runway_monitor import codex_runway_worker
 from app.features.usage_ranking_report import usage_ranking_report_worker
-from app.features.market_service import MarketCommandService, run_market_alert_once
+from app.features.market_service import MarketCommandService, is_market_command, run_market_alert_once
 from app.features.market_providers import create_market_providers
 from app.features.search_providers import create_search_provider
-from app.features.search_service import GroupSearchCommandService
+from app.features.search_service import GroupSearchCommandService, is_search_command
 from app.features.repeat_service import is_plus_one_text
 from app.features.runtime_features import (
     create_runtime_feature_hub,
@@ -308,7 +308,7 @@ async def _runtime_market_alert_worker(bot: Bot) -> None:
                 _stock_watch_repository,
                 _market_providers,
                 trading_date=datetime.now(zone).date(),
-                can_send_group=_scheduled_group_send_allowed,
+                can_send_group=_scheduled_group_market_send_allowed,
             )
         except Exception:
             logger.exception("Market alert worker iteration failed")
@@ -318,6 +318,11 @@ async def _runtime_market_alert_worker(bot: Bot) -> None:
 async def _scheduled_group_send_allowed(group_id: str) -> bool:
     state = await _group_mute_repository.get_by_group_id(group_id)
     return state is None or state.mode != "all_muted"
+
+
+async def _scheduled_group_market_send_allowed(group_id: str) -> bool:
+    group_features = getattr(_config, "group_features", None)
+    return getattr(group_features, "markets_enabled", True) and await _scheduled_group_send_allowed(group_id)
 
 
 try:
@@ -409,6 +414,8 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
 
     _remember_message_media(normalized)
     normalized = _with_referenced_media(normalized)
+    if normalized.media_items and await _group_model_disabled(normalized):
+        return
     sticker_asset_id = await maybe_save_sticker(_feature_hub, normalized)
     direct_intent = parse_direct_reply_intent(normalized)
     if (
@@ -563,6 +570,9 @@ async def _handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
             )
             return
 
+    if await _group_model_disabled(normalized):
+        return
+
     if trigger_reason == "nickname_probability_skipped":
         await _conversation_service.handle_group_message(normalized)
         logger.info(
@@ -649,6 +659,18 @@ async def _try_handle_group_information_feature(
     event: GroupMessageEvent,
     message: NormalizedMessage,
 ) -> bool:
+    group_features = getattr(_config, "group_features", None)
+    disabled = (
+        not getattr(group_features, "markets_enabled", True) and is_market_command(message.text)
+    ) or (
+        not getattr(group_features, "search_enabled", True) and is_search_command(message.text)
+    )
+    if disabled:
+        await _conversation_service.record_reply_audit(
+            message, action="silence", reason="group_information_disabled",
+            model_called=False, safety_blocked=False,
+        )
+        return True
     result = await _market_command_service.handle(message)
     if result is None:
         result = await _search_command_service.handle(message)
@@ -728,6 +750,15 @@ async def _try_handle_group_image_generation_feature(
     command = parse_image_command(message.text)
     if command is None:
         return False
+    if not _config.image_generation.group_enabled:
+        await _conversation_service.record_reply_audit(
+            message,
+            action="silence",
+            reason="group_image_disabled",
+            model_called=False,
+            safety_blocked=False,
+        )
+        return True
     if message.group_id is None:
         return True
 
@@ -746,6 +777,7 @@ async def _try_handle_group_image_generation_feature(
         _group_last_sent_at[message.group_id] = time.monotonic()
         return result
 
+    image_started = time.monotonic()
     sent = await _image_service.execute(
         message,
         command.prompt,
@@ -759,30 +791,40 @@ async def _try_handle_group_image_generation_feature(
             reason="group_image_edited" if command.edit else "group_image_generated",
             model_called=True,
             safety_blocked=False,
+            elapsed_ms=round((time.monotonic() - image_started) * 1000),
+            delivery_status="sent",
+            sent_message_ids=tuple(
+                value for value in (_extract_sent_message_id(sent),) if value is not None
+            ),
         )
         return True
 
     category = _image_service.failure_category(message.trace_id)
-    failure_text = _image_service.failure_message(message.trace_id) or "图片处理失败：未知错误"
-    await send_reply_bubbles(
-        bot,
-        event,
-        failure_text,
-        scope_type="group",
-        reply_config=_config.reply,
-        on_send_error=lambda exc, index, bubble: _record_send_error(
-            message.trace_id,
-            exc,
-            index,
-            "send_group_image_status_failed",
-        ),
-    )
+    delivery_status = _image_service.failure_delivery_status(message.trace_id)
+    if delivery_status != "unknown":
+        failure_text = _image_service.failure_message(message.trace_id) or "图片处理失败：未知错误"
+        await send_reply_bubbles(
+            bot,
+            event,
+            failure_text,
+            scope_type="group",
+            reply_config=_config.reply,
+            on_send_error=lambda exc, index, bubble: _record_send_error(
+                message.trace_id,
+                exc,
+                index,
+                "send_group_image_status_failed",
+            ),
+        )
     await _conversation_service.record_reply_audit(
         message,
         action="reply",
         reason=f"group_image_{category or 'failed'}",
         model_called=category not in {"unconfigured", "empty_prompt", "no_recent_image", "edit_window_expired"},
         safety_blocked=False,
+        elapsed_ms=round((time.monotonic() - image_started) * 1000),
+        delivery_status=delivery_status,
+        sent_message_ids=(),
     )
     return True
 def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:
@@ -1012,8 +1054,25 @@ async def _wait_group_interval(group_id: str) -> None:
     return None
 
 
+async def _group_model_disabled(message: NormalizedMessage) -> bool:
+    group_features = getattr(_config, "group_features", None)
+    reason = None
+    if message.media_items and not getattr(group_features, "image_understanding_enabled", True):
+        reason = "group_image_understanding_disabled"
+    elif not message.media_items and not getattr(group_features, "chat_enabled", True):
+        reason = "group_chat_disabled"
+    if reason is None:
+        return False
+    await _conversation_service.record_reply_audit(
+        message, action="silence", reason=reason, model_called=False, safety_blocked=False,
+    )
+    return True
+
+
 async def _process_group_reply_task(task: GroupReplyTask) -> None:
     message = task.message
+    if await _group_model_disabled(message):
+        return
     await _conversation_service.record_reply_audit(
         message,
         action="reply",

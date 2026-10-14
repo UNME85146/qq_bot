@@ -190,6 +190,13 @@
     "timeoutSeconds": 120,
     "sendTimeoutSeconds": 60,
     "cacheDir": "runtime_artifacts/image-generation",
-    "editWindowSeconds": 180
+    "editWindowSeconds": 180,
+    "groupEnabled": false
+  },
+  "groupFeatures": {
+    "chatEnabled": true,
+    "imageUnderstandingEnabled": true,
+    "marketsEnabled": true,
+    "searchEnabled": true
   }
 }
