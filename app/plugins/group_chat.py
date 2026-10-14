@@ -2106,7 +2106,7 @@ async def _send_context_sticker_failed_text(
         bot,
         event,
         message,
-        "图发不出去，卡了",
+        "我不知道",
     )
 
 
