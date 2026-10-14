@@ -44,11 +44,8 @@
     "maxTokens": 2400
   },
   "persona": {
-    "mode": "legacy_persona",
-    "disclosure": "我是公开示例的 QQ 聊天机器人。",
-    "personality": "表达简洁、友好且尊重用户。",
-    "lifeStyle": "不虚构现实身份或个人经历。",
-    "speechStyle": "大多数回复保持一到三句。"
+    "mode": "history_derived_character",
+    "profilePath": "persona_profile.example.json"
   },
   "reply": {
     "privateAlwaysReply": true,

@@ -1,0 +1,20 @@
+{
+  "sourceUserId": "public-template",
+  "updatedAt": "2026-01-01T00:00:00Z",
+  "metrics": {
+    "validTextCount": 120,
+    "averageTextLength": 18.0,
+    "shortTextRatio": 0.52,
+    "mediumTextRatio": 0.32,
+    "questionRatio": 0.12,
+    "punctuationRatio": 0.4,
+    "mediaRatio": 0.1,
+    "stickerRatio": 0.06,
+    "continuationReplies": 30,
+    "threadBursts": 4,
+    "atMentions": 10,
+    "replyMarkers": 5,
+    "stickerIntentCount": 3,
+    "repeatedShortExpressionCount": 5
+  }
+}
