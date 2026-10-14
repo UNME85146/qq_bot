@@ -547,6 +547,60 @@ async def _migration_004_audit_and_member_preferences(
     )
 
 
+async def _migration_006_group_profile_vectors(
+    db: aiosqlite.Connection,
+) -> None:
+    await _execute_sql_script(
+        db,
+        """
+        CREATE TABLE IF NOT EXISTS group_member_profile_vectors (
+          group_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          display_name TEXT,
+          aliases_json TEXT NOT NULL DEFAULT '[]',
+          profile_text TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          preference_notes TEXT NOT NULL DEFAULT '',
+          embedding_json TEXT NOT NULL DEFAULT '[]',
+          embedding_dimension INTEGER NOT NULL DEFAULT 0,
+          embedding_backend TEXT NOT NULL DEFAULT 'hashing-char-ngram-v1',
+          message_count INTEGER NOT NULL DEFAULT 0,
+          source_window_start TEXT,
+          source_window_end TEXT,
+          last_enriched_at TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(group_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_group_member_profile_vectors_group
+          ON group_member_profile_vectors(group_id, updated_at);
+
+        CREATE TABLE IF NOT EXISTS group_member_aliases (
+          group_id TEXT NOT NULL,
+          alias TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0.5,
+          source TEXT NOT NULL DEFAULT 'inferred',
+          mention_count INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(group_id, alias)
+        );
+        CREATE INDEX IF NOT EXISTS idx_group_member_aliases_user
+          ON group_member_aliases(group_id, user_id, confidence DESC);
+
+        CREATE TABLE IF NOT EXISTS group_profile_update_runs (
+          group_id TEXT NOT NULL,
+          run_date TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'claimed'
+            CHECK(status IN ('claimed', 'completed', 'failed')),
+          message_count INTEGER NOT NULL DEFAULT 0,
+          profile_count INTEGER NOT NULL DEFAULT 0,
+          error_text TEXT NOT NULL DEFAULT '',
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          finished_at TEXT,
+          PRIMARY KEY(group_id, run_date)
+        );
+        """,
+    )
 MIGRATIONS = (
     Migration(version=1, name="baseline schema"),
     Migration(
@@ -581,6 +635,11 @@ MIGRATIONS = (
             )
             """,
         ),
+    ),
+    Migration(
+        version=6,
+        name="group member profile vector store",
+        action=_migration_006_group_profile_vectors,
     ),
 )
 LATEST_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)

@@ -26,6 +26,7 @@ from app.models import (
     ConversationSessionsConfig,
     ImageGenerationConfig,
     GroupFeaturesConfig,
+    GroupProfileConfig,
     LimitsConfig,
     LoggingConfig,
     MarketProviderConfig,
@@ -73,6 +74,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     speech = _config_block(raw, "speech")
     image_generation = _config_block(raw, "imageGeneration")
     group_features = _config_block(raw, "groupFeatures")
+    group_profile = _config_block(raw, "groupProfile")
 
     api_key_env = str(model["apiKeyEnv"])
     api_key = os.getenv(api_key_env) or None
@@ -178,6 +180,20 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             image_understanding_enabled=bool(group_features.get("imageUnderstandingEnabled", True)),
             markets_enabled=bool(group_features.get("marketsEnabled", True)),
             search_enabled=bool(group_features.get("searchEnabled", True)),
+        ),
+        group_profile=GroupProfileConfig(
+            enabled=bool(group_profile.get("enabled", False)),
+            group_ids=tuple(
+                str(value).strip()
+                for value in group_profile.get("groupIds", [])
+                if str(value).strip()
+            ),
+            update_interval_hours=int(group_profile.get("updateIntervalHours", 24)),
+            lookback_days=int(group_profile.get("lookbackDays", 30)),
+            max_messages_per_user=int(group_profile.get("maxMessagesPerUser", 80)),
+            model_enrichment_enabled=bool(
+                group_profile.get("modelEnrichmentEnabled", True)
+            ),
         ),
     )
 

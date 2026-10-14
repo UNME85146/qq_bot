@@ -74,6 +74,7 @@ class ModelContextService:
                 self._get_group_member_profile_context(
                     message.group_id,
                     message.user_id,
+                    message.text,
                 ),
             )
             semantic_lines, sticker_analyses = await asyncio.gather(
@@ -227,11 +228,17 @@ class ModelContextService:
         self,
         group_id: str,
         user_id: str,
+        query_text: str = "",
     ) -> str:
         if self._group_member_profiles is None:
             return ""
         try:
-            return await self._group_member_profiles.get_prompt_context(group_id, user_id)
+            try:
+                return await self._group_member_profiles.get_prompt_context(
+                    group_id, user_id, query_text
+                )
+            except TypeError:
+                return await self._group_member_profiles.get_prompt_context(group_id, user_id)
         except Exception:
             return ""
 

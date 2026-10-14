@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import time
@@ -72,7 +73,7 @@ from app.storage.repositories import (
     BotSentMessageRepository,
     ConversationRepository,
     ConversationSessionRepository,
-    GroupMemberProfileRepository,
+    GroupMemberProfileVectorRepository,
     GroupMuteStateRepository,
     StockWatchRepository,
     GroupPendingQuestionRepository,
@@ -116,7 +117,7 @@ _search_command_service = GroupSearchCommandService(
     model_client=create_model_client(_config.model),
     conversation_repository=ConversationRepository(_config.storage.database_path),
     session_repository=ConversationSessionRepository(_config.storage.database_path),
-    profile_repository=GroupMemberProfileRepository(_config.storage.database_path),
+    profile_repository=GroupMemberProfileVectorRepository(_config.storage.database_path),
 )
 _image_service = ImageGenerationService(
     _config.image_generation,
@@ -174,6 +175,7 @@ BACKFILL_MARKERS = (
 _reminder_worker_started = False
 _codex_runway_worker_started = False
 _usage_ranking_worker_started = False
+_group_profile_worker_started = False
 _runtime_bot: Bot | None = None
 _scheduled_started_at: float | None = None
 _scheduled_run_id = uuid4().hex
@@ -247,6 +249,7 @@ async def _capture_scheduled_startup() -> None:
 async def _start_reminder_worker(bot: Bot) -> None:
     global _reminder_worker_started
     global _codex_runway_worker_started, _usage_ranking_worker_started, _runtime_bot
+    global _group_profile_worker_started
     _runtime_bot = bot
     await _capture_scheduled_startup()
     if _reminder_worker_started:
@@ -266,6 +269,9 @@ async def _start_reminder_worker(bot: Bot) -> None:
         logger.exception("Failed to expire stale group pending questions")
     asyncio.create_task(reminder_worker(_runtime_bot_proxy, _feature_hub))
     asyncio.create_task(_runtime_market_alert_worker(_runtime_bot_proxy))
+    if _config.group_profile.enabled and not _group_profile_worker_started:
+        _group_profile_worker_started = True
+        asyncio.create_task(_group_profile_update_worker())
     if not _codex_runway_worker_started:
         _codex_runway_worker_started = True
         asyncio.create_task(
@@ -313,6 +319,26 @@ async def _runtime_market_alert_worker(bot: Bot) -> None:
         except Exception:
             logger.exception("Market alert worker iteration failed")
         await asyncio.sleep(float(_config.markets.poll_interval_seconds))
+
+
+async def _group_profile_update_worker() -> None:
+    interval_seconds = max(1, int(_config.group_profile.update_interval_hours * 3600))
+    while True:
+        try:
+            result = await _conversation_service.refresh_group_member_profiles()
+            await _conversation_service.record_system_event(
+                level="INFO",
+                event="group_profile_refresh_completed",
+                detail=json.dumps(result, ensure_ascii=False, separators=(",", ":"))[:1000],
+            )
+        except Exception as exc:
+            logger.exception("Group profile refresh failed")
+            await _conversation_service.record_system_event(
+                level="ERROR",
+                event="group_profile_refresh_failed",
+                detail=f"{type(exc).__name__}: {str(exc)[:240]}",
+            )
+        await asyncio.sleep(interval_seconds)
 
 
 async def _scheduled_group_send_allowed(group_id: str) -> bool:

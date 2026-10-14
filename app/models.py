@@ -123,6 +123,45 @@ class GroupMemberProfile:
 
 
 @dataclass(frozen=True)
+class GroupMemberProfileVector:
+    group_id: str
+    user_id: str
+    display_name: str | None
+    aliases: tuple[str, ...]
+    profile_text: str
+    summary: str
+    preference_notes: str
+    embedding: tuple[float, ...]
+    embedding_backend: str
+    message_count: int
+    source_window_start: str | None
+    source_window_end: str | None
+    last_enriched_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class GroupMemberAlias:
+    group_id: str
+    alias: str
+    user_id: str
+    confidence: float
+    source: str
+    mention_count: int
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class GroupProfileMessage:
+    group_id: str
+    message_id: str
+    user_id: str
+    user_name: str | None
+    text: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class StockWatchItem:
     id: int
     user_id: str
@@ -444,6 +483,16 @@ class GroupFeaturesConfig:
 
 
 @dataclass(frozen=True)
+class GroupProfileConfig:
+    enabled: bool = False
+    group_ids: tuple[str, ...] = ()
+    update_interval_hours: int = 24
+    lookback_days: int = 30
+    max_messages_per_user: int = 80
+    model_enrichment_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     qq: QQConfig
     onebot: OneBotConfig
@@ -467,6 +516,7 @@ class AppConfig:
     speech: SpeechConfig = field(default_factory=SpeechConfig)
     image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)
     group_features: GroupFeaturesConfig = field(default_factory=GroupFeaturesConfig)
+    group_profile: GroupProfileConfig = field(default_factory=GroupProfileConfig)
 
 
 @dataclass(frozen=True)

@@ -1,23 +1,21 @@
 {
   "qq": {
-    "selfId": "BOT_QQ",
+    "selfId": "测试小号QQ",
     "rootUserIds": [
-      "ROOT_QQ"
+      "你的主QQ"
     ],
     "ownerUserIds": [
-      "OWNER_QQ"
+      "你的主QQ"
     ],
     "allowedPrivateUserIds": [
-      "OWNER_QQ"
+      "你的主QQ"
     ],
-    "allowedGroupIds": [
-      "ALLOWED_GROUP_ID"
-    ],
+    "allowedGroupIds": [],
     "groupMuteControllerUserIds": [
-      "OWNER_QQ"
+      "your owner QQ"
     ],
     "memoryAllowedUserIds": [
-      "OWNER_QQ"
+      "你的主QQ"
     ],
     "nicknames": [
       "测试号",
@@ -32,12 +30,12 @@
     "apiRoot": "http://127.0.0.1:3000"
   },
   "model": {
-    "provider": "openai-compatible",
+    "provider": "siliconflow",
     "apiKeyEnv": "QQ_BOT_MODEL_API_KEY",
-    "baseUrl": "https://api.example.com/v1",
+    "baseUrl": "https://api.siliconflow.cn/v1",
     "baseUrlCandidates": [],
     "endpointProbeIntervalSeconds": 60,
-    "name": "your-model-name",
+    "name": "Qwen/Qwen2.5-7B-Instruct",
     "reasoningEffort": null,
     "timeoutSeconds": 90,
     "temperature": 0.8,
@@ -45,7 +43,7 @@
   },
   "persona": {
     "mode": "history_derived_character",
-    "profilePath": "persona_profile.example.json"
+    "profilePath": "persona_profile.local.json"
   },
   "reply": {
     "privateAlwaysReply": true,
@@ -182,6 +180,7 @@
   },
   "imageGeneration": {
     "enabled": false,
+    "groupEnabled": false,
     "baseUrl": "",
     "apiKeyEnv": "",
     "generationEndpoint": "/images/generations",
@@ -190,13 +189,20 @@
     "timeoutSeconds": 120,
     "sendTimeoutSeconds": 60,
     "cacheDir": "runtime_artifacts/image-generation",
-    "editWindowSeconds": 180,
-    "groupEnabled": false
+    "editWindowSeconds": 180
   },
   "groupFeatures": {
     "chatEnabled": true,
     "imageUnderstandingEnabled": true,
     "marketsEnabled": true,
     "searchEnabled": true
+  },
+  "groupProfile": {
+    "enabled": false,
+    "groupIds": [],
+    "updateIntervalHours": 24,
+    "lookbackDays": 30,
+    "maxMessagesPerUser": 80,
+    "modelEnrichmentEnabled": true
   }
 }

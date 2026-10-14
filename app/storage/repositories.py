@@ -13,6 +13,9 @@ from app.models import (
     ConversationSession,
     GroupContext,
     GroupMemberProfile,
+    GroupMemberProfileVector,
+    GroupMemberAlias,
+    GroupProfileMessage,
     GroupMessageIndex,
     GroupMuteState,
     GroupPendingQuestion,
@@ -366,6 +369,263 @@ class SessionMemoryRepository:
             sample_count=int(row["sample_count"]),
             state=str(row["state"]),
             updated_at=row["updated_at"],
+        )
+
+
+class GroupMemberProfileVectorRepository:
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = Path(database_path)
+
+    async def get(self, group_id: str, user_id: str) -> GroupMemberProfileVector | None:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT group_id, user_id, display_name, aliases_json, profile_text,
+                       summary, preference_notes, embedding_json, embedding_backend,
+                       message_count, source_window_start, source_window_end,
+                       last_enriched_at, updated_at
+                FROM group_member_profile_vectors
+                WHERE group_id = ? AND user_id = ?
+                """,
+                (group_id, user_id),
+            )
+            row = await cursor.fetchone()
+        return self._to_profile(row) if row is not None else None
+
+    async def list_profiles(self, group_id: str) -> list[GroupMemberProfileVector]:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT group_id, user_id, display_name, aliases_json, profile_text,
+                       summary, preference_notes, embedding_json, embedding_backend,
+                       message_count, source_window_start, source_window_end,
+                       last_enriched_at, updated_at
+                FROM group_member_profile_vectors
+                WHERE group_id = ?
+                ORDER BY message_count DESC, updated_at DESC
+                """,
+                (group_id,),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_profile(row) for row in rows]
+
+    async def upsert_profile(
+        self,
+        *,
+        group_id: str,
+        user_id: str,
+        display_name: str | None,
+        aliases: list[str],
+        profile_text: str,
+        summary: str,
+        preference_notes: str,
+        embedding: list[float],
+        message_count: int,
+        source_window_start: str | None,
+        source_window_end: str | None,
+        last_enriched_at: str | None,
+    ) -> GroupMemberProfileVector:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO group_member_profile_vectors (
+                  group_id, user_id, display_name, aliases_json, profile_text,
+                  summary, preference_notes, embedding_json, embedding_dimension,
+                  embedding_backend, message_count, source_window_start,
+                  source_window_end, last_enriched_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'hashing-char-ngram-v1', ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(group_id, user_id) DO UPDATE SET
+                  display_name = excluded.display_name,
+                  aliases_json = excluded.aliases_json,
+                  profile_text = excluded.profile_text,
+                  summary = excluded.summary,
+                  preference_notes = excluded.preference_notes,
+                  embedding_json = excluded.embedding_json,
+                  embedding_dimension = excluded.embedding_dimension,
+                  message_count = excluded.message_count,
+                  source_window_start = excluded.source_window_start,
+                  source_window_end = excluded.source_window_end,
+                  last_enriched_at = excluded.last_enriched_at,
+                  updated_at = datetime('now')
+                """,
+                (
+                    group_id,
+                    user_id,
+                    display_name,
+                    json.dumps(sorted(set(aliases)), ensure_ascii=False),
+                    profile_text,
+                    summary,
+                    preference_notes,
+                    json.dumps(embedding, ensure_ascii=False),
+                    len(embedding),
+                    message_count,
+                    source_window_start,
+                    source_window_end,
+                    last_enriched_at,
+                ),
+            )
+            await db.commit()
+        profile = await self.get(group_id, user_id)
+        if profile is None:
+            raise RuntimeError('upserted vector profile was not found')
+        return profile
+
+    async def upsert_alias(
+        self,
+        *,
+        group_id: str,
+        alias: str,
+        user_id: str,
+        confidence: float,
+        source: str,
+    ) -> None:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                INSERT INTO group_member_aliases (
+                  group_id, alias, user_id, confidence, source, mention_count, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
+                ON CONFLICT(group_id, alias) DO UPDATE SET
+                  user_id = CASE
+                    WHEN excluded.confidence >= group_member_aliases.confidence
+                    THEN excluded.user_id ELSE group_member_aliases.user_id END,
+                  confidence = MAX(group_member_aliases.confidence, excluded.confidence),
+                  source = CASE
+                    WHEN excluded.confidence >= group_member_aliases.confidence
+                    THEN excluded.source ELSE group_member_aliases.source END,
+                  mention_count = group_member_aliases.mention_count + 1,
+                  updated_at = datetime('now')
+                """,
+                (group_id, alias, user_id, max(0.0, min(1.0, confidence)), source),
+            )
+            await db.commit()
+
+    async def list_aliases(self, group_id: str) -> list[GroupMemberAlias]:
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT group_id, alias, user_id, confidence, source, mention_count, updated_at
+                FROM group_member_aliases
+                WHERE group_id = ?
+                ORDER BY confidence DESC, mention_count DESC
+                """,
+                (group_id,),
+            )
+            rows = await cursor.fetchall()
+        return [
+            GroupMemberAlias(
+                group_id=str(row['group_id']),
+                alias=str(row['alias']),
+                user_id=str(row['user_id']),
+                confidence=float(row['confidence']),
+                source=str(row['source']),
+                mention_count=int(row['mention_count']),
+                updated_at=row['updated_at'],
+            )
+            for row in rows
+        ]
+
+    async def list_messages_since(
+        self,
+        group_id: str,
+        since: str,
+        *,
+        until: str | None = None,
+        limit: int = 50_000,
+    ) -> list[GroupProfileMessage]:
+        conditions = ['group_id = ?', 'is_bot = 0', 'created_at >= ?']
+        parameters: list[object] = [group_id, since]
+        if until:
+            conditions.append('created_at < ?')
+            parameters.append(until)
+        parameters.append(limit)
+        async with connect_database(self._database_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT group_id, message_id, user_id, user_name, text, created_at
+                FROM group_message_index
+                WHERE {' AND '.join(conditions)}
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                parameters,
+            )
+            rows = await cursor.fetchall()
+        return [
+            GroupProfileMessage(
+                group_id=str(row['group_id']),
+                message_id=str(row['message_id']),
+                user_id=str(row['user_id']),
+                user_name=row['user_name'],
+                text=str(row['text'] or ''),
+                created_at=str(row['created_at']),
+            )
+            for row in rows
+        ]
+
+    async def claim_run(self, group_id: str, run_date: str) -> bool:
+        async with connect_database(self._database_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO group_profile_update_runs (group_id, run_date)
+                VALUES (?, ?)
+                """,
+                (group_id, run_date),
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0) == 1
+
+    async def finish_run(
+        self,
+        *,
+        group_id: str,
+        run_date: str,
+        status: str,
+        message_count: int,
+        profile_count: int,
+        error_text: str = '',
+    ) -> None:
+        async with connect_database(self._database_path) as db:
+            await db.execute(
+                """
+                UPDATE group_profile_update_runs
+                SET status = ?, message_count = ?, profile_count = ?, error_text = ?,
+                    finished_at = datetime('now')
+                WHERE group_id = ? AND run_date = ?
+                """,
+                (status, message_count, profile_count, error_text[:500], group_id, run_date),
+            )
+            await db.commit()
+
+    @staticmethod
+    def _to_profile(row: aiosqlite.Row) -> GroupMemberProfileVector:
+        try:
+            aliases = tuple(str(item) for item in json.loads(str(row['aliases_json'] or '[]')) if str(item).strip())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            aliases = ()
+        try:
+            embedding = tuple(float(item) for item in json.loads(str(row['embedding_json'] or '[]')))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            embedding = ()
+        return GroupMemberProfileVector(
+            group_id=str(row['group_id']),
+            user_id=str(row['user_id']),
+            display_name=row['display_name'],
+            aliases=aliases,
+            profile_text=str(row['profile_text'] or ''),
+            summary=str(row['summary'] or ''),
+            preference_notes=str(row['preference_notes'] or ''),
+            embedding=embedding,
+            embedding_backend=str(row['embedding_backend'] or ''),
+            message_count=int(row['message_count']),
+            source_window_start=row['source_window_start'],
+            source_window_end=row['source_window_end'],
+            last_enriched_at=row['last_enriched_at'],
+            updated_at=row['updated_at'],
         )
 
 

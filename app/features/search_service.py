@@ -18,7 +18,7 @@ from app.models import NormalizedMessage
 from app.storage.repositories import (
     ConversationRepository,
     ConversationSessionRepository,
-    GroupMemberProfileRepository,
+    GroupMemberProfileVectorRepository,
 )
 
 
@@ -48,7 +48,7 @@ class GroupSearchCommandService:
         model_client: LlmClient,
         conversation_repository: ConversationRepository,
         session_repository: ConversationSessionRepository,
-        profile_repository: GroupMemberProfileRepository,
+        profile_repository: GroupMemberProfileVectorRepository,
         max_results: int = 40,
         page_size: int = 20,
         minimum_results: int = 20,

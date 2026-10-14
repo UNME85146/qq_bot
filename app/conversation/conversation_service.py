@@ -95,6 +95,16 @@ class ConversationService:
     def model_client(self) -> LlmClient:
         return self._model_client
 
+    async def refresh_group_member_profiles(self, *, force: bool = False) -> dict:
+        service = self._group_member_profile_service
+        refresh = getattr(service, "refresh_configured_groups", None)
+        if not callable(refresh):
+            return {"status": "unsupported", "groups": []}
+        try:
+            return await refresh(force=force)
+        except TypeError:
+            return await refresh()
+
     async def prepare_chat_message(
         self,
         message: NormalizedMessage,

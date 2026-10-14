@@ -8,7 +8,7 @@ from app.conversation.session_service import ConversationSessionService
 from app.conversation.session_service import ModelSessionRelationClassifier
 from app.conversation.session_memory_service import SessionMemoryService
 from app.memory.group_context_service import GroupContextService
-from app.memory.group_member_profile_service import GroupMemberProfileService
+from app.memory.group_member_profile_vector_service import GroupMemberProfileVectorService
 from app.memory.memory_service import MemoryService
 from app.model.llm_client import create_model_client
 from app.model.resilience import ModelResilienceService
@@ -22,7 +22,7 @@ from app.storage.repositories import (
     ConversationRepository,
     ConversationSessionRepository,
     GroupMessageIndexRepository,
-    GroupMemberProfileRepository,
+    GroupMemberProfileVectorRepository,
     GroupContextRepository,
     GroupSemanticTermRepository,
     MemoryProfileRepository,
@@ -59,10 +59,12 @@ def create_conversation_service(config: AppConfig) -> ConversationService:
         qq_config=config.qq,
         safety_service=safety_service,
     )
-    group_member_profile_service = GroupMemberProfileService(
-        repository=GroupMemberProfileRepository(config.storage.database_path),
+    group_member_profile_service = GroupMemberProfileVectorService(
+        repository=GroupMemberProfileVectorRepository(config.storage.database_path),
         qq_config=config.qq,
+        profile_config=config.group_profile,
         safety_service=safety_service,
+        model_client=model_client,
     )
     model_context_service = ModelContextService(
         conversation_repository=conversation_repository,
