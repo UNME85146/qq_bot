@@ -201,8 +201,10 @@ class SystemDashboardBackend:
                  config_path: Path | None = None,
                  env_path: Path | None = None,
                  llbot_webui_port: int | None = None,
-                 service_name: str = "qq-bot.service") -> None:
-        if service_name != "qq-bot.service":
+                 service_name: str = "qq-bot.service",
+                 control_url: str | None = None,
+                 control_token_path: Path | None = None) -> None:
+        if service_name not in {"qq-bot.service", "container-bot"}:
             raise ValueError("unsupported dashboard restart service")
         self.qr_path = qr_path
         self.bot_port = bot_port
@@ -218,6 +220,12 @@ class SystemDashboardBackend:
         self.config_path = config_path
         self.env_path = env_path
         self.service_name = service_name
+        self.control_url = control_url
+        self.control_token_path = control_token_path
+        if self.control_url is not None:
+            parsed_control = urlsplit(self.control_url)
+            if parsed_control.scheme != "http" or parsed_control.hostname not in {"127.0.0.1", "localhost"}:
+                raise ValueError("bot control URL must be loopback HTTP")
         self._refresh_lock = asyncio.Lock()
         self._config_lock = asyncio.Lock()
         self._last_refresh = float("-inf")
@@ -378,11 +386,33 @@ class SystemDashboardBackend:
             raise DashboardRestartInProgress("bot restart already in progress")
         self._restart_in_progress = True
         try:
+            if self.control_url is not None:
+                result = await asyncio.to_thread(self._container_control, "POST", "/restart")
+                if result.get("status") != "restarting":
+                    raise DashboardRestartError("bot restart is unavailable")
+                self._restart_required = False
+                return {"status": "restarting", "service": "container-bot"}
             result = await asyncio.to_thread(self._signal_bot_main_pid)
             self._restart_required = False
             return result
         finally:
             self._restart_in_progress = False
+
+    def _container_control(self, method: str, path: str) -> dict[str, Any]:
+        if self.control_url is None:
+            raise DashboardRestartError("bot restart is unavailable")
+        try:
+            headers = {}
+            if self.control_token_path is not None:
+                headers["X-QQ-Bot-Control-Token"] = _read_private_token(self.control_token_path)
+            with httpx.Client(timeout=3, trust_env=False, follow_redirects=False) as client:
+                response = client.request(method, self.control_url.rstrip("/") + path, headers=headers)
+            if response.status_code >= 400:
+                raise DashboardRestartError("bot restart is unavailable")
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {}
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise DashboardRestartError("bot restart is unavailable") from exc
 
     def _signal_bot_main_pid(self) -> dict[str, Any]:
         try:
@@ -968,6 +998,11 @@ class _RuntimeDashboardMethods:
         }
 
     def _bot_running(self) -> bool:
+        if self.control_url is not None:
+            try:
+                return bool(self._container_control("GET", "/status").get("running"))
+            except DashboardRestartError:
+                return False
         try:
             result = subprocess.run(("systemctl", "is-active", "qq-bot.service"),
                                     capture_output=True, text=True, timeout=3, check=False)

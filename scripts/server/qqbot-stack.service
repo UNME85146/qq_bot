@@ -1,0 +1,17 @@
+[Unit]
+Description=QQ Bot combined PMHQ, LLBot and Bot container
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/qq_bot
+ExecStart=/usr/bin/docker start qqbot-stack
+ExecStop=/usr/bin/docker stop --time=30 qqbot-stack
+ExecReload=/usr/bin/docker restart qqbot-stack
+TimeoutStartSec=60
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

@@ -17,6 +17,8 @@ Environment=QQ_BOT_DASHBOARD_ONEBOT_HTTP_PORT=3100
 Environment=QQ_BOT_DASHBOARD_LLBOT_TOKEN_FILE=/opt/llbot/data/webui_token.txt
 Environment=QQ_BOT_DASHBOARD_LLBOT_WEBUI_PORT=3080
 Environment=QQ_BOT_DASHBOARD_QR_PATH=/run/qqbot-dashboard/login-qrcode.png
+Environment=QQ_BOT_DASHBOARD_BOT_CONTROL_URL=http://127.0.0.1:3015
+Environment=QQ_BOT_DASHBOARD_BOT_CONTROL_TOKEN_FILE=/opt/qq_bot/runtime_artifacts/secrets/bot-control.token
 RuntimeDirectory=qqbot-dashboard
 RuntimeDirectoryMode=0700
 ExecStart=/opt/qq_bot/.venv/bin/python -B /opt/qq_bot/tools/run_dashboard.py

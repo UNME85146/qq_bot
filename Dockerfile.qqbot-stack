@@ -1,0 +1,56 @@
+FROM linyuchen/pmhq:9.0.6
+
+ARG NODE_VERSION=24.21.0
+ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+ARG LLBOT_VERSION=8.3.2
+ARG LLBOT_SHA256=57b3a044b971bc537516f385cf1fd0755049238858adea172674be24edf7bdb7
+
+ENV TZ=Asia/Shanghai \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONUTF8=1 \
+    DISPLAY=:99 \
+    LIBGL_ALWAYS_SOFTWARE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils unzip python3-pip python3-venv supervisor \
+    procps tini util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --fail --location --show-error \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+      --output /tmp/node.tar.xz \
+    && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+    && rm /tmp/node.tar.xz
+
+RUN curl --fail --location --show-error \
+      "https://github.com/LLOneBot/LuckyLilliaBot/releases/download/v${LLBOT_VERSION}/LuckyLillia.zip" \
+      --output /tmp/LuckyLillia.zip \
+    && echo "${LLBOT_SHA256}  /tmp/LuckyLillia.zip" | sha256sum -c - \
+    && mkdir -p /app/llbot \
+    && unzip -q /tmp/LuckyLillia.zip -d /app/llbot \
+    && rm /tmp/LuckyLillia.zip
+
+RUN python3 -m venv /opt/qqbot-venv
+
+WORKDIR /app/qq_bot
+COPY pyproject.toml /app/qq_bot/pyproject.toml
+COPY app /app/qq_bot/app
+COPY bot.py /app/qq_bot/bot.py
+
+RUN /opt/qqbot-venv/bin/python -m pip install --no-cache-dir --upgrade pip \
+    && /opt/qqbot-venv/bin/pip install --no-cache-dir '.[market,dashboard]'
+
+RUN if ! getent passwd 1000 >/dev/null; then \
+      if ! getent group 1000 >/dev/null; then groupadd --gid 1000 qqbot; fi; \
+      useradd --uid 1000 --gid 1000 --create-home --home-dir /home/qqbot qqbot; \
+    fi \
+    && mkdir -p /app/qq_bot/data /app/qq_bot/logs /app/qq_bot/runtime_artifacts \
+    && chown -R 1000:1000 /app/qq_bot /opt/qqbot-venv
+
+COPY container/qqbot-stack-supervisord.conf /etc/supervisor/conf.d/qqbot-stack.conf
+COPY container/start-qqbot-stack.sh /usr/local/bin/start-qqbot-stack.sh
+RUN chmod 0755 /usr/local/bin/start-qqbot-stack.sh
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/qqbot-stack.conf"]

@@ -27,7 +27,10 @@ def build_app():
         webui_token_path=Path(os.environ["QQ_BOT_DASHBOARD_LLBOT_TOKEN_FILE"]),
         config_path=Path(os.environ.get("QQ_BOT_CONFIG_PATH", str(bot_root / "config" / "config.json"))),
         env_path=Path(os.environ.get("QQ_BOT_ENV_PATH", str(bot_root / ".env"))),
-        service_name="qq-bot.service",
+        service_name=("container-bot" if os.environ.get("QQ_BOT_DASHBOARD_BOT_CONTROL_URL") else "qq-bot.service"),
+        control_url=os.environ.get("QQ_BOT_DASHBOARD_BOT_CONTROL_URL"),
+        control_token_path=(Path(os.environ["QQ_BOT_DASHBOARD_BOT_CONTROL_TOKEN_FILE"])
+                            if os.environ.get("QQ_BOT_DASHBOARD_BOT_CONTROL_TOKEN_FILE") else None),
     )
     return create_dashboard_app(origin=origin, password_hash=read_password_hash(password_path), backend=backend)
 
