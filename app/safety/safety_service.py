@@ -220,9 +220,8 @@ class SafetyService:
 
 
 def _blocked_text(scope_type: str) -> str:
-    if scope_type == "group":
-        return "这个不太适合在群里聊。"
-    return "这个我不能帮你处理，我们换个安全点的话题吧。"
+    del scope_type
+    return "我回答不了"
 
 
 def _normalize(text: str) -> str:

@@ -178,18 +178,8 @@ def fallback_reply_text(
     finish_reason: str,
     counters: dict[str, int] | None = None,
 ) -> str:
-    candidates = (
-        ("卡了 等下", "这会儿有点卡", "先缓一下")
-        if scope_type == "group"
-        else ("我这会儿有点卡，等下再说。", "卡住了，等我缓一下。", "刚才没接稳，等下再回你。")
-    )
-    if counters is None:
-        seed = sum(ord(char) for char in f"{scope_type}:{finish_reason}")
-        return candidates[seed % len(candidates)]
-    key = f"{scope_type}:{finish_reason}"
-    index = counters.get(key, 0)
-    counters[key] = index + 1
-    return candidates[index % len(candidates)]
+    del scope_type, finish_reason, counters
+    return "我不知道"
 
 
 def _fallback_reply(

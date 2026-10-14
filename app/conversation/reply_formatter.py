@@ -69,7 +69,7 @@ _VOICE_STATUS_PREFIX_PATTERN = re.compile(
     r")"
     r"[\s：:，,。.!！?？]*"
 )
-_EMPTY_REPLY_FALLBACKS = ("卡了", "刚才那句算了", "当我没说")
+_EMPTY_REPLY_FALLBACKS = ("我不知道", "我不知道", "我不知道")
 _QUALITY_EMPTY_FALLBACK = "我先不展开。"
 _QUALITY_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _QUALITY_ZERO_WIDTH_PATTERN = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
@@ -270,7 +270,7 @@ def _unwrap_quality_payload(text: str) -> str:
             if isinstance(value, str):
                 return value
         if "reply_text" in payload:
-            return "卡了"
+            return "我不知道"
         return ""
     return ""
 
