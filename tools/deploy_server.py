@@ -18,36 +18,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=22)
     parser.add_argument("--root", default="/opt/qq_bot")
     parser.add_argument("--service", default="qq-bot.service")
-    parser.add_argument("--napcat-container", default="napcat")
-    parser.add_argument(
-        "--video-cache-host",
-        default="/opt/napcat/cache/qq-bot-media",
-    )
-    parser.add_argument(
-        "--video-cache-container",
-        default="/app/napcat/cache/qq-bot-media",
-    )
+    parser.add_argument("--connector-container", default="llbot")
     parser.add_argument("--password-env", default="", help="Optional env var containing the SSH password.")
     parser.add_argument("--sudo-password-env", default="", help="Optional env var containing the sudo password.")
     parser.add_argument("--skip-tests", action="store_true")
-    napcat_restart = parser.add_mutually_exclusive_group()
-    napcat_restart.add_argument(
-        "--restart-napcat",
+    parser.add_argument(
+        "--restart-connector",
         action="store_true",
-        dest="restart_napcat",
-        help="Restart NapCat explicitly; disabled by default to preserve login state.",
-    )
-    napcat_restart.add_argument(
-        "--skip-napcat-restart",
-        action="store_false",
-        dest="restart_napcat",
-        help="Compatibility flag; NapCat restart is already disabled by default.",
+        help="Restart the LLBot connector explicitly; disabled by default to preserve login state.",
     )
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--keep-remote-archive", action="store_true")
     parser.add_argument("--archive-dir", default=".deploy")
-    parser.set_defaults(restart_napcat=False)
     return parser
 
 
@@ -66,13 +49,11 @@ def main() -> int:
         archive=remote_archive,
         commit=commit,
         service=args.service,
-        napcat_container=args.napcat_container,
+        connector_container=args.connector_container,
         sudo_password=_env_value(args.sudo_password_env),
         run_tests=not args.skip_tests,
-        restart_napcat=args.restart_napcat,
+        restart_connector=args.restart_connector,
         keep_archive=args.keep_remote_archive,
-        video_cache_host=args.video_cache_host,
-        video_cache_container=args.video_cache_container,
     )
 
     if args.dry_run:
@@ -84,9 +65,7 @@ def main() -> int:
                     f"remote={args.user}@{args.host}:{remote_archive}",
                     f"root={args.root}",
                     f"run_tests={not args.skip_tests}",
-                    f"restart_napcat={args.restart_napcat}",
-                    f"video_cache_host={args.video_cache_host}",
-                    f"video_cache_container={args.video_cache_container}",
+                    f"restart_connector={args.restart_connector}",
                 )
             )
         )
@@ -125,13 +104,11 @@ def build_remote_script(
     archive: str,
     commit: str,
     service: str,
-    napcat_container: str,
+    connector_container: str,
     sudo_password: str,
     run_tests: bool,
-    restart_napcat: bool,
+    restart_connector: bool,
     keep_archive: bool,
-    video_cache_host: str = "/opt/napcat/cache/qq-bot-media",
-    video_cache_container: str = "/app/napcat/cache/qq-bot-media",
 ) -> str:
     sudo_assignment = ""
     if sudo_password:
@@ -148,11 +125,9 @@ ROOT={shlex.quote(root)}
 ARCHIVE={shlex.quote(archive)}
 COMMIT={shlex.quote(commit)}
 SERVICE={shlex.quote(service)}
-NAPCAT_CONTAINER={shlex.quote(napcat_container)}
-VIDEO_CACHE_HOST={shlex.quote(video_cache_host)}
-VIDEO_CACHE_CONTAINER={shlex.quote(video_cache_container)}
+CONNECTOR_CONTAINER={shlex.quote(connector_container)}
 RUN_TESTS={_bash_bool(run_tests)}
-RESTART_NAPCAT={_bash_bool(restart_napcat)}
+RESTART_CONNECTOR={_bash_bool(restart_connector)}
 KEEP_ARCHIVE={_bash_bool(keep_archive)}
 {sudo_assignment}
 
@@ -176,9 +151,6 @@ SERVICE_WAS_ACTIVE=0
 MUTATION_STARTED=0
 DB_EXISTED=0
 DB_BACKUP=""
-CACHE_CREATED=0
-CACHE_MODE_BEFORE=""
-CACHE_MARKER=""
 BACKUP=""
 RELEASE=""
 
@@ -278,16 +250,6 @@ PY
   elif [ "$DB_EXISTED" = "0" ] && [ -n "${{DATABASE_PATH:-}}" ]; then
     rm -f "$DATABASE_PATH" "$DATABASE_PATH-wal" "$DATABASE_PATH-shm"
   fi
-  if [ "$CACHE_CREATED" = "1" ]; then
-    if [ -n "$CACHE_MARKER" ] && [ -f "$CACHE_MARKER" ] \
-      && [ ! -L "$VIDEO_CACHE_HOST" ]; then
-      rm -rf --one-file-system "$VIDEO_CACHE_HOST" || rollback_failed=1
-    elif ! rmdir "$VIDEO_CACHE_HOST" 2>/dev/null; then
-      rollback_failed=1
-    fi
-  elif [ -n "$CACHE_MODE_BEFORE" ]; then
-    chmod "$CACHE_MODE_BEFORE" "$VIDEO_CACHE_HOST" || rollback_failed=1
-  fi
   if [ "$SERVICE_WAS_ACTIVE" = "1" ]; then
     sudo_run systemctl start "$SERVICE" || rollback_failed=1
     sudo_run systemctl is-active --quiet "$SERVICE" || rollback_failed=1
@@ -324,11 +286,6 @@ if [ ! -x "$ROOT/.venv/bin/python" ]; then
   echo ".venv/bin/python not found; create the server venv before deploying" >&2
   exit 2
 fi
-if ! "/usr/bin/ffmpeg" -version >/dev/null 2>&1; then
-  echo "/usr/bin/ffmpeg is required for video downloads" >&2
-  exit 2
-fi
-
 BACKUP="${{ROOT}}_runtime_backup_$(date +%Y%m%d-%H%M%S)"
 RELEASE="/tmp/qq_bot_release_${{COMMIT}}_$$"
 echo "backup=$BACKUP"
@@ -347,65 +304,10 @@ if ! getent passwd "$SERVICE_USER" >/dev/null; then
   echo "systemd service user does not exist: $SERVICE_USER" >&2
   exit 2
 fi
-NAPCAT_WAS_RUNNING=$(sudo_run docker inspect \
-  --format '{{{{.State.Running}}}}' "$NAPCAT_CONTAINER")
-
-HOST_CACHE_PARENT=$(dirname "$VIDEO_CACHE_HOST")
-CONTAINER_CACHE_PARENT=$(dirname "$VIDEO_CACHE_CONTAINER")
-MOUNTS_JSON=$(sudo_run docker inspect \
-  --format '{{{{json .Mounts}}}}' "$NAPCAT_CONTAINER")
-if ! MOUNTS_JSON="$MOUNTS_JSON" \
-  HOST_CACHE_PARENT="$HOST_CACHE_PARENT" \
-  CONTAINER_CACHE_PARENT="$CONTAINER_CACHE_PARENT" \
-  python3 - <<'PY'
-import json
-import os
-
-mounts = json.loads(os.environ["MOUNTS_JSON"])
-matched = any(
-    item.get("Source") == os.environ["HOST_CACHE_PARENT"]
-    and item.get("Destination") == os.environ["CONTAINER_CACHE_PARENT"]
-    and item.get("RW") is True
-    for item in mounts
-)
-raise SystemExit(0 if matched else 1)
-PY
-then
-  echo "NapCat cache mount does not match video cache paths" >&2
-  exit 2
-fi
-
-if ! CONFIG_PATH="$ROOT/config/config.json" \
-  VIDEO_CACHE_HOST="$VIDEO_CACHE_HOST" \
-  VIDEO_CACHE_CONTAINER="$VIDEO_CACHE_CONTAINER" python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-with Path(os.environ["CONFIG_PATH"]).open("r", encoding="utf-8") as handle:
-    config = json.load(handle)
-video = config.get("video", {{}})
-matched = (
-    video.get("hostCachePath") == os.environ["VIDEO_CACHE_HOST"]
-    and video.get("containerCachePath") == os.environ["VIDEO_CACHE_CONTAINER"]
-)
-raise SystemExit(0 if matched else 1)
-PY
-then
-  echo "private video cache configuration does not match verified paths" >&2
-  exit 2
-fi
-
-if [ -L "$VIDEO_CACHE_HOST" ]; then
-  echo "video cache path must not be a symbolic link: $VIDEO_CACHE_HOST" >&2
-  exit 2
-fi
-if [ -e "$VIDEO_CACHE_HOST" ] && [ ! -d "$VIDEO_CACHE_HOST" ]; then
-  echo "video cache path is not a directory: $VIDEO_CACHE_HOST" >&2
-  exit 2
-fi
-if [ -d "$VIDEO_CACHE_HOST" ]; then
-  CACHE_MODE_BEFORE=$(stat -c '%a' "$VIDEO_CACHE_HOST")
+CONNECTOR_WAS_RUNNING="false"
+if sudo_run docker inspect "$CONNECTOR_CONTAINER" >/dev/null 2>&1; then
+  CONNECTOR_WAS_RUNNING=$(sudo_run docker inspect \
+    --format '{{{{.State.Running}}}}' "$CONNECTOR_CONTAINER")
 fi
 
 tar -xf "$ARCHIVE" -C "$RELEASE"
@@ -507,13 +409,11 @@ fi
 BACKUP="$BACKUP" COMMIT="$COMMIT" SERVICE="$SERVICE" \
   SERVICE_WAS_ACTIVE="$SERVICE_WAS_ACTIVE" \
   SERVICE_USER="$SERVICE_USER" SERVICE_GROUP="$SERVICE_GROUP" \
-  NAPCAT_WAS_RUNNING="$NAPCAT_WAS_RUNNING" \
+  CONNECTOR_WAS_RUNNING="$CONNECTOR_WAS_RUNNING" \
   SERVICE_FRAGMENT="$SERVICE_FRAGMENT" SERVICE_FRAGMENT_HASH="$SERVICE_FRAGMENT_HASH" \
   SERVICE_DROPINS="$SERVICE_DROPINS" SERVICE_DROPIN_HASHES="$SERVICE_DROPIN_HASHES" \
   DATABASE_PATH="$DATABASE_PATH" DB_EXISTED="$DB_EXISTED" \
-  DB_BACKUP="$DB_BACKUP" VIDEO_CACHE_HOST="$VIDEO_CACHE_HOST" \
-  VIDEO_CACHE_CONTAINER="$VIDEO_CACHE_CONTAINER" \
-  CACHE_MODE_BEFORE="$CACHE_MODE_BEFORE" python3 - <<'PY'
+  DB_BACKUP="$DB_BACKUP" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -536,7 +436,7 @@ manifest = {{
     "serviceWasActive": os.environ["SERVICE_WAS_ACTIVE"] == "1",
     "serviceUser": os.environ["SERVICE_USER"],
     "serviceGroup": os.environ["SERVICE_GROUP"] or None,
-    "napcatWasRunning": os.environ["NAPCAT_WAS_RUNNING"] == "true",
+    "connectorWasRunning": os.environ["CONNECTOR_WAS_RUNNING"] == "true",
     "serviceFragment": os.environ["SERVICE_FRAGMENT"],
     "unitHashes": {{
         "fragment": os.environ["SERVICE_FRAGMENT_HASH"] or None,
@@ -550,9 +450,6 @@ manifest = {{
     "databasePath": os.environ["DATABASE_PATH"],
     "databaseExisted": os.environ["DB_EXISTED"] == "1",
     "databaseBackup": os.environ["DB_BACKUP"] or None,
-    "videoCacheHost": os.environ["VIDEO_CACHE_HOST"],
-    "videoCacheContainer": os.environ["VIDEO_CACHE_CONTAINER"],
-    "videoCacheModeBefore": os.environ["CACHE_MODE_BEFORE"] or None,
     "files": files,
 }}
 (backup / "manifest.json").write_text(
@@ -561,31 +458,7 @@ manifest = {{
 )
 PY
 
-if [ -L "$VIDEO_CACHE_HOST" ]; then
-  echo "video cache path became a symbolic link before mutation" >&2
-  exit 2
-fi
 MUTATION_STARTED=1
-if [ ! -d "$VIDEO_CACHE_HOST" ]; then
-  mkdir -m 0750 "$VIDEO_CACHE_HOST"
-  CACHE_CREATED=1
-  CACHE_MARKER="$VIDEO_CACHE_HOST/.qq-bot-deploy-cache-$COMMIT-$$"
-  : > "$CACHE_MARKER"
-fi
-chmod 0750 "$VIDEO_CACHE_HOST"
-SERVICE_IDENTITY_ARGS=(-u "$SERVICE_USER")
-if [ -n "$SERVICE_GROUP" ]; then
-  SERVICE_IDENTITY_ARGS+=(-g "$SERVICE_GROUP")
-fi
-if ! sudo_run "${{SERVICE_IDENTITY_ARGS[@]}}" test -w "$VIDEO_CACHE_HOST"; then
-  echo "qq-bot.service identity cannot write the video cache" >&2
-  exit 2
-fi
-if ! sudo_run docker exec "$NAPCAT_CONTAINER" test -r "$VIDEO_CACHE_CONTAINER"; then
-  echo "NapCat cannot read the configured video cache" >&2
-  exit 2
-fi
-
 ROOT="$ROOT" RELEASE="$RELEASE" python3 - <<'PY'
 from __future__ import annotations
 
@@ -644,7 +517,7 @@ mkdir -p "$ROOT/data" "$ROOT/logs"
 
 cd "$ROOT"
 . .venv/bin/activate
-python -m pip install --upgrade-strategy only-if-needed -e ".[dev,market,video]"
+python -m pip install --upgrade-strategy only-if-needed -e ".[dev,market]"
 python - <<'PY'
 import asyncio
 from app.config import load_config
@@ -666,8 +539,8 @@ if [ "$RUN_TESTS" = "1" ]; then
 fi
 
 sudo_run systemctl start "$SERVICE"
-if [ "$RESTART_NAPCAT" = "1" ]; then
-  sudo_run docker restart "$NAPCAT_CONTAINER" >/dev/null
+if [ "$RESTART_CONNECTOR" = "1" ]; then
+  sudo_run docker restart "$CONNECTOR_CONTAINER" >/dev/null
 fi
 READY=0
 for wait_seconds in 5 10 15; do
@@ -682,9 +555,6 @@ if [ "$READY" != "1" ]; then
   exit 1
 fi
 
-if [ -n "$CACHE_MARKER" ]; then
-  rm -f "$CACHE_MARKER"
-fi
 echo "deployment successful; rollback material retained at $BACKUP"
 """
 

@@ -480,17 +480,6 @@ async def _migration_002_sessions_and_features(db: aiosqlite.Connection) -> None
           PRIMARY KEY(group_id, user_id)
         );
 
-        CREATE TABLE IF NOT EXISTS group_news_subscriptions (
-          group_id TEXT PRIMARY KEY,
-          enabled INTEGER NOT NULL DEFAULT 0,
-          send_time TEXT NOT NULL DEFAULT '08:00',
-          timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
-          categories TEXT NOT NULL DEFAULT 'politics,business,technology,finance',
-          last_sent_date TEXT,
-          updated_by TEXT NOT NULL,
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
         CREATE TABLE IF NOT EXISTS stock_watch_items (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           user_id TEXT NOT NULL,
@@ -520,25 +509,13 @@ async def _migration_002_sessions_and_features(db: aiosqlite.Connection) -> None
     )
 
 
-async def _migration_003_news_delivery_checkpoints(
+async def _migration_003_retired_feature_compatibility(
     db: aiosqlite.Connection,
 ) -> None:
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS group_news_delivery_checkpoints (
-          group_id TEXT NOT NULL,
-          delivery_date TEXT NOT NULL,
-          messages_json TEXT NOT NULL,
-          next_message_index INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-          PRIMARY KEY(group_id, delivery_date),
-          FOREIGN KEY(group_id) REFERENCES group_news_subscriptions(group_id)
-            ON DELETE CASCADE,
-          CHECK(next_message_index >= 0)
-        )
-        """
-    )
+    # Version 3 is retained as a no-op so existing databases keep their
+    # migration numbering. The former news tables are no longer created or
+    # accessed by the runtime.
+    del db
 
 
 async def _migration_004_audit_and_member_preferences(
@@ -579,8 +556,8 @@ MIGRATIONS = (
     ),
     Migration(
         version=3,
-        name="scheduled news delivery checkpoints",
-        action=_migration_003_news_delivery_checkpoints,
+        name="retired feature compatibility",
+        action=_migration_003_retired_feature_compatibility,
     ),
     Migration(
         version=4,

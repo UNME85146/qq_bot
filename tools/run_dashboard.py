@@ -16,14 +16,18 @@ from app.ops.web_dashboard import SystemDashboardBackend, create_dashboard_app, 
 def build_app():
     origin = os.environ["QQ_BOT_DASHBOARD_ORIGIN"]
     password_path = Path(os.environ["QQ_BOT_DASHBOARD_PASSWORD_HASH_FILE"])
-    root = Path(os.environ.get("QQ_BOT_NAPCAT_ROOT", "/opt/qq_bot/napcat"))
+    bot_root = Path(os.environ.get("QQ_BOT_ROOT", str(Path.cwd())))
+    default_qr_path = Path("/run/qqbot-dashboard/login-qrcode.png")
     backend = SystemDashboardBackend(
-        qr_path=root / "cache" / "qrcode.png",
-        napcat_config_dir=root / "config",
+        qr_path=Path(os.environ.get("QQ_BOT_DASHBOARD_QR_PATH", str(default_qr_path))),
         bot_port=int(os.environ.get("QQ_BOT_DASHBOARD_BOT_PORT", "8081")),
         onebot_token_path=Path(os.environ["QQ_BOT_DASHBOARD_ONEBOT_TOKEN_FILE"]),
         onebot_http_port=int(os.environ.get("QQ_BOT_DASHBOARD_ONEBOT_HTTP_PORT", "3000")),
-        webui_token_path=Path(os.environ["QQ_BOT_DASHBOARD_WEBUI_TOKEN_FILE"]),
+        llbot_webui_port=int(os.environ.get("QQ_BOT_DASHBOARD_LLBOT_WEBUI_PORT", "3080")),
+        webui_token_path=Path(os.environ["QQ_BOT_DASHBOARD_LLBOT_TOKEN_FILE"]),
+        config_path=Path(os.environ.get("QQ_BOT_CONFIG_PATH", str(bot_root / "config" / "config.json"))),
+        env_path=Path(os.environ.get("QQ_BOT_ENV_PATH", str(bot_root / ".env"))),
+        service_name="qq-bot.service",
     )
     return create_dashboard_app(origin=origin, password_hash=read_password_hash(password_path), backend=backend)
 

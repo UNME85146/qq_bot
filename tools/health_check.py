@@ -52,8 +52,8 @@ def build_health_report(
     recent_event_limit: int = 50,
 ) -> dict[str, Any]:
     qq_bot_listening = tcp_listening(config.onebot.host, config.onebot.port)
-    napcat_webui_listening = tcp_listening("127.0.0.1", 6099)
-    napcat_to_bot_established = tcp_established_on_local_port(
+    connector_webui_listening = tcp_listening("127.0.0.1", 3080)
+    connector_to_bot_established = tcp_established_on_local_port(
         config.onebot.host,
         config.onebot.port,
     )
@@ -62,8 +62,8 @@ def build_health_report(
         "status": "ok",
         "warnings": [],
         "qqBotListening": qq_bot_listening,
-        "napcatWebuiListening": napcat_webui_listening,
-        "napcatToBotEstablished": napcat_to_bot_established,
+        "connectorWebuiListening": connector_webui_listening,
+        "connectorToBotEstablished": connector_to_bot_established,
         "selfId": config.qq.self_id,
         "allowedGroups": sorted(config.qq.allowed_group_ids),
         "persona": {
@@ -91,16 +91,14 @@ def build_health_report(
     }
     if not qq_bot_listening:
         report["warnings"].append("qq_bot_not_listening")
-    if not napcat_webui_listening:
-        report["warnings"].append("napcat_webui_not_listening")
-    if not napcat_to_bot_established:
-        report["warnings"].append("napcat_to_bot_not_established")
+    if not connector_webui_listening:
+        report["warnings"].append("connector_webui_not_listening")
+    if not connector_to_bot_established:
+        report["warnings"].append("connector_to_bot_not_established")
     if report["db"].get("lastModelFailure") is not None:
         report["warnings"].append("model_failure_seen")
     if report["logs"].get("lastBotOfflineAt"):
         report["warnings"].append("bot_offline_seen_in_logs")
-    if report["logs"].get("lastKickedOfflineAt"):
-        report["warnings"].append("napcat_kicked_offline_seen_in_logs")
     if report["warnings"]:
         report["status"] = "warn"
     if not qq_bot_listening:
@@ -165,16 +163,12 @@ def _log_health(log_dir: Path) -> dict[str, Any]:
         "sizeBytes": sum(path.stat().st_size for path in files),
         "lastBotConnectedAt": None,
         "lastBotOfflineAt": None,
-        "lastKickedOfflineAt": None,
     }
     out_log = log_dir / "bot-systemd.out.log"
     if out_log.exists():
         connected_at, offline_at = _scan_bot_log(out_log)
         data["lastBotConnectedAt"] = connected_at
         data["lastBotOfflineAt"] = offline_at
-    napcat_log = log_dir / "napcat.log"
-    if napcat_log.exists():
-        data["lastKickedOfflineAt"] = _scan_kicked_log(napcat_log)
     return data
 
 
@@ -221,15 +215,6 @@ def _scan_bot_log(path: Path) -> tuple[str | None, str | None]:
         if any(marker in lowered for marker in ("bot_offline", "kickedoffline")):
             offline_at = timestamp or offline_at
     return connected_at, offline_at
-
-
-def _scan_kicked_log(path: Path) -> str | None:
-    kicked_at: str | None = None
-    for line in _tail_lines(path, max_lines=2000):
-        timestamp = _extract_log_timestamp(line)
-        if "kickedoffline" in line.lower():
-            kicked_at = timestamp or kicked_at
-    return kicked_at
 
 
 def _tail_lines(path: Path, *, max_lines: int) -> list[str]:

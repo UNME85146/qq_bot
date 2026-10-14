@@ -1,0 +1,33 @@
+[Unit]
+Description=QQ Bot private operator dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qqbot
+Group=qqbot
+WorkingDirectory=/opt/qq_bot
+Environment=PYTHON_DOTENV_DISABLED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=QQ_BOT_DASHBOARD_ORIGIN=https://bot.example.com
+Environment=QQ_BOT_DASHBOARD_PASSWORD_HASH_FILE=/opt/qq_bot/runtime_artifacts/secrets/dashboard-admin.hash
+Environment=QQ_BOT_DASHBOARD_ONEBOT_TOKEN_FILE=/opt/qq_bot/runtime_artifacts/secrets/dashboard-onebot.token
+Environment=QQ_BOT_DASHBOARD_ONEBOT_HTTP_PORT=3100
+Environment=QQ_BOT_DASHBOARD_LLBOT_TOKEN_FILE=/opt/llbot/data/webui_token.txt
+Environment=QQ_BOT_DASHBOARD_LLBOT_WEBUI_PORT=3080
+Environment=QQ_BOT_DASHBOARD_QR_PATH=/run/qqbot-dashboard/login-qrcode.png
+RuntimeDirectory=qqbot-dashboard
+RuntimeDirectoryMode=0700
+ExecStart=/opt/qq_bot/.venv/bin/python -B /opt/qq_bot/tools/run_dashboard.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/qq_bot/config /opt/qq_bot/.env
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

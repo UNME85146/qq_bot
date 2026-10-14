@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import replace
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -103,6 +104,55 @@ class OpenAICompatibleClient:
             completion_tokens=usage.get("completion_tokens"),
         )
 
+    async def generate_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> GeneratedReply:
+        """Aggregate an SSE completion before exposing it to the chat layer.
+
+        QQ must never receive a partial structured reply. We still record the
+        first visible delta so production logs can distinguish provider TTFT
+        from the later OneBot send delay.
+        """
+        payload: dict[str, Any] = {
+            "model": self._config.name,
+            "messages": messages,
+            "temperature": self._config.temperature,
+            "max_tokens": self._config.max_tokens if max_tokens is None else max_tokens,
+            "stream": True,
+        }
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        headers = {"Authorization": f"Bearer {self._config.api_key}"}
+        started_at = time.perf_counter()
+        timeout = httpx.Timeout(self._config.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self._config.base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/event-stream" not in content_type:
+                    raw = await response.aread()
+                    data = json.loads(raw.decode("utf-8"))
+                    return _reply_from_payload(
+                        data,
+                        model_name=self._config.name,
+                        model_streamed=False,
+                        model_total_ms=_elapsed_ms(started_at),
+                    )
+                return await _aggregate_sse_response(
+                    response,
+                    model_name=self._config.name,
+                    started_at=started_at,
+                )
+
     async def generate_probe(self) -> GeneratedReply:
         return await self.generate_with_options(
             [{"role": "user", "content": "只回复 ok"}],
@@ -146,6 +196,64 @@ class LatencyAwareModelClient:
 
     async def generate(self, messages: list[dict[str, Any]]) -> GeneratedReply:
         return await self.generate_with_options(messages)
+
+    async def generate_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> GeneratedReply:
+        await self.refresh_if_due()
+        endpoint = self._active_endpoint
+        if endpoint is None:
+            raise ModelEndpointSelectionError("no healthy model endpoint")
+        started_at = self._clock()
+        try:
+            return await _call_client(
+                self._clients[endpoint],
+                messages,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                prefer_stream=True,
+            )
+        except Exception as first_error:
+            await self._record_endpoint_attempt(
+                endpoint,
+                stage="stream_request",
+                success=False,
+                duration_ms=int((self._clock() - started_at) * 1000),
+                error_category=classify_provider_error(first_error),
+            )
+            for alternate in self._alternate_endpoints(endpoint):
+                alternate_started_at = self._clock()
+                try:
+                    reply = await _call_client(
+                        self._clients[alternate],
+                        messages,
+                        max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
+                        prefer_stream=True,
+                    )
+                except Exception as alternate_error:
+                    await self._record_endpoint_attempt(
+                        alternate,
+                        stage="stream_request_failover",
+                        success=False,
+                        duration_ms=int((self._clock() - alternate_started_at) * 1000),
+                        error_category=classify_provider_error(alternate_error),
+                    )
+                    continue
+                self._active_endpoint = alternate
+                await self._record_endpoint_attempt(
+                    alternate,
+                    stage="stream_request_failover",
+                    success=True,
+                    duration_ms=int((self._clock() - alternate_started_at) * 1000),
+                    error_category=None,
+                )
+                return reply
+            raise first_error
 
     async def generate_with_options(
         self,
@@ -373,6 +481,8 @@ def create_model_client(config: ModelConfig) -> LlmClient:
 
 
 def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -381,6 +491,8 @@ def _content_to_text(content: Any) -> str:
             if isinstance(item, dict) and item.get("type") == "text":
                 parts.append(str(item.get("text", "")))
         return "\n".join(parts)
+    if isinstance(content, dict):
+        return str(content.get("text", ""))
     return str(content)
 
 
@@ -390,7 +502,16 @@ async def _call_client(
     *,
     max_tokens: int | None,
     reasoning_effort: str | None,
+    prefer_stream: bool = False,
 ) -> GeneratedReply:
+    if prefer_stream:
+        generate_streaming = getattr(client, "generate_streaming", None)
+        if callable(generate_streaming):
+            return await generate_streaming(
+                messages,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
     if max_tokens is None and reasoning_effort is None:
         return await client.generate(messages)
     generate_with_options = getattr(client, "generate_with_options", None)
@@ -401,3 +522,81 @@ async def _call_client(
             reasoning_effort=reasoning_effort,
         )
     return await client.generate(messages)
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((time.perf_counter() - started_at) * 1000))
+
+
+def _reply_from_payload(
+    data: dict[str, Any],
+    *,
+    model_name: str,
+    model_streamed: bool,
+    model_total_ms: int | None,
+    model_ttft_ms: int | None = None,
+) -> GeneratedReply:
+    choice = data["choices"][0]
+    message = choice.get("message") or {}
+    text = _content_to_text(message.get("content", "")).strip()
+    usage = data.get("usage") or {}
+    return GeneratedReply(
+        text=text,
+        raw_model_text=text,
+        model_name=model_name,
+        finish_reason=choice.get("finish_reason", "unknown"),
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+        model_streamed=model_streamed,
+        model_ttft_ms=model_ttft_ms,
+        model_total_ms=model_total_ms,
+    )
+
+
+async def _aggregate_sse_response(
+    response,
+    *,
+    model_name: str,
+    started_at: float,
+) -> GeneratedReply:
+    pieces: list[str] = []
+    usage: dict[str, Any] = {}
+    finish_reason = "unknown"
+    ttft_ms: int | None = None
+    async for raw_line in response.aiter_lines():
+        line = str(raw_line).strip()
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data.get("usage"), dict):
+            usage.update(data["usage"])
+        choices = data.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            continue
+        choice = choices[0]
+        delta = choice.get("delta") or choice.get("message") or {}
+        text = _content_to_text(delta.get("content", ""))
+        if text:
+            if ttft_ms is None:
+                ttft_ms = _elapsed_ms(started_at)
+            pieces.append(text)
+        if choice.get("finish_reason"):
+            finish_reason = str(choice["finish_reason"])
+    text = "".join(pieces).strip()
+    return GeneratedReply(
+        text=text,
+        raw_model_text=text,
+        model_name=model_name,
+        finish_reason=finish_reason,
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+        model_streamed=True,
+        model_ttft_ms=ttft_ms,
+        model_total_ms=_elapsed_ms(started_at),
+    )

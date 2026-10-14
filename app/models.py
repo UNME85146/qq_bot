@@ -123,28 +123,6 @@ class GroupMemberProfile:
 
 
 @dataclass(frozen=True)
-class GroupNewsSubscription:
-    group_id: str
-    enabled: bool
-    send_time: str
-    timezone: str
-    categories: tuple[str, ...]
-    last_sent_date: str | None
-    updated_by: str
-    updated_at: str | None
-
-
-@dataclass(frozen=True)
-class GroupNewsDeliveryCheckpoint:
-    group_id: str
-    delivery_date: str
-    messages: tuple[str, ...]
-    next_message_index: int
-    created_at: str | None
-    updated_at: str | None
-
-
-@dataclass(frozen=True)
 class StockWatchItem:
     id: int
     user_id: str
@@ -363,44 +341,6 @@ class RetryConfig:
 
 
 @dataclass(frozen=True)
-class VideoConfig:
-    enabled: bool = False
-    host_cache_path: str = "runtime_artifacts/video-cache"
-    container_cache_path: str = "/path/in/container/qq-bot-media"
-    per_message_concurrency: int = 3
-    global_concurrency: int = 6
-    download_timeout_seconds: float = 300.0
-    send_timeout_seconds: float = 90.0
-    qq_video_max_bytes: int | None = None
-    min_free_bytes: int = 0
-    http_proxy_env: str = "QQ_BOT_VIDEO_HTTP_PROXY"
-    socks_proxy_env: str = "QQ_BOT_VIDEO_SOCKS_PROXY"
-    cookie_file_env: str = "QQ_BOT_VIDEO_COOKIE_FILE"
-    progress_threshold_seconds: float = 1.0
-    domain_failure_threshold: int = 2
-    domain_recovery_seconds: float = 120.0
-    canonical_url_cache_seconds: float = 3600.0
-    backoff_jitter_seconds: float = 0.5
-
-
-def _default_news_feeds() -> dict[str, tuple[str, ...]]:
-    return {
-        "politics": (),
-        "business": (),
-        "technology": (),
-        "finance": (),
-    }
-
-
-@dataclass(frozen=True)
-class NewsConfig:
-    enabled: bool = False
-    default_time: str = "08:00"
-    timezone: str = "Asia/Shanghai"
-    feeds: dict[str, tuple[str, ...]] = field(default_factory=_default_news_feeds)
-
-
-@dataclass(frozen=True)
 class CodexRunwayConfig:
     enabled: bool = False
     recipient_user_id: str = ""
@@ -423,7 +363,7 @@ class UsageRankingReportConfig:
     timezone: str = "Asia/Shanghai"
     limit: int = 50
     request_timeout_seconds: float = 20.0
-    base_url: str = "https://api.example.com"
+    base_url: str = "https://cf.silhouette.ltd"
     refresh_token_path: str = "runtime_artifacts/secrets/usage-refresh-token"
     output_dir: str = "runtime_artifacts/usage-ranking"
     font_path: str = "runtime_artifacts/fonts/NotoSansSC-VF.ttf"
@@ -509,8 +449,6 @@ class AppConfig:
         default_factory=ConversationSessionsConfig
     )
     retry: RetryConfig = field(default_factory=RetryConfig)
-    video: VideoConfig = field(default_factory=VideoConfig)
-    news: NewsConfig = field(default_factory=NewsConfig)
     codex_runway: CodexRunwayConfig = field(default_factory=CodexRunwayConfig)
     usage_ranking_report: UsageRankingReportConfig = field(
         default_factory=UsageRankingReportConfig
@@ -566,3 +504,6 @@ class GeneratedReply:
     reply_mode: str = "short"
     send_sticker: bool = False
     sticker_intent: str = ""
+    model_streamed: bool = False
+    model_ttft_ms: int | None = None
+    model_total_ms: int | None = None

@@ -236,6 +236,13 @@ async def _call_model(
     max_tokens: int | None,
     reasoning_effort: str | None,
 ) -> GeneratedReply:
+    streaming = getattr(model_client, "generate_streaming", None)
+    if callable(streaming):
+        return await streaming(
+            messages,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
     if max_tokens is None and reasoning_effort is None:
         return await model_client.generate(messages)
     generate_with_options = getattr(model_client, "generate_with_options", None)

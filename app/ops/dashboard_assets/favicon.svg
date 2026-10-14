@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>QQ Bot</title>
+  <rect width="64" height="64" rx="14" fill="#126f59"/>
+  <path d="M16 19h32v24H16z" fill="#fff" opacity=".96"/>
+  <path d="M21 25h22M21 32h16M21 39h11" stroke="#126f59" stroke-width="4" stroke-linecap="round"/>
+</svg>

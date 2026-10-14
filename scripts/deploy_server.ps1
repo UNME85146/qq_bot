@@ -3,11 +3,11 @@ param(
     [string]$User = "your-server-user",
     [int]$Port = 22,
     [string]$Root = "/opt/qq_bot",
+    [string]$ConnectorContainer = "llbot",
     [string]$PasswordEnv = "",
     [string]$SudoPasswordEnv = "",
     [switch]$SkipTests,
-    [switch]$RestartNapCat,
-    [switch]$SkipNapCatRestart,
+    [switch]$RestartConnector,
     [switch]$AllowDirty,
     [switch]$DryRun
 )
@@ -24,7 +24,8 @@ $argsList = @(
     "--host", $HostName,
     "--user", $User,
     "--port", "$Port",
-    "--root", $Root
+    "--root", $Root,
+    "--connector-container", $ConnectorContainer
 )
 
 if ($PasswordEnv) {
@@ -36,14 +37,8 @@ if ($SudoPasswordEnv) {
 if ($SkipTests) {
     $argsList += "--skip-tests"
 }
-if ($RestartNapCat -and $SkipNapCatRestart) {
-    throw "RestartNapCat and SkipNapCatRestart cannot be used together."
-}
-if ($RestartNapCat) {
-    $argsList += "--restart-napcat"
-}
-if ($SkipNapCatRestart) {
-    $argsList += "--skip-napcat-restart"
+if ($RestartConnector) {
+    $argsList += "--restart-connector"
 }
 if ($AllowDirty) {
     $argsList += "--allow-dirty"

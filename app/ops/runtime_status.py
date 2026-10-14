@@ -16,12 +16,12 @@ from tools.runtime_common import (
 
 def build_owner_status_text(config) -> str:
     bot_listening = tcp_listening(config.onebot.host, config.onebot.port)
-    napcat_webui = tcp_listening("127.0.0.1", 6099)
-    napcat_ws = tcp_established_on_local_port(config.onebot.host, config.onebot.port)
+    llbot_webui = tcp_listening("127.0.0.1", 3080)
+    llbot_ws = tcp_established_on_local_port(config.onebot.host, config.onebot.port)
     db_path = Path(config.storage.database_path)
     lines = [
         f"selfId={config.qq.self_id}",
-        f"bot={'on' if bot_listening else 'off'} napcat={'on' if napcat_webui else 'off'} ws={'on' if napcat_ws else 'off'}",
+        f"bot={'on' if bot_listening else 'off'} llbot={'on' if llbot_webui else 'off'} ws={'on' if llbot_ws else 'off'}",
         f"model={config.model.provider}/{config.model.name}",
         (
             f"persona={config.persona.mode}/"

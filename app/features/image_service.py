@@ -290,18 +290,35 @@ def parse_image_command(text: str) -> ImageCommand | None:
         if separator and (separator.isspace() or separator in {":", "："}):
             prompt = re.sub(r"^[\s:：]+", "", normalized[len(prefix) :])
             return ImageCommand(prompt=prompt, edit=edit)
+    natural_patterns = (
+        # A quantity marker makes the intent unambiguous without a space.
+        r"^(?:帮我|请你|给我)?(?:画|生成|制作)(?:一张|一幅)(?:图|图片|图像)?(.+)$",
+        r"^(?:来|给我来)(?:一张|一幅)(?:图|图片|图像)(.+)$",
+        # Keep bare ``生成报告`` and other ordinary sentences out of the route.
+        r"^(?:帮我|请你|给我)?(?:画|生成|制作)(?:图片|图像|图)[：:\s]+(.+)$",
+    )
+    for pattern in natural_patterns:
+        match = re.match(pattern, normalized, flags=re.IGNORECASE)
+        if match:
+            prompt = match.group(1).lstrip(" ：:").strip()
+            if prompt:
+                return ImageCommand(prompt=prompt, edit=False)
     return None
 
 
 def _classify_provider_error(exc: Exception) -> RetryClassification:
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)):
-        return RetryClassification("timeout", True)
+        # A provider timeout leaves billing status unknown. Retrying an image
+        # request can create a second paid generation.
+        return RetryClassification("timeout", False)
     if isinstance(exc, ImageProviderError):
         return RetryClassification(exc.category, exc.retryable)
     return RetryClassification("provider_unavailable", True)
 
 
 def _classify_send_error(exc: Exception) -> RetryClassification:
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-        return RetryClassification("timeout", True)
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)):
+        # OneBot may have accepted the message before the client timed out;
+        # replaying it would duplicate a media delivery.
+        return RetryClassification("timeout", False)
     return RetryClassification("send_failed", True)

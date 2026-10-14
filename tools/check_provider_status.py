@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import feedparser
 import httpx
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,16 +38,8 @@ from app.features.search_providers import (
     SearxngSearchProvider,
     WikipediaSearchProvider,
 )
-from app.features.video_providers import load_video_proxy
 
 
-DEFAULT_VIDEO_TARGETS = (
-    "https://v.douyin.com/",
-    "https://www.douyin.com/",
-    "https://www.iesdouyin.com/",
-    "https://www.bilibili.com/",
-    "https://b23.tv/",
-)
 
 @dataclass(frozen=True)
 class ProviderProbeSpec:
@@ -76,21 +67,6 @@ def build_provider_probe_specs(
         raise ValueError("timeout_seconds must be positive")
     values = os.environ if environ is None else environ
     specs: list[ProviderProbeSpec] = []
-
-    if config.news.enabled:
-        for category, urls in config.news.feeds.items():
-            for url in dict.fromkeys(urls):
-                specs.append(
-                    ProviderProbeSpec(
-                        kind="news_feed",
-                        provider="rss",
-                        target=url,
-                        stage="fetch_parse",
-                        timeout_seconds=timeout_seconds,
-                        operation=_rss_probe_operation(url, timeout_seconds),
-                    )
-                )
-
     if config.markets.enabled:
         market_configs = (
             ("a_share", config.markets.a_share),
@@ -141,30 +117,6 @@ def build_provider_probe_specs(
                     ),
                 )
             )
-
-    if config.video.enabled:
-        proxy_url = load_video_proxy(
-            http_proxy_env=config.video.http_proxy_env,
-            socks_proxy_env=config.video.socks_proxy_env,
-            environ=dict(values),
-        )
-        for target in DEFAULT_VIDEO_TARGETS:
-            specs.append(
-                ProviderProbeSpec(
-                    kind="video",
-                    provider="video",
-                    target=target,
-                    stage="http_egress",
-                    timeout_seconds=timeout_seconds,
-                    operation=_http_probe_operation(
-                        target,
-                        timeout_seconds,
-                        proxy_url=proxy_url,
-                        user_agent="QQBotProviderProbe/1.0",
-                    ),
-                )
-            )
-
     unique: dict[tuple[str, str, str], ProviderProbeSpec] = {}
     for spec in specs:
         key = (spec.kind, spec.provider, sanitize_provider_target(spec.target))
@@ -221,25 +173,6 @@ async def _run_provider_probe(
         "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     return key, item
-
-
-def _rss_probe_operation(
-    url: str,
-    timeout_seconds: float,
-) -> Callable[[], Awaitable[None]]:
-    async def operation() -> None:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_seconds),
-            follow_redirects=True,
-            headers={"User-Agent": "QQBotProviderProbe/1.0"},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-        parsed = await asyncio.to_thread(feedparser.parse, response.content)
-        if getattr(parsed, "bozo", False) and not parsed.entries:
-            raise ProviderProbeError("invalid_response")
-
-    return operation
 
 
 def _market_probe_operation(

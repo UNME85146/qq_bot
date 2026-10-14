@@ -112,7 +112,12 @@ async def send_reply_bubbles(
             )
             result = await bot.send(event, message)
             if on_sent is not None:
-                await on_sent(index, bubble, _extract_sent_message_id(result))
+                try:
+                    await on_sent(index, bubble, _extract_sent_message_id(result))
+                except Exception:
+                    # Delivery already succeeded; telemetry must not turn it into
+                    # a retryable send failure or duplicate QQ message.
+                    pass
         except Exception as exc:
             await on_send_error(exc, index, bubble)
 
@@ -165,7 +170,10 @@ async def send_structured_information(
                 ),
             )
             if on_sent is not None:
-                await on_sent(sent_count, bubble, _extract_sent_message_id(result))
+                try:
+                    await on_sent(sent_count, bubble, _extract_sent_message_id(result))
+                except Exception:
+                    pass
             sent_count += 1
         except Exception as exc:
             if overflow and is_message_too_long_error(exc):
@@ -189,11 +197,14 @@ async def send_structured_information(
                             ),
                         )
                         if on_sent is not None:
-                            await on_sent(
-                                sent_count,
-                                overflow_bubble,
-                                _extract_sent_message_id(result),
-                            )
+                            try:
+                                await on_sent(
+                                    sent_count,
+                                    overflow_bubble,
+                                    _extract_sent_message_id(result),
+                                )
+                            except Exception:
+                                pass
                         sent_count += 1
                     except Exception as overflow_exc:
                         await on_send_error(overflow_exc, sent_count, overflow_bubble)
@@ -211,11 +222,14 @@ async def send_structured_information(
                         ),
                     )
                     if on_sent is not None:
-                        await on_sent(
-                            sent_count,
-                            fallback,
-                            _extract_sent_message_id(result),
-                        )
+                        try:
+                            await on_sent(
+                                sent_count,
+                                fallback,
+                                _extract_sent_message_id(result),
+                            )
+                        except Exception:
+                            pass
                     sent_count += 1
                     continue
                 except Exception as fallback_exc:

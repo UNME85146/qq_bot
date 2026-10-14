@@ -23,18 +23,12 @@ from app.features.reminder_service import (
     is_explicit_reminder_request,
     is_reminder_command,
 )
-from app.features.news_service import (
-    NewsCommandService,
-)
 from app.features.codex_runway_monitor import codex_runway_worker
 from app.features.usage_ranking_report import usage_ranking_report_worker
-from app.features.rss_news_provider import RssNewsProvider
 from app.features.market_service import MarketCommandService, run_market_alert_once
 from app.features.market_providers import create_market_providers
 from app.features.search_providers import create_search_provider
 from app.features.search_service import GroupSearchCommandService
-from app.features.video_providers import YtDlpVideoExtractor
-from app.features.video_service import GroupVideoService
 from app.features.repeat_service import is_plus_one_text
 from app.features.runtime_features import (
     create_runtime_feature_hub,
@@ -80,7 +74,6 @@ from app.storage.repositories import (
     ConversationSessionRepository,
     GroupMemberProfileRepository,
     GroupMuteStateRepository,
-    GroupNewsSubscriptionRepository,
     StockWatchRepository,
     GroupPendingQuestionRepository,
     ScheduledDeliveryRepository,
@@ -103,25 +96,6 @@ _scheduled_delivery_repository = ScheduledDeliveryRepository(_config.storage.dat
 _pending_question_service = GroupPendingQuestionService(
     repository=_pending_question_repository,
 )
-_news_subscription_repository = GroupNewsSubscriptionRepository(
-    _config.storage.database_path
-)
-_news_provider = (
-    RssNewsProvider(
-        feeds=_config.news.feeds,
-        record_system_event=_conversation_service.record_system_event,
-    )
-    if _config.news.enabled and any(_config.news.feeds.values())
-    else None
-)
-_news_command_service = NewsCommandService(
-    provider=_news_provider,
-    repository=_news_subscription_repository,
-    qq_config=_config.qq,
-    default_time=_config.news.default_time,
-    timezone=_config.news.timezone,
-    model_client=create_model_client(_config.model),
-)
 _stock_watch_repository = StockWatchRepository(_config.storage.database_path)
 _market_providers = create_market_providers(
     _config.markets,
@@ -143,22 +117,6 @@ _search_command_service = GroupSearchCommandService(
     conversation_repository=ConversationRepository(_config.storage.database_path),
     session_repository=ConversationSessionRepository(_config.storage.database_path),
     profile_repository=GroupMemberProfileRepository(_config.storage.database_path),
-)
-_video_extractor = (
-    YtDlpVideoExtractor(
-        _config.video.host_cache_path,
-        http_proxy_env=_config.video.http_proxy_env,
-        socks_proxy_env=_config.video.socks_proxy_env,
-        cookie_file_env=_config.video.cookie_file_env,
-    )
-    if _config.video.enabled
-    else None
-)
-_video_service = GroupVideoService(
-    extractor=_video_extractor,
-    config=_config.video,
-    retry_policy=_config.retry,
-    record_system_event=_conversation_service.record_system_event,
 )
 _image_service = ImageGenerationService(
     _config.image_generation,
@@ -344,7 +302,7 @@ async def _clear_runtime_bot(bot: Bot) -> None:
 async def _runtime_market_alert_worker(bot: Bot) -> None:
     while True:
         try:
-            zone = ZoneInfo(_config.news.timezone)
+            zone = ZoneInfo("Asia/Shanghai")
             await run_market_alert_once(
                 bot,
                 _stock_watch_repository,
@@ -691,13 +649,7 @@ async def _try_handle_group_information_feature(
     event: GroupMessageEvent,
     message: NormalizedMessage,
 ) -> bool:
-    result = (
-        await _news_command_service.handle(message)
-        if message.text.strip().startswith("/help")
-        else None
-    )
-    if result is None:
-        result = await _market_command_service.handle(message)
+    result = await _market_command_service.handle(message)
     if result is None:
         result = await _search_command_service.handle(message)
     if result is None:
@@ -833,17 +785,6 @@ async def _try_handle_group_image_generation_feature(
         safety_blocked=False,
     )
     return True
-
-
-async def _try_handle_group_video_feature(
-    bot: Bot,
-    event: GroupMessageEvent,
-    message: NormalizedMessage,
-) -> bool:
-    del bot, event, message
-    return False
-
-
 def _is_explicit_group_sticker_request(message: NormalizedMessage) -> bool:
     return parse_direct_reply_intent(message).sticker_request
 
@@ -1214,7 +1155,6 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
             await _record_send_error(message.trace_id, exc, index)
 
         async def on_sent(index, bubble, sent_message_id):
-            del index
             sent_bubbles.append(str(bubble))
             if sent_message_id:
                 sent_message_ids.append(str(sent_message_id))
@@ -1227,6 +1167,13 @@ async def _process_group_reply_task(task: GroupReplyTask) -> None:
                 0,
                 target_message.session_id,
             )
+            if len(sent_bubbles) == 1:
+                await _conversation_service.record_system_event(
+                    level="INFO",
+                    event="group_reply_first_sent",
+                    detail=f"bubble_index={index}",
+                    trace_id=target_message.trace_id,
+                )
 
         await send_reply_bubbles(
             task.bot,

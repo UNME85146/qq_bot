@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
-import time
 
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, PrivateMessageEvent
@@ -30,12 +28,6 @@ from app.ops.config_editor import (
     handle_voice_config_command,
 )
 from app.ops.runtime_status import build_owner_status_text
-from app.ops.video_upload_acceptance import (
-    VideoUploadAcceptanceError,
-    VideoUploadPlanGate,
-    acceptance_audit_detail,
-    apply_video_upload_plan,
-)
 from app.plugins.send_helper import send_reply_bubbles
 from app.routing.permission_service import PermissionService
 from app.routing.rate_limiter import RateLimiter
@@ -52,7 +44,6 @@ _feature_hub = create_runtime_feature_hub(_config)
 _audit_repository = AuditRepository(_config.storage.database_path)
 _group_mute_repository = GroupMuteStateRepository(_config.storage.database_path)
 _memory_repository = MemoryProfileRepository(_config.storage.database_path)
-_video_upload_plan_gate = VideoUploadPlanGate()
 
 OWNER_COMMAND_PREFIXES = (
     "/help",
@@ -66,7 +57,6 @@ OWNER_COMMAND_PREFIXES = (
     "/owner",
     "/remind",
     "/voice",
-    "/video",
 )
 
 
@@ -117,14 +107,6 @@ async def _handle_owner_command(bot: Bot, event: PrivateMessageEvent) -> None:
         reply = await _owner_text(text)
     elif text.startswith("/voice "):
         reply = await _voice_text(text)
-    elif text.startswith("/video upload "):
-        if not is_root:
-            return
-        reply = await _video_upload_acceptance_text(
-            bot,
-            text,
-            trace_id=normalized.trace_id,
-        )
     elif text == "/mute status":
         reply = await _mute_status_text()
     elif text == "/mute clear" or text.startswith("/mute clear "):
@@ -264,8 +246,6 @@ def _help_text(*, is_root: bool) -> str:
                 "/owner add <qq> - 添加 owner。例：/owner add 123456",
                 "/owner remove <qq> - 移除 owner，不能移除 root 或最后一个 owner。例：/owner remove 123456",
                 "/owner list - 查看 owner 列表。用法：/owner list",
-                "/video upload plan <group_id> <cache-relative.mp4> - 生成小视频上传验收计划。",
-                "/video upload apply <group_id> <cache-relative.mp4> <plan_hash> --confirm-group <group_id> - 执行一次受控上传。",
             ]
         )
     lines.extend(
@@ -277,101 +257,6 @@ def _help_text(*, is_root: bool) -> str:
         ]
     )
     return "\n".join(lines)
-
-
-async def _video_upload_acceptance_text(bot: Bot, text: str, *, trace_id: str) -> str:
-    try:
-        parts = shlex.split(text)
-    except ValueError:
-        return "video upload command parse failed"
-    usage = (
-        "用法：/video upload plan <group_id> <cache-relative.mp4>\n"
-        "执行：/video upload apply <group_id> <cache-relative.mp4> "
-        "<plan_hash> --confirm-group <group_id>"
-    )
-    if len(parts) == 5 and parts[:3] == ["/video", "upload", "plan"]:
-        try:
-            plan = _video_upload_plan_gate.issue(
-                _config.video,
-                group_id=parts[3],
-                relative_file=parts[4],
-            )
-        except VideoUploadAcceptanceError as exc:
-            return f"小视频上传验收计划失败：{exc}"
-        await _conversation_service.record_system_event(
-            level="INFO",
-            event="video_upload_acceptance",
-            detail=acceptance_audit_detail(
-                plan=plan,
-                stage="plan",
-                result="planned",
-                duration_ms=0,
-            ),
-            trace_id=trace_id,
-        )
-        return (
-            "小视频上传验收计划\n"
-            f"目标群：{plan['group_id']}\n"
-            f"缓存文件：{plan['relative_file']}\n"
-            f"大小：{plan['size_bytes']} bytes（上限 {plan['maximum_bytes']}）\n"
-            f"SHA256：{plan['sha256']}\n"
-            f"plan_hash：{plan['plan_hash']}\n"
-            "仅在确认目标群后执行 apply；该操作会真实上传一个群文件。"
-        )
-    if (
-        len(parts) == 8
-        and parts[:3] == ["/video", "upload", "apply"]
-        and parts[6] == "--confirm-group"
-    ):
-        plan = None
-        started = time.perf_counter()
-        try:
-            plan = _video_upload_plan_gate.consume(
-                _config.video,
-                group_id=parts[3],
-                relative_file=parts[4],
-                plan_hash=parts[5],
-                confirmed_group_id=parts[7],
-            )
-            result = await apply_video_upload_plan(
-                bot,
-                _config.video,
-                group_id=parts[3],
-                relative_file=parts[4],
-                plan_hash=parts[5],
-                confirmed_group_id=parts[7],
-                expected_plan=plan,
-            )
-        except VideoUploadAcceptanceError as exc:
-            await _conversation_service.record_system_event(
-                level="WARNING",
-                event="video_upload_acceptance",
-                detail=acceptance_audit_detail(
-                    plan=plan,
-                    stage="apply",
-                    result="failure",
-                    duration_ms=round((time.perf_counter() - started) * 1000),
-                    error_category=exc.category,
-                ),
-                trace_id=trace_id,
-            )
-            return f"小视频上传验收失败：{exc}"
-        await _conversation_service.record_system_event(
-            level="INFO",
-            event="video_upload_acceptance",
-            detail=acceptance_audit_detail(
-                plan=result.plan,
-                stage="apply",
-                result="success",
-                duration_ms=result.duration_ms,
-            ),
-            trace_id=trace_id,
-        )
-        return (
-            "小视频上传验收完成：upload_group_file 已返回成功，"
-            f"耗时 {result.duration_ms} ms"
-        )
-    return usage
 
 
 async def _allow_text(text: str) -> str:
@@ -558,50 +443,6 @@ def _reload_group_chat(new_config) -> None:
     if hasattr(group_chat, "_feature_hub"):
         group_chat._feature_hub = create_runtime_feature_hub(new_config)  # noqa: SLF001
     group_chat._permission_service = PermissionService(new_config.qq)  # noqa: SLF001
-    if hasattr(group_chat, "_video_service"):
-        from app.features.video_providers import YtDlpVideoExtractor
-        from app.features.video_service import GroupVideoService
-
-        group_chat._video_extractor = (  # noqa: SLF001
-            YtDlpVideoExtractor(
-                new_config.video.host_cache_path,
-                http_proxy_env=new_config.video.http_proxy_env,
-                socks_proxy_env=new_config.video.socks_proxy_env,
-                cookie_file_env=new_config.video.cookie_file_env,
-            )
-            if new_config.video.enabled
-            else None
-        )
-        group_chat._video_service = GroupVideoService(  # noqa: SLF001
-            extractor=group_chat._video_extractor,  # noqa: SLF001
-            config=new_config.video,
-            retry_policy=new_config.retry,
-            record_system_event=group_chat._conversation_service.record_system_event,  # noqa: SLF001
-        )
-    if hasattr(group_chat, "_news_command_service"):
-        from app.features.news_service import NewsCommandService
-        from app.features.rss_news_provider import RssNewsProvider
-        from app.storage.repositories import GroupNewsSubscriptionRepository
-
-        group_chat._news_subscription_repository = GroupNewsSubscriptionRepository(  # noqa: SLF001
-            new_config.storage.database_path
-        )
-        group_chat._news_provider = (  # noqa: SLF001
-            RssNewsProvider(
-                feeds=new_config.news.feeds,
-                record_system_event=group_chat._conversation_service.record_system_event,  # noqa: SLF001
-            )
-            if new_config.news.enabled and any(new_config.news.feeds.values())
-            else None
-        )
-        group_chat._news_command_service = NewsCommandService(  # noqa: SLF001
-            provider=group_chat._news_provider,  # noqa: SLF001
-            repository=group_chat._news_subscription_repository,  # noqa: SLF001
-            qq_config=new_config.qq,
-            default_time=new_config.news.default_time,
-            timezone=new_config.news.timezone,
-            model_client=create_model_client(new_config.model),
-        )
     if hasattr(group_chat, "_market_command_service"):
         from app.features.market_providers import create_market_providers
         from app.features.market_service import MarketCommandService

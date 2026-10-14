@@ -22,23 +22,6 @@ class StructuredReply:
 
 
 @dataclass(frozen=True)
-class VideoAsset:
-    source_url: str
-    file_path: str
-    title: str | None = None
-    provider: str | None = None
-
-
-@dataclass(frozen=True)
-class NewsItem:
-    category: str
-    title: str
-    source: str
-    url: str | None = None
-    published_at: str | None = None
-
-
-@dataclass(frozen=True)
 class MarketQuote:
     market: str
     symbol: str
@@ -85,16 +68,6 @@ class FeatureRoute:
     available: bool
     provider_key: str | None = None
     reason: str | None = None
-
-
-@runtime_checkable
-class VideoExtractor(Protocol):
-    async def extract(self, source_url: str) -> VideoAsset: ...
-
-
-@runtime_checkable
-class NewsProvider(Protocol):
-    async def fetch(self, category: str) -> Sequence[NewsItem]: ...
 
 
 @runtime_checkable

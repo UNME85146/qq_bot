@@ -213,6 +213,7 @@ class ConversationService:
         await self._save_user_message(message)
         model_result = await self._generate_reply(prompt, message)
         reply = model_result.reply
+        await self._record_model_timing(message, reply)
 
         reply, output_safety = self._parse_and_format_reply(reply, message, unlimited=True)
         await self._save_assistant_message(message, reply)
@@ -338,6 +339,7 @@ class ConversationService:
 
         model_result = await self._generate_reply(prompt, message)
         reply = model_result.reply
+        await self._record_model_timing(message, reply)
 
         reply, output_safety = self._parse_and_format_reply(reply, message, unlimited=False)
         if can_commit is not None and not can_commit():
@@ -897,11 +899,36 @@ class ConversationService:
             send_sticker=parsed.send_sticker
             and (prefer_sticker or _is_explicit_sticker_context(message.text)),
             sticker_intent=parsed.sticker_intent,
+            model_streamed=reply.model_streamed,
+            model_ttft_ms=reply.model_ttft_ms,
+            model_total_ms=reply.model_total_ms,
         )
         return (
             formatted_reply,
             output_safety,
         )
+
+    async def _record_model_timing(
+        self,
+        message: NormalizedMessage,
+        reply: GeneratedReply,
+    ) -> None:
+        if reply.model_total_ms is None:
+            return
+        try:
+            await self._system_event(
+                "INFO",
+                "model_request_timing",
+                (
+                    f"streamed={str(reply.model_streamed).lower()}; "
+                    f"ttft_ms={reply.model_ttft_ms}; "
+                    f"total_ms={reply.model_total_ms}"
+                ),
+                message.trace_id,
+            )
+        except Exception:
+            # Timing is diagnostic only and must never affect delivery.
+            return
 
     async def _generate_reply(
         self,

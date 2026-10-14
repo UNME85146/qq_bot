@@ -7,7 +7,7 @@
 
 A NoneBot2 and OneBot v11 QQ bot with permission-aware chat, structured information delivery, provider resilience, media workflows, reminders, memory, and audit tooling.
 
-This GitHub repository is a sanitized public export. The private development tree, tests, local design and acceptance documents, credentials, QQ identifiers, runtime databases, logs, login state, and rollback packages are not mirrored here.
+This is the private development repository. Runtime credentials, QQ identifiers, databases, logs, login state, and rollback packages remain outside Git. The public GitHub repository is a separate sanitized export, not a mirror of this tree.
 
 ## Highlights
 
@@ -21,19 +21,17 @@ This GitHub repository is a sanitized public export. The private development tre
 - Dedicated structured reply mode for help, market, and search results. Full information messages are attempted first and are summarized once only when OneBot explicitly rejects their length.
 - Information-feature audits store the actual successfully sent bubble text, delivery status, and available OneBot message IDs in schema v4.
 - A-share quotes use HiThink as the primary provider and AkShare only as the fallback, with closed/open/half-open circuit recovery. The public template keeps `QQ_BOT_HITHINK_API_KEY` empty; configure it only in an ignored `.env` file or service manager. AkShare fallback uses Tencent Securities for batch and name lookups, while a canonical `000001.SZ`-style code uses the Tencent quote fast path. Missing, non-positive, or suspended prices are unavailable rather than reported as current. Individual A-shares can be queried by code, Chinese short name, company name, or a full-width/half-width parenthesized alias. A-share and US-share reports return 20 sector messages with 10 stocks per sector, including name, code, previous close, current price, and percentage change. When a sector does not contain five actual gainers and five actual losers, the report explicitly labels the top/bottom five as relative leaders/laggards.
-- Automatic Douyin/Bilibili download, categorized news commands, news subscriptions, and scheduled news delivery are disabled. Historical provider and maintenance modules remain available for rollback and audit work but are not routed from group messages.
+- Video parsing, news feeds, news subscriptions, and scheduled news delivery have been removed from the runtime and dashboard.
 - Optional Codex Runway monitoring runs every six hours from bot startup, first sending after six hours. Reconnection preserves the startup anchor and missed intervals are not replayed in a burst. The daily local-rendered usage-ranking image starts at `17:15` in `Asia/Shanghai`; missed daily windows are skipped. SQLite schema v5 durably claims each scheduled slot before external work, preventing duplicate attempts after reconnects or ambiguous failures. Trusted X/Twitter text is translated completely into Chinese without application-level truncation; transport splitting occurs only after an explicit OneBot length rejection. Both monitors are disabled by default.
-- OpenAI-compatible speech and image endpoints are optional. Speech supports either binary `/audio/speech` or Chat Completions audio selected by `speech.apiMode`; Chat Audio responses are size-, format-, Base64-, and transcript-validated. Explicit voice commands can be enabled while random voice replies remain disabled, and QQ record delivery is attempted once to avoid duplicate audio after an ambiguous timeout. The historical local TTS service is not shipped.
+- OpenAI-compatible speech and image endpoints are optional. Speech is remote-model only: it supports either binary `/audio/speech` or Chat Completions audio selected by `speech.apiMode`; Chat Audio responses are size-, format-, Base64-, and transcript-validated. Explicit voice commands can be enabled while random voice replies remain disabled, and QQ record delivery is attempted once to avoid duplicate audio after an ambiguous timeout. The retired local MOSS TTS service is not part of the runtime.
 
 ## Requirements
 
 - Python 3.12 or 3.13
 - NoneBot2 with the OneBot v11 adapter
-- A OneBot implementation such as NapCat using reverse WebSocket
-- `ffmpeg` for bounded GIF/WebP image preprocessing and historical media tooling
+- LLBot/LuckyLilliaBot on Linux using the OneBot v11 reverse WebSocket
+- `ffmpeg` for bounded GIF/WebP image preprocessing
 - Optional market dependencies: AkShare (Tencent Securities fallback) and yfinance; HiThink uses the built-in HTTP client
-- Optional video dependencies: yt-dlp and socksio
-
 ## Quick Start
 
 Windows PowerShell:
@@ -41,7 +39,7 @@ Windows PowerShell:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
-.\.venv\Scripts\python -m pip install -e ".[market,video]"
+.\.venv\Scripts\python -m pip install -e ".[market]"
 Copy-Item .env.example .env
 Copy-Item config/config.example.json config/config.json
 ```
@@ -51,7 +49,7 @@ Linux:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e '.[market,video]'
+.venv/bin/python -m pip install -e '.[market]'
 cp .env.example .env
 cp config/config.example.json config/config.json
 ```
@@ -111,7 +109,7 @@ Owner/root private commands include:
 /voice ...
 ```
 
-Only root users can manage `/owner ...` and execute the `/video upload plan|apply ...` acceptance flow.
+Only root users can manage `/owner ...`.
 
 ## Operations Tools
 
@@ -127,13 +125,7 @@ Actively probe currently configured providers and require a healthy result:
 .\.venv\Scripts\python tools/check_provider_status.py --require-healthy
 ```
 
-Preflight video-provider egress:
-
-```powershell
-.\.venv\Scripts\python tools/check_video_egress.py --require-ok
-```
-
-Inspect bot, NapCat, OneBot, and historical TTS status:
+Inspect the Bot, LLBot, OneBot, and retired local-TTS status:
 
 ```powershell
 .\.venv\Scripts\python tools/inspect_runtime_status.py --summary --limit 5
@@ -159,30 +151,32 @@ $env:QQ_BOT_CONFIG_PATH = "config/config.example.json"
 .\.venv\Scripts\python -c "import bot; import nonebot; print(nonebot.get_driver().type)"
 ```
 
-Passing local tests or probes does not prove live QQ delivery, provider success, video upload, or recovery behavior. Validate each enabled production path separately.
+Passing local tests or probes does not prove live QQ delivery, provider success, or recovery behavior. Validate each enabled production path separately.
 
 ## Security
 
-- Never commit `.env`, `config/config.json`, local persona profiles, databases, backups, logs, runtime artifacts, QR codes, NapCat cache/login state, tokens, private QQ/group IDs, or server credentials.
-- Provider and video telemetry is intentionally redacted. Keep raw response bodies and secrets out of durable audit records.
+- Never commit `.env`, `config/config.json`, local persona profiles, databases, backups, logs, runtime artifacts, QR codes, LLBot cache/login state, tokens, private QQ/group IDs, or server credentials.
+- Provider telemetry is intentionally redacted. Keep raw response bodies and secrets out of durable audit records.
 - Public releases must contain only the approved export paths and must pass secret and private-identifier scans before push.
-- Keep dependencies and OneBot/NapCat endpoints private by default; expose only the minimum required network surface.
+- Keep dependencies and OneBot/LLBot endpoints private by default; expose only the minimum required network surface.
 
 ## Ubuntu 24.04 production deployment and rollback
 
-1. **Freeze and back up.** Identify the SSH host, existing workloads, disk, ports, and exact services to replace. Freeze a reviewed commit, dependency constraints, and SHA-256 manifest. Stop the source Bot/NapCat before making a final SQLite `Connection.backup()` snapshot; require `PRAGMA quick_check=ok` and schema 5. Back up the retired website, its units, and database. Transfer the private database, validated 30-day low-sensitivity persona, and hash-checked sticker archive without copying QQ login cache or raw chats into Git.
-2. **Install private runtime.** Install Python 3.12 venv support, Docker, `ffmpeg`, `fontconfig`, and a verified `cloudflared` binary. Place the frozen source under a private runtime root and install the reviewed `.[market,video,dashboard]` dependencies with pinned constraints. Create `.env` and `config/config.json` from examples, set `0600`, populate real values only there, configure OneBot reverse WS on `127.0.0.1:8081` and HTTP API root on loopback `3100`. Restore DB, profile, and checked stickers into their private runtime locations.
-3. **Prepare pinned NapCat.** Pull an architecture-checked, digest-pinned image. Before host-network startup configure WebUI `127.0.0.1:6099`, OneBot HTTP `127.0.0.1:3100` with a matching token, and reverse WS `ws://127.0.0.1:8081/onebot/v11/ws`. Use separate `config`, `QQ`, and `cache` mounts. The production limits are 3 GiB RAM, 4 GiB RAM+swap, 2 CPUs, 512 PIDs, and `10m` x 3 JSON logs. Never expose these control ports or reuse another machine's login cache.
-4. **Install dashboard and tunnel.** Run `.venv/bin/python tools/dashboard_password.py <private-hash-file>` interactively with a password of at least 16 characters. Configure `qqbot-dashboard.service` with the exact HTTPS origin, private password hash, NapCat root, and separate `0600` OneBot/WebUI token copies; its process binds only `127.0.0.1:3011`, without Docker or sudo access. Use a Cloudflare Tunnel ingress rule from the operator's hostname to `http://127.0.0.1:3011` followed by `http_status:404`; validate ingress. Start the dashboard first, then stop/disable only the retired site/tunnel and enable the new tunnel. Check public `/login=200`, anonymous `/api/status=401` and `/api/qq/qr=401`.
-5. **Establish one QQ session.** Before promoting the remote QQ login, disable and stop the retired WSL `qq-bot.service`, change its NapCat container to `restart=no` and stop it, remove the matching Windows WSL autostart task/holder, then terminate the old distro. A Windows-only autostart removal is insufficient: manually booting WSL can otherwise start a second QQ session. Verify the internal settings after any controlled WSL boot. Start the remote `qq-bot.service` and pinned container, then sign in on the HTTPS dashboard and scan a fresh QR. The page polls every 10 seconds and shows an existing QR at most 180 seconds old when QQ is not online. It does **not** generate another QR automatically; use **Refresh QR** if missing/expired. Online QQ hides the QR. Run `tools/inspect_runtime_status.py --summary --require-ready --limit 5`, verify three consecutive ready probes, DB integrity, container/image identity, loopback ports, sticker hashes, and the user-visible QQ login. Scheduled six-hour summaries and the 17:15 Beijing screenshot need their own natural-time acceptance.
-6. **Clean up and retain rollback.** Generate a separate SHA-256-bound, exact-target cleanup plan after acceptance; delete retired site/staging, unused caches, apt downloads, and unreferenced old images once. Verify the receipt, target absence, current image, Bot/QQ readiness, and DB again. Do not prune current NapCat `config/QQ/cache`, credentials, logs, database, venv, or retained rollback archives. If deletion partly succeeds, verify recovery read-only rather than replaying. For rollback, first stop the remote QQ writer, restore the verified prior data/units/route, and recheck login. Publish only secret-scanned private code and a separate sanitized public export.
+The active production path is Linux-only: the Bot runs as `qq-bot.service`, LLBot runs as a direct host-network service, and both exchange OneBot v11 reverse WebSocket traffic on loopback. Retired QQ connectors and the old WSL path are outside the active deployment.
+
+1. **Freeze and back up.** Identify the private SSH target through the locally configured alias, inspect existing workloads, disk, ports, and service identities, then freeze a reviewed commit, dependency constraints, and SHA-256 manifest. Stop the Bot/LLBot pair before the final SQLite online backup; require `PRAGMA quick_check=ok` and the current schema. Keep QQ login state, database, profile, stickers, logs, and rollback material outside Git.
+2. **Install the Bot.** Install Python 3.12/3.13, `ffmpeg`, `fontconfig`, and the dashboard dependencies. Place the source under a private runtime root such as `/opt/qq_bot`, create `.env` and `config/config.json` with mode `0600`, and configure the OneBot reverse WebSocket at `ws://127.0.0.1:8081/onebot/v11/ws`.
+3. **Install LLBot.** Keep LLBot data under a private path such as `/opt/llbot/data`. Run the direct Linux LLBot service with its WebUI bound to loopback, its Auth/WebUI tokens in private `0600` files, and its OneBot reverse WebSocket pointed at the Bot listener. Do not run a second QQ connector or reuse another host's login state. The QR is generated by LLBot and is exposed only through the authenticated dashboard flow.
+4. **Install the dashboard and tunnel.** Run `tools/run_dashboard.py` on `127.0.0.1:3011` behind the authenticated HTTPS tunnel. Use `scripts/server/qqbot-dashboard.service` as the service template and configure its LLBot WebUI token file. `RuntimeDirectory=qqbot-dashboard` creates a private directory owned by the dashboard user; QR responses from LLBot are cached at `/run/qqbot-dashboard/login-qrcode.png`, outside the connector's login directory. Validate public `/login=200`, anonymous `/api/status=401` and `/api/qq/qr=401`, then sign in and verify that the displayed status reflects LLBot's actual login state.
+5. **Establish one QQ session.** Start `qq-bot.service` and the LLBot service, use the dashboard's **Refresh QR** action when the existing QR is missing or expired, and scan it from the QQ client. A successful runtime check requires the Bot listener, LLBot-to-OneBot WebSocket, LLBot online state, three consecutive `ready=true` probes, SQLite integrity, and a user-visible QQ login. A green Bot listener alone does not prove QQ delivery.
+6. **Clean up and retain rollback.** Generate a fresh exact-target cleanup plan after acceptance. Remove retired connector staging, old release archives, unused caches, and unreferenced images only after verifying their paths and references. Preserve the current `.env`, configuration, database, logs, active LLBot login state, current image, virtual environment, service units, and the explicitly retained rollback package. If cleanup partially succeeds, verify the protected runtime before any recovery action. Publish only the secret-scanned private code and a separate sanitized public export.
 
 <a id="chinese"></a>
 ## 简体中文
 
 [English](#english) | [简体中文](#chinese)
 
-本公开仓库是 QQ Bot 的脱敏导出，采用 NoneBot2 和 OneBot v11，提供权限管理、聊天、行情/信息服务、媒体、提醒、记忆与审计。私有开发树、真实标识、密钥、数据库、日志、登录态及回滚包不会镜像到这里。以下为完整部署流程。
+本项目是基于 NoneBot2 与 OneBot v11 的 QQ Bot，包含权限、聊天、行情与信息服务、媒体、提醒、记忆和审计。以下为生产部署及回滚说明；功能详情、示例命令和安全约束可在上方英文版查看，实际配置和密钥均不进入 Git。
 
 ### 功能概览
 
@@ -190,84 +184,80 @@ Passing local tests or probes does not prove live QQ delivery, provider success,
 - root/owner 权限、私聊/群聊白名单、群禁言控制、逐群 FIFO 对话、提醒、记忆、表情包与审计命令可独立配置。普通群回复不经项目级安全分类；私聊安全与低敏长期存储边界仍生效。
 - 普通群聊短回复最多 320 completion tokens、默认 18 秒硬截止；技术解释使用单条长消息模式。图片理解有独立熔断器和 30 秒截止，可按语义选用安全的本地表情包，缺失/发送失败才回退短文本。
 - 结构化帮助、行情与搜索优先发送完整消息；只有 OneBot 明确拒绝长度后才进行一次精简重试。schema v5 中的信息审计保存实际成功发送的内容与可用消息 ID。
-- A 股行情以同花顺 HiThink 为主、AkShare（腾讯证券路径）为唯一备用；缺价/停牌不会伪装成实时行情。美股依赖 yfinance。语音、生图、视频及定时监控按配置启用，不把健康探针等同于 QQ 客户端可见交付。
+- A 股行情以同花顺 HiThink 为主、AkShare（腾讯证券路径）为唯一备用；缺价/停牌不会伪装成实时行情。美股依赖 yfinance。语音、生图及定时监控按配置启用，不把健康探针等同于 QQ 客户端可见交付。
 - 可选 Runway 信息从启动起每六小时发送一次，截图在北京时间 17:15 发送；schema v5 的持久化 claim 阻止重连/不确定回执下的重复尝试。两个监控默认关闭。
 
 ### 环境与快速开始
 
-需要 Python 3.12 或 3.13、NoneBot2、OneBot v11 实现（如 NapCat），图片预处理/视频工具需要 `ffmpeg`。可选行情依赖 AkShare 与 yfinance，视频依赖 yt-dlp/socksio；同花顺使用内置 HTTP 客户端。
+需要 Python 3.12 或 3.13、NoneBot2、Linux 上的 LLBot/LuckyLilliaBot、OneBot v11 反向 WebSocket，以及 `ffmpeg` 图片预处理。可选行情依赖 AkShare 与 yfinance；同花顺使用内置 HTTP 客户端。
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[market,video,dashboard]'
+.venv/bin/python -m pip install -e '.[market,dashboard]'
 cp .env.example .env
 cp config/config.example.json config/config.json
 ```
 
-Windows PowerShell 可改用 `python -m venv .venv`、`.\.venv\Scripts\python -m pip install -e ".[market,video,dashboard]"`、`Copy-Item` 复制示例文件。将 `BOT_QQ`、`ROOT_QQ`、`OWNER_QQ`、`ALLOWED_GROUP_ID`、模型地址与名称替换为私有配置；示例 `.env.example` 中所有凭据均为空。实际历史画像须生成被忽略的 `persona_profile.local.json`，运行时不会自动退回示例画像。默认反向 WS 地址为 `ws://127.0.0.1:8081/onebot/v11/ws`。
+Windows PowerShell 可改用 `python -m venv .venv`、`.\.venv\Scripts\python -m pip install -e ".[market,dashboard]"`、`Copy-Item` 复制示例文件。将 `BOT_QQ`、`ROOT_QQ`、`OWNER_QQ`、`ALLOWED_GROUP_ID`、模型地址与名称替换为私有配置；示例 `.env.example` 中所有凭据均为空。实际历史画像须生成被忽略的 `persona_profile.local.json`，运行时不会自动退回示例画像。默认反向 WS 地址为 `ws://127.0.0.1:8081/onebot/v11/ws`。
 
 ### 使用、运维与验证
 
-群信息命令包括 `/help`、`#A股`、`#美股`、股票名称/代码、`#chat 查一下 <关键词> [--page N]`、`#画图`、`#改图`。root/owner 私聊可用 `/status`、`/memory`、`/audit last`、`/reload profile`、`/ping model`、`/allow`、`/mute`、`/voice`；只有 root 能管理 `/owner` 与受控 `/video upload plan|apply`。
+群信息命令包括 `/help`、`#A股`、`#美股`、股票名称/代码、`#chat 查一下 <关键词> [--page N]`、`#画图`、`#改图`。root/owner 私聊可用 `/status`、`/memory`、`/audit last`、`/reload profile`、`/ping model`、`/allow`、`/mute`、`/voice`；只有 root 能管理 `/owner`。
 
 ```bash
 .venv/bin/python tools/check_provider_status.py --snapshot-only
 .venv/bin/python tools/check_provider_status.py --require-healthy
-.venv/bin/python tools/check_video_egress.py --require-ok
 .venv/bin/python tools/inspect_runtime_status.py --summary --limit 5
 .venv/bin/python tools/manage_tts_retirement.py status
 .venv/bin/python -m compileall -q app bot.py tools
 ```
 
-完整自动化测试位于私有开发仓库，公开导出只提供示例配置的语法和导入冒烟测试。部署、回滚、演练与删除均会改变运行态，必须先审计划、留备份并做独立验收；Bot ready、提供方成功、QQ 可见投递是不同证据。不要提交 `.env`、真实配置/画像、数据库、日志、二维码、NapCat 登录缓存、Token、QQ/群号或回滚包。
+完整自动化测试位于私有开发仓库，公开导出只提供示例配置的语法和导入冒烟测试。部署、回滚、演练与删除均会改变运行态，必须先审计划、留备份并做独立验收；Bot ready、提供方成功、QQ 可见投递是不同证据。不要提交 `.env`、真实配置/画像、数据库、日志、二维码、LLBot 登录缓存、Token、QQ/群号或回滚包。
 
 ## Ubuntu 24.04 生产部署与回滚
 
-本节是公开安全的部署流程，所有路径与域名均为示例；真实主机名、QQ 标识、Token、口令哈希、数据库、素材和登录缓存不能进入仓库。Bot、NapCat、鉴权后台与 HTTPS tunnel 位于同一生产服务器。可保留已停止的旧环境供回滚，但任何时刻只能有一份 QQ 会话。
+本节记录服务器迁移的实际流程，但主机名、账号、路径和密钥均改为示例。执行前逐项核对目标主机与占位符。当前生产运行 Bot、LLBot、鉴权后台及 HTTPS tunnel；旧 QQ connector 和 WSL 路径均停用，不允许两个 QQ 会话并行。
 
 ### 1. 冻结源码、备份与先决条件
 
-1. 核对 SSH 身份、容量、现有服务与端口；记录将被替换的旧网页/tunnel，不影响无关工作负载。
-2. 在 staging 中冻结经审阅的源码版本、依赖约束与 SHA-256 清单。源端停 Bot/NapCat 后以 `sqlite3.Connection.backup()` 生成一致数据库副本，并检查 `PRAGMA quick_check` 与 schema；不得直接归档在线数据库目录或迁移 QQ 登录缓存。
-3. 私下传输备份数据库、已校验低敏画像与表情包归档。素材先在隔离目录解包，拒绝符号链接/路径穿越，逐文件核对数量与哈希后再放入运行目录；原始聊天、Token 与画像来源不进入公开仓库。
-4. 切换前备份旧网站文件、unit 与数据库；直到真实 QQ 登录和部署后验收通过才考虑清理停用源环境。
+1. 核对 SSH 主机身份、磁盘/内存、现有服务和端口。冻结经审阅的源码版本、依赖约束和 SHA-256 清单，放入独立 staging。停止 Bot/LLBot 后使用 SQLite online backup 做最终一致备份，核对 `PRAGMA quick_check` 和当前 schema。
+2. 私下迁移经验证的数据库、低敏聚合画像与表情包归档。素材先在隔离目录解包，拒绝符号链接和路径穿越，逐文件对哈希与数量；原始聊天、画像来源信息、API Key、QQ 登录态和中间归档不能进入 Git 或公开导出。
+3. 在真实 QQ 登录及应用验收完成前保留归档、活动服务的回滚单元和明确保留的 rollback package。
 
-从可信渠道安装 Ubuntu Python 3.12 venv、Docker、`ffmpeg`、`fontconfig` 和经验证的 `cloudflared`。使用前检查 NapCat 固定版本的架构与摘要，动态 `latest` 标签不构成版本锁；后台、WebUI 和 OneBot 原生端口不暴露到公网。
+在 Ubuntu 中从可信来源安装 Python 3.12/3.13 venv、`ffmpeg`、`fontconfig` 和经验证的 `cloudflared`；限制 SSH，后台、LLBot WebUI 和 OneBot 端口不直连公网。
 
 ### 2. 安装 Bot 与私有配置
 
-示例目录为 `BOT_ROOT=/opt/qq_bot`、`NAPCAT_ROOT=/opt/napcat`，由独立的非特权服务用户持有。安装冻结源码并准备环境：
+示例目录使用 `BOT_ROOT=/opt/qq_bot`，由服务用户持有。将冻结源码安装在 `BOT_ROOT` 后创建环境：
 
 ```bash
 cd "$BOT_ROOT"
 python3 -m venv .venv
-.venv/bin/python -m pip install --no-cache-dir --constraint /path/to/reviewed-constraints.txt '.[market,video,dashboard]'
+.venv/bin/python -m pip install --no-cache-dir --constraint /path/to/reviewed-constraints.txt '.[market,dashboard]'
 cp .env.example .env
 cp config/config.example.json config/config.json
 chmod 600 .env config/config.json
 mkdir -p data/stickers logs runtime_artifacts/secrets
 ```
 
-私下配置 `.env` 和 `config/config.json`：QQ 白名单、模型端点/密钥、可选同花顺密钥与一致的强 OneBot Token。反向 WS 监听 `127.0.0.1:8081`，`onebot.apiRoot` 指向本机 HTTP 端口（此示例为 `3100`）。校验后的画像置于 `0600` 文件并设置路径，恢复 SQLite 副本到 `data/`，核对表情包哈希；日志和命令输出不能打印密钥。
+私下填写 `.env` 和 `config/config.json`：模型密钥、可选同花顺密钥、强 OneBot Token、QQ 权限、模型端点，以及 `onebot.host=127.0.0.1`、`onebot.port=8081`。画像置于私有 `0600` 文件并配置路径，一致数据库副本及已校验素材放在 `data/`；部署输出不打印密钥。
 
-### 3. 先配置 NapCat，再启用 host 网络
+### 3. 配置 LLBot，控制端口仅限本机
 
-在 `NAPCAT_ROOT` 建立私有 `config`、`QQ`、`cache` 挂载目录；`--network host` 启动前先配置固定镜像。WebUI 绑定 `127.0.0.1:6099`，带 Token 的 OneBot HTTP 绑定 `127.0.0.1:3100`，反向 WS 指向 `ws://127.0.0.1:8081/onebot/v11/ws`。后台用户只读独立的 `0600` WebUI/OneBot Token 副本，不访问 NapCat UID 目录或 Docker socket；不复制其他机器登录态。
+在 `/opt/llbot/data` 等私有目录保存 LLBot 配置、登录态、Auth/WebUI token 和二维码缓存，文件权限按最小权限设置，token 文件使用 `0600`。LLBot 以 Linux direct/host-network 方式运行，WebUI 仅绑定 `127.0.0.1`，OneBot reverse WebSocket 指向 `ws://127.0.0.1:8081/onebot/v11/ws`，与 Bot 使用同一强 Token。不要运行第二个 QQ connector，也不要复制其他机器的 QQ 登录态。
 
-容器使用固定镜像 ID、三个挂载目录、重启策略、3 GiB 内存、4 GiB 内存加 swap、2 CPU、512 PID 和 `10m` × 3 日志上限。启动后核对实际镜像、挂载与 loopback 监听。清理时保护 NapCat 的 `QQ`、`config` 和缓存**根目录**；缓存文件需单独核实过期/未引用及 QQ 登录状态后才能删除。
+### 4. 安装鉴权后台与 HTTPS tunnel
 
-### 4. 安装后台与 HTTPS tunnel
-
-交互式输入至少 16 字符口令两次，生成私有 `0600` scrypt 哈希，不把密码放在命令参数中：
+用交互式命令两次输入至少 16 字符的后台口令，生成私有 `0600` scrypt 哈希；口令不放在 shell 参数或 unit 文件里：
 
 ```bash
 cd "$BOT_ROOT"
 .venv/bin/python tools/dashboard_password.py "$BOT_ROOT/runtime_artifacts/secrets/dashboard-admin.hash"
 ```
 
-用非特权服务用户在 `qqbot-dashboard.service` 运行 `tools/run_dashboard.py`。设置精确 HTTPS 来源 `QQ_BOT_DASHBOARD_ORIGIN`、私有哈希文件、NapCat 根目录、`QQ_BOT_DASHBOARD_ONEBOT_HTTP_PORT=3100` 和独立的 OneBot/WebUI Token 文件。使用 `PYTHON_DOTENV_DISABLED=1`、`UMask=0077`、`NoNewPrivileges=true`、`PrivateTmp=true`、`ProtectSystem=strict`、`MemoryMax=512M`。后台仅监听 `127.0.0.1:3011` 且要求 HTTPS 来源鉴权，不授予 Docker socket 或 sudo。
+由非特权用户在 `qqbot-dashboard.service` 运行 `tools/run_dashboard.py`，设置固定 HTTPS 来源 `QQ_BOT_DASHBOARD_ORIGIN`、哈希文件、LLBot WebUI token 文件和二维码路径。`QQ_BOT_ROOT`、`QQ_BOT_CONFIG_PATH`、`QQ_BOT_ENV_PATH` 可显式指定 Bot 根目录、私有配置和环境文件；未指定时默认使用服务工作目录下的 `config/config.json` 与 `.env`。使用 `PYTHON_DOTENV_DISABLED=1`、`UMask=0077`、`NoNewPrivileges=true`、`PrivateTmp=true`、`ProtectSystem=strict` 和 `MemoryMax=512M`。后台只绑定 `127.0.0.1:3011`，不给 Docker socket 或 sudo；Cookie 带 Secure/HttpOnly/SameSite Strict，写操作校验同源。
 
-只将后台经私有 Cloudflare Tunnel 凭据和已校验的 ingress 对外提供，示例域名须替换为操作者控制的地址：
+tunnel 使用私有凭据与两条 ingress 规则；示例域名和凭据路径须由操作者替换，真实值不入仓库：
 
 ```yaml
 ingress:
@@ -276,11 +266,13 @@ ingress:
   - service: http_status:404
 ```
 
-切换前运行 `cloudflared tunnel ingress validate`，按已审阅路径安装 `qq-bot.service`、`qqbot-dashboard.service` 与 `qqbot-dashboard-tunnel.service`。先启动后台并验证 loopback `/login`，再只停用旧网站及其 tunnel、保留归档和 unit 备份、启用新 tunnel。HTTPS `/login` 应为 `200`，匿名 `/api/status` 和 `/api/qq/qr` 应为 `401`。后台 `3011`、WebUI `6099`、OneBot HTTP `3100` 与反向 WS `8081` 仅在 loopback 监听。
+先运行 `cloudflared tunnel ingress validate`，再按权限安装 `qq-bot.service`、`llbot.service`、`qqbot-dashboard.service`、`qqbot-dashboard-tunnel.service`。后台本地 `/login` 正常后才切公网路径；公网 HTTPS `/login` 应为 `200`，匿名 `/api/status`、`/api/qq/qr` 应为 `401`。登录后的配置页只返回脱敏模型信息和模型 ID；主模型区域维护全局 Base URL 与 API Key，语音和生图模型从同一个 `/models` 列表获取并选择，最长文本以字数输入并由后台换算为 Token。视频解析和新闻推送已经从配置模型、运行时代码与后台开关中删除。保存后的配置需要重启 `qq-bot.service` 才会生效。后台“重启 Bot”按钮只重启同一用户的 Bot 主进程并依赖 systemd 自动拉起，不会重启 LLBot。LLBot WebUI、OneBot `8081` 和后台应用 `3011` 均不能直接公网暴露。
 
-### 5. 建立唯一 QQ 登录并验证真实链路
+### 5. 建立唯一 QQ 会话并验收
 
-远端 QQ 登录前，旧 WSL 中先 `systemctl disable --now qq-bot.service`、将旧 NapCat 容器改为 `restart=no` 并停止，移除 Windows 对应的 WSL 自启任务和 holder，再终止旧发行版。**仅停 Windows 任务不够**：手工启动 WSL 时 systemd/Docker 仍可能拉起第二份 QQ。受控启动 WSL 后应复核内层状态，日常不要为监测远端而启动它。然后启动远端 Bot 和固定镜像 NapCat，确认反向 WS 连通，再登录后台、扫码。网页每 10 秒轮询；QQ 未被报告在线时只请求 180 秒内的**已有**二维码，缺失或过期不会自动生成，需点“刷新二维码”；在线时隐藏二维码并拒绝刷新请求。
+启动远端 `qq-bot.service` 和 `llbot.service`，确认 `127.0.0.1:8081` 的反向 WS。登录后台，必要时请求 LLBot 生成新 QR，再由手机 QQ 扫码；仅用户侧确认能证明客户端登录。后台每 10 秒轮询：未报告在线时只尝试展示 180 秒内的**已有**二维码，缺失或过期使用“刷新二维码”调用 LLBot WebUI 生成新的二维码；在线时隐藏二维码。
+
+恢复数据后以服务用户执行以下校验（不输出私有状态字段）：
 
 ```bash
 cd "$BOT_ROOT"
@@ -289,10 +281,10 @@ cd "$BOT_ROOT"
 systemctl show -p ActiveState -p NRestarts -p User qq-bot.service qqbot-dashboard.service qqbot-dashboard-tunnel.service
 ```
 
-核对连续三次 `ready=true`、Docker 镜像/容器身份、WebUI/OneBot 的 loopback、HTTPS 鉴权、SQLite 完整性、素材哈希和用户 QQ 客户端实际登录。若启用定时任务，首个六小时汇总与北京时间 17:15 截图须分别等待自然到点验收；健康探针不能证明 QQ 投递，也不要合成 QQ 消息充数。
+核对连续三次 `ready=true`、无意外重启、LLBot 在线状态与 WebUI 鉴权、数据库完整性、表情包数量与哈希，以及用户 QQ 客户端可见登录。若启用定时任务，启动后六小时汇总和北京时间 17:15 截图须分别等待自然到点验收；ready 不代表消息投递成功，也不应为了报告通过而合成 QQ 消息。
 
-### 6. 有界清理与回滚保留
+### 6. 清理、保留回滚并安全发布
 
-用户登录后再准备独立的 SHA-256 清理计划，列出精确路径与镜像引用，保护活动服务/镜像、数据库、凭据、NapCat 登录目录/缓存根目录和保留的回滚包。只删除无用 staging、退役网站/旧 unit、pip/node-gyp/apt 下载、无引用镜像以及项目测试/构建缓存；缓存文件逐项核实过期和引用。计划一次执行，独立复核目标缺失、保护项、数据库及三次 ready；删除或写回执不完整时只做只读恢复核验，不重放。
+客户端登录且独立核验完成后，冻结独立的 SHA-256 清理计划，明确路径与镜像。核对引用及备份后，仅移除已退役 connector、旧 release、无用 staging、pip/node-gyp/apt 下载、无引用旧镜像与项目测试/编译缓存；一次执行、写回执，独立复查目标不存在、受保护服务、SQLite `quick_check` 与三次 ready。若删除或写回执中途失败，只做只读恢复核验，不重放删除。保留活动 LLBot 镜像/运行文件、虚拟环境本体、数据/配置/日志、LLBot 登录目录及缓存根目录、tunnel 凭据和明确保留的回滚包；缓存文件须逐项判定过期和引用。
 
-回滚须先停止远端 Bot/NapCat，保证 QQ 单会话，再从经验证的归档恢复旧运行环境/网站，只恢复相应 unit 和路由，重验数据库与登录。回滚归档不入 Git；私有代码先测试/扫密钥，公开 GitHub 只接收独立白名单脱敏导出，示例凭据保持空值。
+回滚先停止远端 Bot/LLBot，保持 QQ 单写者，再用经验证的备份恢复旧运行环境或网站，仅恢复对应 unit/路由；重新校验数据库、ready 与登录。回滚归档属于私有运维材料，不进 Git。私有 Gitee 代码先测试和扫密钥再推送，公开 GitHub 只接受独立扫描过的白名单脱敏导出。

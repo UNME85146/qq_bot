@@ -1,13 +1,28 @@
 {
   "qq": {
     "selfId": "BOT_QQ",
-    "rootUserIds": ["ROOT_QQ"],
-    "ownerUserIds": ["OWNER_QQ"],
-    "allowedPrivateUserIds": ["OWNER_QQ"],
-    "allowedGroupIds": ["ALLOWED_GROUP_ID"],
-    "groupMuteControllerUserIds": ["OWNER_QQ"],
-    "memoryAllowedUserIds": ["OWNER_QQ"],
-    "nicknames": ["测试号", "机器人"]
+    "rootUserIds": [
+      "ROOT_QQ"
+    ],
+    "ownerUserIds": [
+      "OWNER_QQ"
+    ],
+    "allowedPrivateUserIds": [
+      "OWNER_QQ"
+    ],
+    "allowedGroupIds": [
+      "ALLOWED_GROUP_ID"
+    ],
+    "groupMuteControllerUserIds": [
+      "OWNER_QQ"
+    ],
+    "memoryAllowedUserIds": [
+      "OWNER_QQ"
+    ],
+    "nicknames": [
+      "测试号",
+      "机器人"
+    ]
   },
   "onebot": {
     "mode": "ws_reverse",
@@ -29,8 +44,11 @@
     "maxTokens": 2400
   },
   "persona": {
-    "mode": "history_derived_character",
-    "profilePath": "persona_profile.example.json"
+    "mode": "legacy_persona",
+    "disclosure": "我是公开示例的 QQ 聊天机器人。",
+    "personality": "表达简洁、友好且尊重用户。",
+    "lifeStyle": "不虚构现实身份或个人经历。",
+    "speechStyle": "大多数回复保持一到三句。"
   },
   "reply": {
     "privateAlwaysReply": true,
@@ -82,38 +100,15 @@
   },
   "retry": {
     "maxAttempts": 3,
-    "timeoutMultipliers": [1, 2, 3],
-    "backoffSeconds": [2, 5]
-  },
-  "video": {
-    "enabled": false,
-    "hostCachePath": "runtime_artifacts/video-cache",
-    "containerCachePath": "/path/in/container/qq-bot-media",
-    "perMessageConcurrency": 3,
-    "globalConcurrency": 6,
-    "downloadTimeoutSeconds": 300,
-    "sendTimeoutSeconds": 90,
-    "qqVideoMaxBytes": null,
-    "minFreeBytes": 0,
-    "httpProxyEnv": "QQ_BOT_VIDEO_HTTP_PROXY",
-    "socksProxyEnv": "QQ_BOT_VIDEO_SOCKS_PROXY",
-    "cookieFileEnv": "QQ_BOT_VIDEO_COOKIE_FILE",
-    "progressThresholdSeconds": 1,
-    "domainFailureThreshold": 2,
-    "domainRecoverySeconds": 120,
-    "canonicalUrlCacheSeconds": 3600,
-    "backoffJitterSeconds": 0.5
-  },
-  "news": {
-    "enabled": false,
-    "defaultTime": "08:00",
-    "timezone": "Asia/Shanghai",
-    "feeds": {
-      "politics": ["https://feeds.example.com/politics.xml"],
-      "business": ["https://feeds.example.com/business.xml"],
-      "technology": ["https://feeds.example.com/technology.xml"],
-      "finance": ["https://feeds.example.com/finance.xml"]
-    }
+    "timeoutMultipliers": [
+      1,
+      2,
+      3
+    ],
+    "backoffSeconds": [
+      2,
+      5
+    ]
   },
   "codexRunway": {
     "enabled": false,
@@ -132,7 +127,7 @@
     "timezone": "Asia/Shanghai",
     "limit": 50,
     "requestTimeoutSeconds": 20,
-    "baseUrl": "https://api.example.com",
+    "baseUrl": "https://cf.silhouette.ltd",
     "refreshTokenPath": "runtime_artifacts/secrets/usage-refresh-token",
     "outputDir": "runtime_artifacts/usage-ranking",
     "fontPath": "runtime_artifacts/fonts/NotoSansSC-VF.ttf"

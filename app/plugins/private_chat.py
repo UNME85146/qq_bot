@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -169,6 +170,7 @@ async def _handle_private_message(bot: Bot, event: PrivateMessageEvent) -> None:
 
 
 async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, normalized) -> None:
+    received_started = time.perf_counter()
     saved_sticker_asset_id: str | None = None
     direct_intent = None
     if _permission_service.is_private_user_allowed(normalized.user_id):
@@ -463,6 +465,31 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
                 sent_message_ids=(),
             )
             return
+    reply_ready_at = time.perf_counter()
+    sent_count = 0
+
+    async def on_sent(index, bubble, sent_message_id):
+        nonlocal sent_count
+        del bubble, sent_message_id
+        sent_count += 1
+        if sent_count == 1:
+            try:
+                await _conversation_service.record_system_event(
+                    level="INFO",
+                    event="private_reply_first_sent",
+                    detail=(
+                        f"receive_to_first_send_ms={int((time.perf_counter() - received_started) * 1000)}; "
+                        f"ready_to_first_send_ms={int((time.perf_counter() - reply_ready_at) * 1000)}; "
+                        f"bubble_index={index}"
+                    ),
+                    trace_id=normalized.trace_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record private first-send timing: trace_id={}",
+                    normalized.trace_id,
+                )
+
     await send_reply_bubbles(
         bot,
         event,
@@ -476,7 +503,24 @@ async def _handle_private_message_locked(bot: Bot, event: PrivateMessageEvent, n
             index,
             "send_private_reply_failed",
         ),
+        on_sent=on_sent,
     )
+    if sent_count:
+        try:
+            await _conversation_service.record_system_event(
+                level="INFO",
+                event="private_reply_last_sent",
+                detail=(
+                    f"receive_to_last_send_ms={int((time.perf_counter() - received_started) * 1000)}; "
+                    f"bubbles={sent_count}"
+                ),
+                trace_id=normalized.trace_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record private last-send timing: trace_id={}",
+                normalized.trace_id,
+            )
     _remember_private_non_random_outgoing(normalized.user_id, normalized.message_id)
 
 

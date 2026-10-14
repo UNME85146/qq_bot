@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+import ipaddress
 import mimetypes
 import os
 import re
+import socket
 from pathlib import Path
 
 import httpx
@@ -45,7 +48,7 @@ class OpenAICompatibleImageProvider:
             request_id=request_id,
             json={"model": self._config.model, "prompt": prompt, "n": 1},
         )
-        return self._write_response(response, request_id=request_id, operation="generated")
+        return await self._write_response(response, request_id=request_id, operation="generated")
 
     async def edit(
         self,
@@ -66,7 +69,7 @@ class OpenAICompatibleImageProvider:
             data={"model": self._config.model, "prompt": prompt},
             files={"image": (source.name, source.read_bytes(), content_type)},
         )
-        return self._write_response(response, request_id=request_id, operation="edited")
+        return await self._write_response(response, request_id=request_id, operation="edited")
 
     async def cleanup(self, asset: ImageAsset) -> None:
         path = Path(asset.file_path)
@@ -91,7 +94,7 @@ class OpenAICompatibleImageProvider:
             raise _classify_response_error(response)
         return response
 
-    def _write_response(
+    async def _write_response(
         self,
         response: httpx.Response,
         *,
@@ -100,17 +103,28 @@ class OpenAICompatibleImageProvider:
     ) -> ImageAsset:
         try:
             payload = response.json()
-            encoded = payload["data"][0]["b64_json"]
-            image_bytes = base64.b64decode(encoded, validate=True)
-        except (ValueError, TypeError, KeyError, IndexError, binascii.Error) as exc:
-            raise ImageProviderError("invalid_response", retryable=True) from exc
+            item = payload["data"][0]
+            encoded = item.get("b64_json") if isinstance(item, dict) else None
+            image_url = item.get("url") if isinstance(item, dict) else None
+            if encoded:
+                image_bytes = base64.b64decode(encoded, validate=True)
+                content_type = _detect_image_type(image_bytes)[0]
+            elif isinstance(image_url, str) and image_url:
+                image_bytes, content_type = await self._download_image_url(image_url)
+            else:
+                raise ValueError("image response has no b64_json or url")
+        except (ValueError, TypeError, KeyError, IndexError, binascii.Error, httpx.HTTPError) as exc:
+            # A 2xx response may already have consumed a paid generation;
+            # malformed output is not safe to replay automatically.
+            raise ImageProviderError("invalid_response", retryable=False) from exc
         if not image_bytes:
-            raise ImageProviderError("empty_image", retryable=True)
+            raise ImageProviderError("empty_image", retryable=False)
 
         cache_dir = Path(self._config.cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         safe_request_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", request_id).strip("-")
-        output_path = cache_dir / f"image-{safe_request_id or 'no-trace'}-{operation}.png"
+        extension = mimetypes.guess_extension(content_type) or ".png"
+        output_path = cache_dir / f"image-{safe_request_id or 'no-trace'}-{operation}{extension}"
         temporary_path = output_path.with_suffix(output_path.suffix + ".part")
         try:
             temporary_path.write_bytes(image_bytes)
@@ -118,7 +132,80 @@ class OpenAICompatibleImageProvider:
         except OSError as exc:
             temporary_path.unlink(missing_ok=True)
             raise ImageProviderError("cache_write_failed", retryable=False) from exc
-        return ImageAsset(file_path=str(output_path), content_type="image/png")
+        return ImageAsset(file_path=str(output_path), content_type=content_type)
+
+    async def _download_image_url(self, image_url: str) -> tuple[bytes, str]:
+        parsed = httpx.URL(image_url)
+        if not _is_public_https_url(parsed):
+            raise ValueError("image URL must use HTTPS")
+        if self._transport is None and not await _resolves_to_public_host(parsed.host):
+            raise ValueError("image URL resolves to a non-public host")
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(self._config.timeout_seconds),
+            follow_redirects=False,
+            transport=self._transport,
+        ) as client:
+            response = await client.get(image_url)
+            if response.is_redirect or response.is_informational:
+                raise ValueError("image URL redirects are not allowed")
+            response.raise_for_status()
+            max_bytes = 8 * 1024 * 1024
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError("image response is too large")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError("image response is too large")
+                chunks.append(chunk)
+            body = b"".join(chunks)
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            detected_type, _ = _detect_image_type(body)
+            if content_type not in {"image/png", "image/jpeg", "image/webp"}:
+                content_type = detected_type
+            return body, content_type
+
+
+def _detect_image_type(data: bytes) -> tuple[str, str]:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    raise ValueError("unsupported image format")
+
+
+def _is_public_https_url(parsed: httpx.URL) -> bool:
+    if parsed.scheme != "https" or not parsed.host:
+        return False
+    if parsed.username or parsed.password or parsed.port not in {None, 443}:
+        return False
+    host = parsed.host.lower().rstrip(".")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # DNS names are resolved by the transport. Reject special-use names;
+        # public provider/CDN hostnames remain allowed.
+        return not host.endswith((".internal", ".lan", ".home.arpa"))
+    return address.is_global
+
+
+async def _resolves_to_public_host(host: str) -> bool:
+    try:
+        addresses = await asyncio.to_thread(_resolve_host_addresses, host)
+    except OSError:
+        return False
+    return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
+
+
+def _resolve_host_addresses(host: str) -> tuple[str, ...]:
+    infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    return tuple({str(info[4][0]) for info in infos if info[4]})
 
 
 def create_image_provider(config: ImageGenerationConfig):
@@ -135,18 +222,15 @@ def cleanup_stale_image_cache(config: ImageGenerationConfig) -> int:
     if not cache_dir.is_dir():
         return 0
     removed = 0
-    for pattern in (
-        "image-*-generated.png",
-        "image-*-generated.png.part",
-        "image-*-edited.png",
-        "image-*-edited.png.part",
-    ):
-        for path in cache_dir.glob(pattern):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                continue
-            removed += 1
+    for stem in ("generated", "edited"):
+        for extension in ("png", "jpg", "jpeg", "webp"):
+            for suffix in (f".{extension}", f".{extension}.part"):
+                for path in cache_dir.glob(f"image-*{stem}{suffix}"):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        continue
+                    removed += 1
     return removed
 
 

@@ -45,10 +45,12 @@ def main() -> int:
 
     config = load_config(args.config)
     db_path = Path(args.db)
+    connector_webui_port = 3080
     data = {
+        "connector": "llbot",
         "qq_bot_listening": tcp_listening(config.onebot.host, config.onebot.port),
-        "napcat_webui_listening": tcp_listening("127.0.0.1", 6099),
-        "napcat_to_bot_established": tcp_established_on_local_port(
+        "connector_webui_listening": tcp_listening("127.0.0.1", connector_webui_port),
+        "connector_to_bot_established": tcp_established_on_local_port(
             config.onebot.host,
             config.onebot.port,
         ),
@@ -130,15 +132,15 @@ def main() -> int:
 
 def runtime_ready(data: dict[str, object]) -> bool:
     return bool(data.get("qq_bot_listening")) and bool(
-        data.get("napcat_to_bot_established")
+        data.get("connector_to_bot_established")
     )
 
 
 def runtime_summary(data: dict[str, object]) -> dict[str, object]:
     return {
         "qq_bot_listening": bool(data.get("qq_bot_listening")),
-        "napcat_webui_listening": bool(data.get("napcat_webui_listening")),
-        "napcat_to_bot_established": bool(data.get("napcat_to_bot_established")),
+        "connector_webui_listening": bool(data.get("connector_webui_listening")),
+        "connector_to_bot_established": bool(data.get("connector_to_bot_established")),
         "ready": runtime_ready(data),
         "historical_tts": data.get("historical_tts", "inspection_unavailable"),
         "tts_rollback_packages": data.get("tts_rollback_packages", []),

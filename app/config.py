@@ -30,7 +30,6 @@ from app.models import (
     MarketProviderConfig,
     MarketsConfig,
     ModelConfig,
-    NewsConfig,
     OneBotConfig,
     PersonaConfig,
     PresenceConfig,
@@ -43,7 +42,6 @@ from app.models import (
     StyleProfileConfig,
     UsageRankingReportConfig,
     USAGE_RANKING_SEND_TIME,
-    VideoConfig,
 )
 
 
@@ -67,8 +65,6 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     logging = raw["logging"]
     conversation_sessions = _config_block(raw, "conversationSessions")
     retry = _config_block(raw, "retry")
-    video = _config_block(raw, "video")
-    news = _config_block(raw, "news")
     codex_runway = _config_block(raw, "codexRunway")
     usage_ranking_report = _config_block(raw, "usageRankingReport")
     markets = _config_block(raw, "markets")
@@ -167,8 +163,6 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         ),
         conversation_sessions=_load_conversation_sessions_config(conversation_sessions),
         retry=_load_retry_config(retry),
-        video=_load_video_config(video),
-        news=_load_news_config(news),
         codex_runway=_load_codex_runway_config(codex_runway),
         usage_ranking_report=_load_usage_ranking_report_config(
             usage_ranking_report
@@ -286,92 +280,6 @@ def _load_retry_config(raw: dict[str, Any]) -> RetryConfig:
     return config
 
 
-def _load_video_config(raw: dict[str, Any]) -> VideoConfig:
-    max_bytes = raw.get("qqVideoMaxBytes")
-    config = VideoConfig(
-        enabled=bool(raw.get("enabled", False)),
-        host_cache_path=str(raw.get("hostCachePath", "runtime_artifacts/video-cache")),
-        container_cache_path=str(
-            raw.get("containerCachePath", "/path/in/container/qq-bot-media")
-        ),
-        per_message_concurrency=int(raw.get("perMessageConcurrency", 3)),
-        global_concurrency=int(raw.get("globalConcurrency", 6)),
-        download_timeout_seconds=float(raw.get("downloadTimeoutSeconds", 300.0)),
-        send_timeout_seconds=float(raw.get("sendTimeoutSeconds", 90.0)),
-        qq_video_max_bytes=int(max_bytes) if max_bytes is not None else None,
-        min_free_bytes=int(raw.get("minFreeBytes", 0)),
-        http_proxy_env=str(
-            raw.get("httpProxyEnv", "QQ_BOT_VIDEO_HTTP_PROXY")
-        ).strip(),
-        socks_proxy_env=str(
-            raw.get("socksProxyEnv", "QQ_BOT_VIDEO_SOCKS_PROXY")
-        ).strip(),
-        cookie_file_env=str(
-            raw.get("cookieFileEnv", "QQ_BOT_VIDEO_COOKIE_FILE")
-        ).strip(),
-        progress_threshold_seconds=float(raw.get("progressThresholdSeconds", 1.0)),
-        domain_failure_threshold=int(raw.get("domainFailureThreshold", 2)),
-        domain_recovery_seconds=float(raw.get("domainRecoverySeconds", 120.0)),
-        canonical_url_cache_seconds=float(raw.get("canonicalUrlCacheSeconds", 3600.0)),
-        backoff_jitter_seconds=float(raw.get("backoffJitterSeconds", 0.5)),
-    )
-    if not config.host_cache_path.strip() or not config.container_cache_path.strip():
-        raise ValueError("video cache paths must not be empty")
-    if config.per_message_concurrency <= 0 or config.global_concurrency <= 0:
-        raise ValueError("video concurrency must be positive")
-    if config.global_concurrency < config.per_message_concurrency:
-        raise ValueError("video.globalConcurrency must be at least perMessageConcurrency")
-    if config.download_timeout_seconds <= 0 or config.send_timeout_seconds <= 0:
-        raise ValueError("video timeouts must be positive")
-    if config.qq_video_max_bytes is not None and config.qq_video_max_bytes <= 0:
-        raise ValueError("video.qqVideoMaxBytes must be positive when configured")
-    if config.min_free_bytes < 0:
-        raise ValueError("video.minFreeBytes must be non-negative")
-    if not all(
-        (config.http_proxy_env, config.socks_proxy_env, config.cookie_file_env)
-    ):
-        raise ValueError("video environment variable names must not be empty")
-    if config.progress_threshold_seconds < 0:
-        raise ValueError("video.progressThresholdSeconds must be non-negative")
-    if config.domain_failure_threshold <= 0:
-        raise ValueError("video.domainFailureThreshold must be positive")
-    if config.domain_recovery_seconds <= 0:
-        raise ValueError("video.domainRecoverySeconds must be positive")
-    if config.canonical_url_cache_seconds <= 0:
-        raise ValueError("video.canonicalUrlCacheSeconds must be positive")
-    if config.backoff_jitter_seconds < 0:
-        raise ValueError("video.backoffJitterSeconds must be non-negative")
-    return config
-
-
-def _load_news_config(raw: dict[str, Any]) -> NewsConfig:
-    raw_feeds = raw.get("feeds", {})
-    if not isinstance(raw_feeds, dict):
-        raise ValueError("news.feeds must be an object")
-    feeds = {
-        str(category): tuple(str(url) for url in urls)
-        for category, urls in raw_feeds.items()
-    }
-    if not feeds:
-        feeds = NewsConfig().feeds
-    config = NewsConfig(
-        enabled=bool(raw.get("enabled", False)),
-        default_time=str(raw.get("defaultTime", "08:00")),
-        timezone=str(raw.get("timezone", "Asia/Shanghai")),
-        feeds=feeds,
-    )
-    if not _is_hhmm(config.default_time):
-        raise ValueError("news.defaultTime must use HH:MM")
-    supported_categories = {"politics", "business", "technology", "finance"}
-    unsupported_categories = set(config.feeds) - supported_categories
-    if unsupported_categories:
-        raise ValueError(
-            "news.feeds contains unsupported category: "
-            + ", ".join(sorted(unsupported_categories))
-        )
-    return config
-
-
 def _load_codex_runway_config(raw: dict[str, Any]) -> CodexRunwayConfig:
     config = CodexRunwayConfig(
         enabled=bool(raw.get("enabled", False)),
@@ -425,7 +333,7 @@ def _load_usage_ranking_report_config(
         timezone="Asia/Shanghai",
         limit=int(raw.get("limit", 50)),
         request_timeout_seconds=float(raw.get("requestTimeoutSeconds", 20.0)),
-        base_url=str(raw.get("baseUrl", "https://api.example.com"))
+        base_url=str(raw.get("baseUrl", "https://cf.silhouette.ltd"))
         .strip()
         .rstrip("/"),
         refresh_token_path=str(
@@ -455,7 +363,7 @@ def _load_usage_ranking_report_config(
         raise ValueError("usageRankingReport.limit must be between 1 and 50")
     if config.request_timeout_seconds <= 0:
         raise ValueError("usageRankingReport.requestTimeoutSeconds must be positive")
-    if config.base_url != "https://api.example.com":
+    if config.base_url != "https://cf.silhouette.ltd":
         raise ValueError("usageRankingReport.baseUrl must use the fixed HTTPS host")
     _validate_runtime_artifact_path(
         config.refresh_token_path,
