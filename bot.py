@@ -36,10 +36,14 @@ async def _stop_model_endpoint_probes() -> None:
     await stop_model_endpoint_probe_workers()
 
 
-nonebot.load_plugin("app.plugins.private_chat")
-nonebot.load_plugin("app.plugins.group_chat")
-nonebot.load_plugin("app.plugins.group_reactions")
-nonebot.load_plugin("app.plugins.owner_commands")
+for required_plugin in (
+    "app.plugins.private_chat",
+    "app.plugins.group_chat",
+    "app.plugins.group_reactions",
+    "app.plugins.owner_commands",
+):
+    if nonebot.load_plugin(required_plugin) is None:
+        raise RuntimeError(f"Required Bot plugin failed to load: {required_plugin}")
 
 
 if __name__ == "__main__":

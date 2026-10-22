@@ -38,6 +38,7 @@ WORKDIR /app/qq_bot
 COPY pyproject.toml /app/qq_bot/pyproject.toml
 COPY app /app/qq_bot/app
 COPY bot.py /app/qq_bot/bot.py
+COPY tools /app/qq_bot/tools
 
 RUN /opt/qqbot-venv/bin/python -m pip install --no-cache-dir --upgrade pip \
     && /opt/qqbot-venv/bin/pip install --no-cache-dir '.[market,dashboard]'

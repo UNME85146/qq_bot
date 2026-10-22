@@ -43,7 +43,7 @@
   },
   "persona": {
     "mode": "history_derived_character",
-    "profilePath": "persona_profile.local.json"
+    "profilePath": "persona_profile.example.json"
   },
   "reply": {
     "privateAlwaysReply": true,
@@ -113,7 +113,7 @@
     "lookbackSeconds": 36000,
     "requestTimeoutSeconds": 20,
     "maxItems": 5,
-    "statusUrl": "https://www.codexrunway.com/api/status.json"
+    "statusUrl": "https://didcodexreset.com/api/status.json"
   },
   "usageRankingReport": {
     "enabled": false,

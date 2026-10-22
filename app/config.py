@@ -22,6 +22,7 @@ from app.models import (
     AppConfig,
     BehaviorProfileConfig,
     CODEX_RUNWAY_INTERVAL_SECONDS,
+    CODEX_RUNWAY_STATUS_URL,
     CodexRunwayConfig,
     ConversationSessionsConfig,
     ImageGenerationConfig,
@@ -305,6 +306,9 @@ def _load_retry_config(raw: dict[str, Any]) -> RetryConfig:
 
 
 def _load_codex_runway_config(raw: dict[str, Any]) -> CodexRunwayConfig:
+    status_url = str(raw.get("statusUrl", CODEX_RUNWAY_STATUS_URL)).strip()
+    if status_url == "https://www.codexrunway.com/api/status.json":
+        status_url = CODEX_RUNWAY_STATUS_URL
     config = CodexRunwayConfig(
         enabled=bool(raw.get("enabled", False)),
         recipient_user_id=str(raw.get("recipientUserId", "")).strip(),
@@ -315,12 +319,7 @@ def _load_codex_runway_config(raw: dict[str, Any]) -> CodexRunwayConfig:
         max_items=int(raw.get("maxItems", 5)),
         excerpt_chars=int(raw.get("excerptChars", 160)),
         max_message_chars=int(raw.get("maxMessageChars", 1800)),
-        status_url=str(
-            raw.get(
-                "statusUrl",
-                "https://www.codexrunway.com/api/status.json",
-            )
-        ).strip(),
+        status_url=status_url,
     )
     if config.enabled and not re.fullmatch(r"\d+", config.recipient_user_id):
         raise ValueError(
@@ -342,7 +341,7 @@ def _load_codex_runway_config(raw: dict[str, Any]) -> CodexRunwayConfig:
         raise ValueError("codexRunway.excerptChars must be between 60 and 500")
     if not 500 <= config.max_message_chars <= 4000:
         raise ValueError("codexRunway.maxMessageChars must be between 500 and 4000")
-    if config.status_url != "https://www.codexrunway.com/api/status.json":
+    if config.status_url != CODEX_RUNWAY_STATUS_URL:
         raise ValueError("codexRunway.statusUrl must use the official HTTPS endpoint")
     return config
 

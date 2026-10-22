@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 
 CODEX_RUNWAY_INTERVAL_SECONDS = 21_600
+CODEX_RUNWAY_STATUS_URL = "https://didcodexreset.com/api/status.json"
 USAGE_RANKING_SEND_TIME = "17:15"
 
 
@@ -391,7 +392,7 @@ class CodexRunwayConfig:
     # Legacy display limits retained for config compatibility and ignored by the monitor.
     excerpt_chars: int = 160
     max_message_chars: int = 1800
-    status_url: str = "https://www.codexrunway.com/api/status.json"
+    status_url: str = CODEX_RUNWAY_STATUS_URL
 
 
 @dataclass(frozen=True)
